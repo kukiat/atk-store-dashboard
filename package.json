@@ -1,0 +1,16 @@
+{
+  "name": "atk-store-dashboard",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "bun run --filter '*' dev",
+    "dev:web": "bun run --filter '@atk-store-dashboard/web' dev",
+    "dev:api": "bun run --filter '@atk-store-dashboard/api' dev",
+    "build": "bun run --filter '@atk-store-dashboard/web' build"
+  }
+}
