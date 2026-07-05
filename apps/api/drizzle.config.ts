@@ -2,7 +2,7 @@ import { defineConfig } from "drizzle-kit";
 
 export default defineConfig({
   dialect: "postgresql",
-  schema: "./src/db/schema/*",
+  schema: "./src/db/schema/index.ts",
   out: "./drizzle",
   // Database-first: restrict introspection (`drizzle-kit pull`) to the auth schema.
   schemaFilter: ["auth"],

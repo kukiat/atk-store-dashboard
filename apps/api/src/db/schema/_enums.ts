@@ -1,0 +1,24 @@
+import { authSchema } from "./_schema";
+
+export const attendanceDirectionEnum = authSchema.enum("attendance_direction", ['entry', 'exit', 'sighting']);
+export const attendanceRecognitionDecisionEnum = authSchema.enum("attendance_recognition_decision", ['recognized', 'unknown', 'ignored']);
+export const authMethodEnum = authSchema.enum("auth_method", ['google', 'facebook', 'line', 'apple', 'credentials']);
+export const clientVisitStatusEnum = authSchema.enum("client_visit_status", ['inside', 'exited', 'unknown_exit']);
+export const faceEnrollmentStatusEnum = authSchema.enum("face_enrollment_status", ['not_registered', 'pending', 'registered']);
+export const faceLivenessIntentEnum = authSchema.enum("face_liveness_intent", ['enrollment', 'verification']);
+export const faceRecognitionOutcomeEnum = authSchema.enum("face_recognition_outcome", ['registered', 'verified', 'mismatch', 'duplicate', 'not_indexed']);
+export const livenessAttemptStatusEnum = authSchema.enum("liveness_attempt_status", ['pending', 'succeeded', 'failed', 'expired', 'cancelled']);
+export const notificationRecipientTypeEnum = authSchema.enum("notification_recipient_type", ['client', 'admin', 'super_admin']);
+export const notificationSeverityEnum = authSchema.enum("notification_severity", ['info', 'warning', 'error']);
+export const orderPaymentMethodEnum = authSchema.enum("order_payment_method", ['wallet']);
+export const orderStatusEnum = authSchema.enum("order_status", ['pending', 'paid', 'failed', 'cancelled']);
+export const paymentStatusEnum = authSchema.enum("payment_status", ['pending', 'paid', 'failed', 'cancelled']);
+export const roleGrantStatusEnum = authSchema.enum("role_grant_status", ['pending', 'accepted', 'revoked']);
+export const stripeWebhookProcessingStatusEnum = authSchema.enum("stripe_webhook_processing_status", ['processing', 'processed', 'ignored', 'failed']);
+export const userAccountStatusEnum = authSchema.enum("user_account_status", ['active', 'blocked', 'disabled']);
+export const walletFundingChannelEnum = authSchema.enum("wallet_funding_channel", ['card', 'promptpay']);
+export const walletFundingProviderEnum = authSchema.enum("wallet_funding_provider", ['stripe']);
+export const walletLedgerDirectionEnum = authSchema.enum("wallet_ledger_direction", ['credit', 'debit']);
+export const walletLedgerTypeEnum = authSchema.enum("wallet_ledger_type", ['topup_credit', 'order_debit', 'adjustment_credit', 'adjustment_debit']);
+export const walletStatusEnum = authSchema.enum("wallet_status", ['active', 'suspended', 'closed']);
+export const walletTopupStatusEnum = authSchema.enum("wallet_topup_status", ['created', 'checkout_open', 'paid', 'failed', 'cancelled']);

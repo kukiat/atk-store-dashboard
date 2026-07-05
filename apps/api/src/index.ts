@@ -2,7 +2,8 @@ import { Elysia } from "elysia";
 import { cors } from "@elysiajs/cors";
 import { swagger } from "@elysiajs/swagger";
 import { API_VERSION } from "@atk-store-dashboard/shared";
-import { groupsRoutes } from "./modules/groups/groups.routes";
+import { groupsPlugin } from "./modules/groups";
+import { shelfsPlugin } from "./modules/shelfs";
 
 const port = Number(process.env.PORT ?? 3004);
 
@@ -21,7 +22,8 @@ const app = new Elysia()
     version: API_VERSION,
     timestamp: new Date().toISOString(),
   }))
-  .use(groupsRoutes)
+  .use(groupsPlugin)
+  .use(shelfsPlugin)
   .listen(port);
 
 console.log(`api listening on http://localhost:${port}`);
