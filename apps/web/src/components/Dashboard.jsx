@@ -69,6 +69,19 @@ const OFFLINE_SHELVES = new Set(
   SHELVES.map(([, , on], i) => (on ? null : i + 1)).filter(Boolean)
 );
 
+// shelf lock mirror (V5): the scene owns the state and streams transitions up
+// via onShelfEvent; this map only drives the UI chips. Offline shelves can't
+// unlock — mirrors the scene's amber-LED rule.
+const LOCK_INIT = Object.fromEntries(
+  SHELVES.map(([, , on], i) => [i + 1, on ? 'locked' : 'offline'])
+);
+const LOCK_LABEL = { locked: 'Locked', open: 'Open', offline: 'Offline' };
+const LOCK_EVENT_META = {
+  unlocked: { lvl: 'ok', title: 'Shelf Unlocked', ico: '🔓' },
+  relocked: { lvl: 'info', title: 'Shelf Re-locked', ico: '🔒' },
+  scan_ok: { lvl: 'ok', title: 'Access Granted', ico: '📱' },
+};
+
 // Live-stock catalogue. `shelf` (1–6) maps to the zones in smartStore.js / the
 // SHELF LIST below. `qty` / `reorder` are derived at init from `capacity`.
 const STOCK_CATALOGUE = [
@@ -126,7 +139,7 @@ const BOTTOM = [
 // `sceneFactory(container, { onSelectShelf }) => { dispose, selectShelf }` lets
 // V4 (Three.js) and V5 (Babylon.js) share the exact same dashboard chrome —
 // only the engine driving the center stage differs.
-function StoreStage({ selectedShelf, selectedPerson, onSelectShelf, onSelectPerson, sceneFactory, onController, defer = false, onReady }) {
+function StoreStage({ selectedShelf, selectedPerson, onSelectShelf, onSelectPerson, onShelfEvent, sceneFactory, onController, defer = false, onReady }) {
   const ref = useRef(null);
   const ctrlRef = useRef(null);
 
@@ -137,7 +150,7 @@ function StoreStage({ selectedShelf, selectedPerson, onSelectShelf, onSelectPers
     const create = () => {
       if (controller) return; // double-rAF and the timeout fallback can race
       controller = { dispose() {}, selectShelf() {} };
-      try { controller = sceneFactory(container, { onSelectShelf, onSelectPerson, onReady }); }
+      try { controller = sceneFactory(container, { onSelectShelf, onSelectPerson, onReady, onShelfEvent }); }
       catch (e) { console.error('[storeStage] scene factory failed:', e); onReady?.(); }
       ctrlRef.current = controller;
       onController?.(controller);
@@ -161,7 +174,7 @@ function StoreStage({ selectedShelf, selectedPerson, onSelectShelf, onSelectPers
       controller?.dispose(); ctrlRef.current = null; onController?.(null);
     };
     // created once; selection flows in via the sync effects below.
-  }, [onSelectShelf, onSelectPerson, sceneFactory, onController, defer, onReady]);
+  }, [onSelectShelf, onSelectPerson, onShelfEvent, sceneFactory, onController, defer, onReady]);
 
   // React owns the selection — push it into the scene to drive the outline.
   useEffect(() => {
@@ -237,7 +250,7 @@ function StockRow({ item }) {
 // Mirrors V3's detail card: a small <dl> summary that opens when a shelf is
 // focused. Content is V4-native — the full item list lives in LIVE STOCK.
 function ShelfDetailCard({ detail, onClose }) {
-  const { id, name, online, items } = detail;
+  const { id, name, online, lock, items } = detail;
   const totalQty = items.reduce((s, it) => s + it.qty, 0);
   const totalCap = items.reduce((s, it) => s + it.capacity, 0);
   const low = items.filter((it) => statusOf(it.qty, it.reorder) === 'low').length;
@@ -251,6 +264,7 @@ function ShelfDetailCard({ detail, onClose }) {
       </div>
       <dl className="detail-rows">
         <dt>Status</dt><dd>{online ? 'Online' : 'Offline'}</dd>
+        {lock && <><dt>Lock</dt><dd><span className={`lock-txt ${lock}`}>{lock === 'open' ? '🔓 ' : '🔒 '}{LOCK_LABEL[lock]}</span></dd></>}
         <dt>Products</dt><dd>{items.length}</dd>
         <dt>Stock</dt><dd>{totalQty} / {totalCap}</dd>
         <dt>Low / Out</dt><dd>{low} · {out}</dd>
@@ -263,7 +277,10 @@ function ShelfDetailCard({ detail, onClose }) {
 // The scene writes this wrapper's transform every frame (world → screen
 // projection, clamped to the stage edges) — React only renders the content,
 // refreshed at 2 Hz from the sim while a person is selected.
-const PERSON_STATUS = { walking: 'Walking', leaving: 'Leaving', browsing: 'Browsing' };
+const PERSON_STATUS = {
+  walking: 'Walking', paying: 'Paying', leaving: 'Leaving',
+  browsing: 'Browsing', scanning: 'Scanning', verifying: 'Verifying',
+};
 const fmtDur = (s) => `${Math.floor(s / 60)}m ${String(Math.floor(s % 60)).padStart(2, '0')}s`;
 
 function PersonDetailCard({ person, onClose, bindEl }) {
@@ -282,7 +299,7 @@ function PersonDetailCard({ person, onClose, bindEl }) {
           <dt>Status</dt><dd>{PERSON_STATUS[person.status]}</dd>
           <dt>Near</dt><dd>{SHELF_NAME[person.near]} ({String(person.near).padStart(2, '0')})</dd>
           <dt>In store</dt><dd>{fmtDur(person.inStoreSec)}</dd>
-          {person.kind === 'picker' && <><dt>Items picked</dt><dd>{person.picks}</dd></>}
+          <dt>Items picked</dt><dd>{person.picks}</dd>
         </dl>
       </div>
     </div>
@@ -290,10 +307,10 @@ function PersonDetailCard({ person, onClose, bindEl }) {
 }
 
 /* ---------- customers card (V5 only — everyone currently in the store) ---------- */
-// Rows group by status (browsing → walking → leaving); within a group the id
+// Rows group by status (at-shelf → walking → gates); within a group the id
 // order is stable so rows only move when someone actually changes status, and
 // that move is FLIP-animated. Clicking a row focuses the person in 3D.
-const STATUS_ORDER = { browsing: 0, walking: 1, leaving: 2 };
+const STATUS_ORDER = { scanning: 0, browsing: 1, walking: 2, verifying: 3, paying: 4, leaving: 5 };
 
 function CustomersCard({ peopleRef, crowd, selectedPerson, onSelect }) {
   const [list, setList] = useState([]);
@@ -412,21 +429,37 @@ export default function Dashboard({ sceneFactory = createSmartStoreScene, deferS
     });
   }, { scope: rootRef, dependencies: [booting] });
 
-  // crowd steppers — only rendered when the scene exposes a `people` API (V5).
+  // crowd stepper — only rendered when the scene exposes a `people` API (V5).
   const peopleRef = useRef(null);
-  const [crowd, setCrowd] = useState(null); // { walkers, pickers, maxTotal } or null
+  const [crowd, setCrowd] = useState(null); // { total, walking, browsing, maxTotal } or null
+
+  // shelf lock mirror — see LOCK_INIT; scene → onShelfEvent → here.
+  const [locksLive, setLocksLive] = useState(false);
+  const [shelfLockMap, setShelfLockMap] = useState(LOCK_INIT);
   const handleController = useCallback((ctrl) => {
     peopleRef.current = ctrl?.people ?? null;
     setCrowd(ctrl?.people ? { ...ctrl.people.counts(), maxTotal: ctrl.people.maxTotal } : null);
+    // lock UI only renders when the scene actually simulates locks (V5)
+    setLocksLive(!!ctrl?.locks);
+    setShelfLockMap(ctrl?.locks
+      ? Object.fromEntries(ctrl.locks.states().map((s) => [s.id, s.state]))
+      : LOCK_INIT);
   }, []);
-  const changeCrowd = useCallback((kind, delta) => {
+  const changeCrowd = useCallback((delta) => {
     const api = peopleRef.current;
     if (!api) return;
-    const fn = delta > 0
-      ? (kind === 'walkers' ? api.addWalker : api.addPicker)
-      : (kind === 'walkers' ? api.removeWalker : api.removePicker);
-    const count = fn();
-    setCrowd((c) => ({ ...c, [kind]: count }));
+    const total = delta > 0 ? api.add() : api.remove();
+    setCrowd((c) => ({ ...c, total }));
+  }, []);
+  // walking/browsing are outcomes of the sim (shoppers decide for themselves
+  // when to stop at a shelf), so the live labels poll instead of tracking
+  // stepper presses. No-ops until the V5 scene hands over its people API.
+  useEffect(() => {
+    const t = setInterval(() => {
+      const c = peopleRef.current?.counts?.();
+      if (c) setCrowd((prev) => (prev ? { ...prev, ...c } : prev));
+    }, 1000);
+    return () => clearInterval(t);
   }, []);
 
   // selected shelf (1–6) drives the stock filter; null = show all shelves.
@@ -472,6 +505,21 @@ export default function Dashboard({ sceneFactory = createSmartStoreScene, deferS
   const [alerts, setAlerts] = useState(SEED_ALERTS);
   const stockRef = useRef(stock);
   stockRef.current = stock;
+
+  // shelf lock events from the scene: mirror the state map + drop a live
+  // entry into the alert feed (info-level — scans are routine, not warnings).
+  const handleShelfEvent = useCallback((ev) => {
+    if (ev.type === 'unlocked') setShelfLockMap((m) => ({ ...m, [ev.shelfId]: 'open' }));
+    else if (ev.type === 'relocked') setShelfLockMap((m) => ({ ...m, [ev.shelfId]: 'locked' }));
+    const meta = LOCK_EVENT_META[ev.type];
+    if (!meta) return;
+    setAlerts((a) => [{
+      id: `a${alertSeq++}`,
+      ...meta,
+      sub: `${SHELF_NAME[ev.shelfId]} (${String(ev.shelfId).padStart(2, '0')})`,
+      time: fmtTime(new Date()),
+    }, ...a].slice(0, 6));
+  }, []);
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -519,6 +567,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreScene, deferS
         id: String(selectedShelf).padStart(2, '0'),
         name: SHELF_NAME[selectedShelf],
         online: !OFFLINE_SHELVES.has(selectedShelf),
+        lock: locksLive ? shelfLockMap[selectedShelf] : null,
         items: stock.filter((s) => s.shelf === selectedShelf),
       }
     : null;
@@ -570,7 +619,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreScene, deferS
           {crowd && (
             <CustomersCard
               peopleRef={peopleRef}
-              crowd={crowd}
+              crowd={crowd.total}
               selectedPerson={selectedPerson}
               onSelect={handleSelectPersonFromList}
             />
@@ -603,6 +652,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreScene, deferS
             selectedPerson={selectedPerson}
             onSelectShelf={handleSelectShelf}
             onSelectPerson={handleSelectPerson}
+            onShelfEvent={handleShelfEvent}
             sceneFactory={sceneFactory}
             onController={handleController}
             defer={deferScene}
@@ -629,15 +679,16 @@ export default function Dashboard({ sceneFactory = createSmartStoreScene, deferS
             </div>
             {crowd && (
               <>
-                <span className="fc-label crowd-label">PEOPLE {crowd.walkers + crowd.pickers}/{crowd.maxTotal}</span>
-                {[['walkers', 'WALKING'], ['pickers', 'BROWSING']].map(([kind, label]) => (
-                  <div className="crowd-stepper" key={kind}>
-                    <span className="cs-name">{label}</span>
-                    <button onClick={() => changeCrowd(kind, -1)} disabled={crowd[kind] <= 0}>−</button>
-                    <span className="cs-count">{crowd[kind]}</span>
-                    <button onClick={() => changeCrowd(kind, +1)} disabled={crowd.walkers + crowd.pickers >= crowd.maxTotal}>+</button>
-                  </div>
-                ))}
+                <div className="crowd-stepper">
+                  <span className="cs-name">PEOPLE</span>
+                  <button onClick={() => changeCrowd(-1)} disabled={crowd.total <= 0}>−</button>
+                  <span className="cs-count">{crowd.total}</span>
+                  <button onClick={() => changeCrowd(+1)} disabled={crowd.total >= crowd.maxTotal}>+</button>
+                </div>
+                {/* live mix — read-only: the shoppers decide when to browse */}
+                <span className="fc-label crowd-label">
+                  WALKING {crowd.walking} · BROWSING {crowd.browsing}
+                </span>
               </>
             )}
           </div>
@@ -664,6 +715,11 @@ export default function Dashboard({ sceneFactory = createSmartStoreScene, deferS
                   onClick={() => handleSelectShelf(i + 1)}
                 >
                   <span className="sl-id">{id}</span> {name}
+                  {locksLive && (
+                    <span className={`sl-lock ${shelfLockMap[i + 1]}`}>
+                      {shelfLockMap[i + 1] === 'open' ? 'OPEN' : shelfLockMap[i + 1] === 'offline' ? 'N/A' : 'LOCKED'}
+                    </span>
+                  )}
                   <span className={`sl-state ${on ? 'on' : 'off'}`}>{on ? 'Online' : 'Offline'}</span>
                 </li>
               ))}
@@ -698,7 +754,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreScene, deferS
             <ul className="alerts">
               {alerts.map((al) => (
                 <li key={al.id}>
-                  <span className={`al-ico ${al.lvl}`}>⚠</span>
+                  <span className={`al-ico ${al.lvl}`}>{al.ico || '⚠'}</span>
                   <div className="al-body"><b>{al.title}</b><span>{al.sub}</span></div>
                   <span className="al-time">{al.time}</span>
                 </li>

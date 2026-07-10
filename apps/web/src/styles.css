@@ -332,7 +332,10 @@ canvas { display: block; }
 .cust-sub { color: #6f86b8; font-size: 10px; margin-top: 1px; }
 .cust-pill { flex: none; font-size: 9px; font-weight: 700; letter-spacing: .06em; padding: 2px 7px; border-radius: 999px; }
 .cust-pill.browsing { background: rgba(76,175,114,.15); color: #4caf72; }
+.cust-pill.scanning { background: rgba(176,124,219,.15); color: #b07cdb; }
 .cust-pill.walking { background: rgba(53,195,255,.15); color: #35c3ff; }
+.cust-pill.verifying { background: rgba(159,230,255,.15); color: #9fe6ff; }
+.cust-pill.paying { background: rgba(55,194,201,.15); color: #37c2c9; }
 .cust-pill.leaving { background: rgba(239,178,58,.15); color: #efb23a; }
 
 /* environment */
@@ -400,6 +403,15 @@ canvas { display: block; }
 .sl-id { color: #5e76a8; width: 26px; }
 .sl-state { margin-left: auto; font-size: 12px; }
 .sl-state.on { color: #4caf72; } .sl-state.off { color: #e2574c; }
+/* shelf lock chips (V5 — mirrors the 3D LED colors) */
+.sl-lock { margin-left: auto; font-size: 9px; letter-spacing: .07em; font-weight: 700; padding: 1.5px 6px; border-radius: 4px; flex: none; }
+.sl-lock + .sl-state { margin-left: 8px; }
+.sl-lock.locked { background: rgba(226,87,76,.14); color: #e2574c; }
+.sl-lock.open { background: rgba(76,175,114,.16); color: #4caf72; }
+.sl-lock.offline { background: rgba(239,178,58,.14); color: #efb23a; }
+.lock-txt.locked { color: #e2574c; }
+.lock-txt.open { color: #4caf72; }
+.lock-txt.offline { color: #efb23a; }
 .view-all { display: inline-block; margin-top: 12px; color: var(--accent); font-size: 12px; cursor: pointer; }
 .view-all.sm { margin: 0; font-size: 11px; }
 
@@ -446,6 +458,8 @@ canvas { display: block; }
 .al-ico { width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; font-size: 13px; flex: none; }
 .al-ico.warn { background: rgba(226,87,76,.15); color: #e2574c; }
 .al-ico.caution { background: rgba(239,178,58,.15); color: #efb23a; }
+.al-ico.ok { background: rgba(76,175,114,.15); color: #4caf72; }
+.al-ico.info { background: rgba(53,195,255,.14); color: #35c3ff; }
 .al-body { display: flex; flex-direction: column; }
 .al-body b { color: #eaf6ff; font-size: 12px; font-weight: 600; }
 .al-body span { color: #6f86b8; font-size: 11px; }

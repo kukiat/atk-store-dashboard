@@ -5,7 +5,8 @@
       "name": "web",
       "runtimeExecutable": "bun",
       "runtimeArgs": ["run", "dev:web"],
-      "port": 3003
+      "port": 3003,
+      "autoPort": true
     }
   ]
 }
