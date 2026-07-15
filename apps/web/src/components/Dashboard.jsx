@@ -387,6 +387,13 @@ function CustomersCard({ peopleRef, crowd, selectedPerson, onSelect, shelfName }
     });
   }, [list]);
 
+  // one row per customer: while a body is still on the floor (walking out
+  // after a pay pass, retreating after a verify fail) the API may already say
+  // `outside` — the live row wins until the body despawns, so the Exited row
+  // for the same person never shows alongside it.
+  const liveApiIds = new Set(list.map((p) => p.apiId).filter((v) => v != null));
+  const shownOutside = outside.filter((u) => !liveApiIds.has(u.id));
+
   return (
     <section className="card">
       <div className="card-head">
@@ -394,7 +401,7 @@ function CustomersCard({ peopleRef, crowd, selectedPerson, onSelect, shelfName }
         <span className="pill">{list.length} in store</span>
       </div>
       <ul className="cust-list" ref={ulRef}>
-        {list.length || outside.length ? (
+        {list.length || shownOutside.length ? (
           <>
             {list.map((p) => (
               <li
@@ -424,7 +431,7 @@ function CustomersCard({ peopleRef, crowd, selectedPerson, onSelect, shelfName }
             ))}
             {/* exited customers (API `outside`) — always at the tail, dimmed and
                 non-clickable: there's no 3D body to focus. Email shows inline. */}
-            {outside.map((u) => (
+            {shownOutside.map((u) => (
               <li
                 key={`out-${u.id}`}
                 data-flip-id={`cust-out-${u.id}`}

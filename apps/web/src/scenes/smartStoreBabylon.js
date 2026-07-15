@@ -1267,7 +1267,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     return {
       id, custNo: e.custNo, name: e.name, initials: e.initials, color: e.color,
       avatarUrl: e.avatarUrl, email: e.email,
-      kind: e.kind, status, near, picks, api: e.apiId != null,
+      kind: e.kind, status, near, picks, api: e.apiId != null, apiId: e.apiId ?? null,
       inStoreSec: Math.max(0, Math.floor(elapsed - e.spawnT)),
     };
   }
@@ -2126,6 +2126,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     for (const p of shoppers) if (p.person?.apiId === apiId) return p;
     return null;
   }
+  // enter that arrived while the same customer's old body was still animating
+  // out (walk-out after pay, retreat after verify fail) parks here instead of
+  // being dropped — dropping it wedged the user invisible: the API said
+  // `waiting` but no body ever queued and no row rendered. The frame loop
+  // spawns the entry the moment the old body despawns; a verify verdict that
+  // lands while parked rides along (`verdict`) or cancels the entry (fail).
+  const pendingReenters = new Map(); // apiId → { u, verdict? }
   // POST /users → a brand-new customer (status `waiting`) appears at the
   // storefront and HOLDS at the scanner for a verify verdict, exactly like
   // enter — not a walk-straight-in. They queue behind any existing line and
@@ -2137,6 +2144,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // DELETE /users/:id → fade out in place (no walk-out); customers still in a
   // queue (gate or unconsumed roster) just never materialise
   function apiRemoveUser(id) {
+    pendingReenters.delete(id); // parked entry never materialises (old body, if any, fades below)
     const qi = pendingApiEntries.findIndex((i) => i.apiId === id);
     if (qi >= 0) { pendingApiEntries.splice(qi, 1); return; }
     for (let i = rosterIdx; i < users.length; i++) {
@@ -2152,6 +2160,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // PATCH /users/:id → names refresh live; a gender change respawns the same
   // customer in place with a new gender-matched body
   function apiUpdateUser(u) {
+    const pend = pendingReenters.get(u.id);
+    if (pend) pend.u = u; // parked entry spawns with the fresh identity; the old body below still refreshes too
     const q = pendingApiEntries.find((i) => i.apiId === u.id);
     if (q) { Object.assign(q, identFromUser(u)); return; }
     for (let i = rosterIdx; i < users.length; i++) {
@@ -2227,7 +2237,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // arrives — no self-scan like ambient walk-ins. Long lines stack visibly
   // out the door: each spawn starts behind the current tail.
   function apiEnterUser(u) {
-    if (shopperByApiId(u.id)) return; // body still on the floor (race) — skip
+    if (shopperByApiId(u.id)) { pendingReenters.set(u.id, { u }); return; } // old body still leaving — respawn on despawn
     for (let i = rosterIdx; i < users.length; i++) {
       if (users[i].id === u.id) { users.splice(i, 1); break; } // no double life
     }
@@ -2256,6 +2266,14 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     }
   }
   function apiVerifyUser(id, result) {
+    const pend = pendingReenters.get(id);
+    if (pend) {
+      // verdict landed before the parked entry ever spawned: fail turns them
+      // away sight-unseen, pass rides along and pre-approves the spawn
+      if (result === 'fail') pendingReenters.delete(id);
+      else pend.verdict = result;
+      return;
+    }
     const p = shopperByApiId(id);
     if (!p || !p.gateHold || p.fadeStart != null || p.done) return;
     if (entryGate.user === p) applyVerdict(p, result);
@@ -3198,6 +3216,15 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     }
     for (let i = shoppers.length - 1; i >= 0; i--) {
       if (shoppers[i].done) { disposeShopper(shoppers[i]); shoppers.splice(i, 1); }
+    }
+    // parked re-enters (enter fired while the old body was still leaving):
+    // spawn as soon as the floor is clear of that customer, carrying any
+    // verify verdict that arrived while parked (pass pre-approves the sweep)
+    for (const [id, pend] of pendingReenters) {
+      if (shopperByApiId(id)) continue; // old body still on the floor
+      pendingReenters.delete(id);
+      apiEnterUser(pend.u);
+      if (pend.verdict) apiVerifyUser(id, pend.verdict);
     }
 
     // auto sliding doors: glide open for anyone near the threshold
