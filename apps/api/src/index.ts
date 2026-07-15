@@ -4,11 +4,14 @@ import { swagger } from "@elysiajs/swagger";
 import { API_VERSION } from "@atk-store-dashboard/shared";
 import { groupsPlugin } from "./modules/groups";
 import { shelfsPlugin } from "./modules/shelfs";
+import { usersPlugin } from "./modules/users";
+import { crowdPlugin } from "./modules/crowd";
 
 const port = Number(process.env.PORT ?? 3004);
 
 const app = new Elysia()
-  .use(cors({ origin: "http://localhost:3003" }))
+  // any localhost port — Vite may auto-assign one when 3003 is taken
+  .use(cors({ origin: /^https?:\/\/localhost(:\d+)?$/ }))
   .use(
     swagger({
       path: "/swagger",
@@ -24,6 +27,8 @@ const app = new Elysia()
   }))
   .use(groupsPlugin)
   .use(shelfsPlugin)
+  .use(usersPlugin)
+  .use(crowdPlugin)
   .listen(port);
 
 console.log(`api listening on http://localhost:${port}`);

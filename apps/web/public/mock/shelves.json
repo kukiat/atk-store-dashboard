@@ -1,0 +1,91 @@
+{
+  "_readme": "Mock store layout — single source of truth for the dashboard AND the 3D scene. Each shelf: id (unique int, shown as the zone badge), type (wall | gondola | checkout), x/z world position, rotation in degrees, length in meters, online (false = amber LED, doors never unlock, stock frozen), items (qty/reorder are the live-stock starting values). Placement rules: shelves must not block the shoppers' walk loop or the robot lanes — the app validates on load and refuses the file if they do.",
+  "shelves": [
+    {
+      "id": 1,
+      "name": "Beverage Zone",
+      "type": "wall",
+      "x": -3,
+      "z": -13.4,
+      "rotation": 0,
+      "length": 16,
+      "online": true,
+      "items": [
+        { "id": "water",  "name": "Mineral Water", "color": "#5b8def", "capacity": 240, "qty": 168, "reorder": 60 },
+        { "id": "gtea",   "name": "Green Tea",     "color": "#4caf72", "capacity": 180, "qty": 126, "reorder": 45 },
+        { "id": "cola",   "name": "Cola",          "color": "#e2574c", "capacity": 200, "qty": 150, "reorder": 50 }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "Center Shelf A",
+      "type": "gondola",
+      "x": 1.5,
+      "z": 0,
+      "rotation": 0,
+      "length": 8,
+      "online": true,
+      "items": [
+        { "id": "noodle", "name": "Instant Noodles", "color": "#e8a33d", "capacity": 160, "qty": 120, "reorder": 40 },
+        { "id": "choco",  "name": "Chocolate Bar",   "color": "#b07cdb", "capacity": 140, "qty": 98,  "reorder": 35 }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Snacks Zone",
+      "type": "gondola",
+      "x": 13,
+      "z": -5,
+      "rotation": 270,
+      "length": 12,
+      "online": true,
+      "items": [
+        { "id": "chips", "name": "Potato Chips", "color": "#efb23a", "capacity": 120, "qty": 84, "reorder": 30 },
+        { "id": "pretz", "name": "Pretzels",     "color": "#d9a05b", "capacity": 110, "qty": 77, "reorder": 28 }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "Dairy & Juice",
+      "type": "gondola",
+      "x": -8.5,
+      "z": 4,
+      "rotation": 0,
+      "length": 9,
+      "online": true,
+      "items": [
+        { "id": "ojuice", "name": "Orange Juice", "color": "#f08a3c", "capacity": 150, "qty": 105, "reorder": 38 },
+        { "id": "milk",   "name": "Fresh Milk",   "color": "#dfe6f2", "capacity": 90,  "qty": 63,  "reorder": 23 },
+        { "id": "yogurt", "name": "Yogurt Cup",   "color": "#37c2c9", "capacity": 100, "qty": 70,  "reorder": 25 }
+      ]
+    },
+    {
+      "id": 5,
+      "name": "Fresh & Ready",
+      "type": "gondola",
+      "x": -6,
+      "z": 10,
+      "rotation": 90,
+      "length": 7,
+      "online": false,
+      "items": [
+        { "id": "sand",  "name": "Sandwich",     "color": "#e07baf", "capacity": 60, "qty": 42, "reorder": 15 },
+        { "id": "salad", "name": "Garden Salad", "color": "#6fcf6f", "capacity": 50, "qty": 20, "reorder": 13 }
+      ]
+    },
+    {
+      "id": 6,
+      "name": "Checkout Shelf",
+      "type": "checkout",
+      "x": 7,
+      "z": 9,
+      "rotation": 0,
+      "length": 5.5,
+      "online": true,
+      "items": [
+        { "id": "gum",    "name": "Chewing Gum",  "color": "#7ed0c3", "capacity": 80, "qty": 56, "reorder": 20 },
+        { "id": "energy", "name": "Energy Drink", "color": "#e2574c", "capacity": 90, "qty": 63, "reorder": 23 }
+      ]
+    }
+  ]
+}

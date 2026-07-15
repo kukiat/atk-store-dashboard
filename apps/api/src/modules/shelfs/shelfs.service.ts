@@ -1,70 +1,45 @@
 import { Elysia, status } from "elysia";
-import { and, desc, eq, isNull } from "drizzle-orm";
-import { db } from "../../db";
-import { shelfs } from "../../db/schema";
+import seed from "./seed.json";
 
-// Only expose public columns — never leak the internal `deleted_at` marker.
-const publicColumns = {
-  id: shelfs.id,
-  groupId: shelfs.groupId,
-  name: shelfs.name,
-  imageUrl: shelfs.imageUrl,
-  sensorId: shelfs.sensorId,
-  createdAt: shelfs.createdAt,
-  updatedAt: shelfs.updatedAt,
-};
-
-type CreateInput = {
+// In-memory stand-in for the future external shelfs API — no DB on purpose.
+// This module serves the mock store layout read-only; seed.json is the whole
+// truth (a copy of the web app's public/mock/shelves.json). Nothing mutates
+// here, so there is no store Map / SSE / event hub like the users module.
+export type ShelfItem = {
+  id: string;
   name: string;
-  groupId?: string | null;
-  imageUrl?: string | null;
-  sensorId?: string | null;
+  color: string;
+  capacity: number;
+  qty: number;
+  reorder: number;
 };
-type UpdateInput = Partial<CreateInput>;
+export type Shelf = {
+  id: number;
+  name: string;
+  type: "wall" | "gondola" | "checkout";
+  x: number;
+  z: number;
+  rotation: number;
+  length: number;
+  online: boolean;
+  items: ShelfItem[];
+};
+
+class ShelfsService {
+  private readonly shelves = seed.shelves as Shelf[];
+
+  list() {
+    return this.shelves;
+  }
+
+  findById(id: number) {
+    const shelf = this.shelves.find((s) => s.id === id);
+    if (!shelf) throw status(404, "Shelf not found");
+    return shelf;
+  }
+}
 
 export const shelfsService = new Elysia({ name: "shelfs.service" }).decorate(
   "shelfsService",
-  {
-    list() {
-      return db
-        .select(publicColumns)
-        .from(shelfs)
-        .where(isNull(shelfs.deletedAt))
-        .orderBy(desc(shelfs.createdAt));
-    },
-
-    async findById(id: string) {
-      const [row] = await db
-        .select(publicColumns)
-        .from(shelfs)
-        .where(and(eq(shelfs.id, id), isNull(shelfs.deletedAt)));
-      if (!row) throw status(404, "Shelf not found");
-      return row;
-    },
-
-    async create(input: CreateInput) {
-      const [row] = await db.insert(shelfs).values(input).returning(publicColumns);
-      return row;
-    },
-
-    async update(id: string, input: UpdateInput) {
-      const [row] = await db
-        .update(shelfs)
-        .set({ ...input, updatedAt: new Date().toISOString() })
-        .where(and(eq(shelfs.id, id), isNull(shelfs.deletedAt)))
-        .returning(publicColumns);
-      if (!row) throw status(404, "Shelf not found");
-      return row;
-    },
-
-    async softDelete(id: string) {
-      const [row] = await db
-        .update(shelfs)
-        .set({ deletedAt: new Date().toISOString() })
-        .where(and(eq(shelfs.id, id), isNull(shelfs.deletedAt)))
-        .returning({ id: shelfs.id });
-      if (!row) throw status(404, "Shelf not found");
-      return { id: row.id, deleted: true as const };
-    },
-  },
+  new ShelfsService(),
 );

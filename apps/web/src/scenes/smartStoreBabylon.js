@@ -29,7 +29,129 @@ import {
 } from '@babylonjs/core';
 import '@babylonjs/loaders/glTF';
 
-export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelectPerson, onReady, onShelfEvent } = {}) {
+// ---------- store architecture (NOT data-driven) ----------
+// The building itself — walls, doors, gates, the shoppers' walk loop and the
+// robot's lane network — is hand-tuned and fixed. Only the shelves (geometry,
+// stock, locks, browse slots) come from the mock JSON; validateShelfLayout
+// refuses layouts that drop a shelf on top of the loop or a robot lane.
+const WALK_WAYPOINTS = [
+  [0, 12.2], [-4.4, 9.2], [-3.5, 5.6], [-3.5, 2.6], [-9.3, 0.6], [-3, -6],
+  [4, -7], [9, -2], [10.4, 4.0], [11.7, 9.6], [6.8, 12.5],
+];
+const ROBOT_NODES = [
+  [-10, -11.5], [4, -11.5], [9, -11.5], [11.2, -6], [11.2, 1], [11.2, 6.5],
+  [-3.3, -1.2], [4, -1.2], [9, -1.2], [-3.3, 2.7], [9, 2.7], [-3.7, 2.7],
+  [-13.5, 2.7], [-13.5, 6], [-3.7, 6], [4, 7], [-4.3, 6], [-8, 6], [-8, 14], [-4.3, 14],
+];
+const ROBOT_EDGES = [
+  [0, 1], [1, 2], [1, 7], [2, 3], [3, 4], [4, 5], [4, 8],
+  [6, 7], [7, 8], [6, 9], [8, 10], [9, 10], [9, 11], [11, 12],
+  [12, 13], [13, 14], [14, 11], [5, 15], [15, 14], [14, 16],
+  [16, 17], [17, 18], [18, 19], [19, 16],
+];
+
+// per-type constants the JSON deliberately does NOT carry — lock rig framing,
+// camera landing params, browse-slot stand distance / arm reach — so the mock
+// file stays a layout file, not a tuning file. halfDepth is the physical
+// footprint half-depth (incl. the glass door plane) used for placement
+// validation and the shopper navgrid.
+const SHELF_TYPE = {
+  wall: {
+    badgeH: 8, dist: 15, height: 4, focusZoom: 2.0,
+    lock: { zFront: 0.76, faces: [1], hBase: 0.25, hTop: 5.85 },
+    seamSpan: 3.2, stand: 1.05, reach: 0.95, halfDepth: 0.83,
+  },
+  gondola: {
+    badgeH: 5.5, dist: 14, height: 4, focusZoom: 2.2,
+    lock: { zFront: 0.86, faces: [1, -1], hBase: 0.12, hTop: 3.95 },
+    seamSpan: 4, stand: 1.25, reach: 0.8, halfDepth: 0.93,
+  },
+  checkout: {
+    badgeH: 3.2, dist: 13, height: 4, focusZoom: 2.3,
+    lock: null, halfDepth: 1.35,
+  },
+};
+
+// point-in-footprint test in a shelf's local frame (rotation about y)
+function inFootprint(px, pz, sh, margin) {
+  const td = SHELF_TYPE[sh.type];
+  const rot = ((sh.rotation ?? 0) * Math.PI) / 180;
+  const dx = px - sh.x, dz = pz - sh.z;
+  const lx = Math.cos(rot) * dx - Math.sin(rot) * dz;
+  const lz = Math.sin(rot) * dx + Math.cos(rot) * dz;
+  const halfLen = (sh.type === 'checkout' ? 5.5 : sh.length) / 2 + 0.16 + margin;
+  return Math.abs(lx) <= halfLen && Math.abs(lz) <= td.halfDepth + margin;
+}
+
+// sampled walk-loop points, shared by validation and the in-scene navgrid.
+// (Curve3 is pure math — safe at module scope, no engine needed.)
+function sampleWalkLoop(n = 200) {
+  const curve = Curve3.CreateCatmullRomSpline(
+    WALK_WAYPOINTS.map(([x, z]) => new Vector3(x, 0, z)), 16, true);
+  const pts = curve.getPoints();
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(pts[Math.floor((i / n) * pts.length)]);
+  return out;
+}
+
+// Load-time layout validation — the dashboard runs this on the parsed mock
+// JSON and shows its error state instead of booting a broken store.
+export function validateShelfLayout(shelves) {
+  const errors = [];
+  if (!Array.isArray(shelves) || shelves.length === 0) {
+    return ['shelves must be a non-empty array'];
+  }
+  const seen = new Set();
+  for (const sh of shelves) {
+    const tag = `shelf ${sh?.id ?? '?'}`;
+    if (!Number.isInteger(sh?.id) || sh.id < 1) { errors.push(`${tag}: id must be a positive integer`); continue; }
+    if (seen.has(sh.id)) errors.push(`${tag}: duplicate id`);
+    seen.add(sh.id);
+    if (!SHELF_TYPE[sh.type]) { errors.push(`${tag}: unknown type "${sh.type}"`); continue; }
+    if (typeof sh.x !== 'number' || typeof sh.z !== 'number') { errors.push(`${tag}: x/z must be numbers`); continue; }
+    if (sh.type !== 'checkout' && !(sh.length >= 3)) { errors.push(`${tag}: length must be >= 3`); continue; }
+    for (const it of sh.items ?? []) {
+      if (!it.id || typeof it.name !== 'string') errors.push(`${tag}: item missing id/name`);
+      if (!(it.capacity > 0) || !(it.qty >= 0) || !(it.reorder >= 0)) errors.push(`${tag}: item "${it.id}" needs capacity/qty/reorder`);
+    }
+    // fixed architecture: the walk loop and the robot lanes are not movable —
+    // a shelf sitting on either would strand the sim, so the file is rejected
+    for (const p of sampleWalkLoop()) {
+      if (inFootprint(p.x, p.z, sh, 0.3)) { errors.push(`${tag}: blocks the shoppers' walk loop`); break; }
+    }
+    outer: for (const [a, b] of ROBOT_EDGES) {
+      const [ax, az] = ROBOT_NODES[a], [bx, bz] = ROBOT_NODES[b];
+      const steps = Math.ceil(Math.hypot(bx - ax, bz - az) / 0.25);
+      for (let s = 0; s <= steps; s++) {
+        const k = s / steps;
+        if (inFootprint(ax + (bx - ax) * k, az + (bz - az) * k, sh, 0.1)) {
+          errors.push(`${tag}: blocks a robot lane`);
+          break outer;
+        }
+      }
+    }
+  }
+  return errors;
+}
+
+// Same deal for the customer roster (users.json) — bad identities are a
+// contract break with the future API, so the file is rejected, not patched up.
+export function validateUsers(users) {
+  const errors = [];
+  if (!Array.isArray(users)) return ['users must be an array'];
+  const seen = new Set();
+  for (const u of users) {
+    const tag = `user ${u?.id ?? '?'}`;
+    if (!Number.isInteger(u?.id) || u.id < 1) { errors.push(`${tag}: id must be a positive integer`); continue; }
+    if (seen.has(u.id)) errors.push(`${tag}: duplicate id`);
+    seen.add(u.id);
+    if (typeof u.name !== 'string' || !u.name.trim()) errors.push(`${tag}: name must be a non-empty string`);
+    if (u.gender !== 'male' && u.gender !== 'female') errors.push(`${tag}: gender must be "male" or "female"`);
+  }
+  return errors;
+}
+
+export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelectPerson, onReady, onShelfEvent, shelves = [], users = [] } = {}) {
   const ACCENT_HEX = '#35c3ff';
   const ACCENT = Color3.FromHexString(ACCENT_HEX);
   const C3 = (hex) => Color3.FromHexString('#' + hex.toString(16).padStart(6, '0'));
@@ -258,14 +380,16 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   wallBand(ROOM - 2, 0, 0, -half + 0.3);
   wallBand(ROOM - 2, Math.PI / 2, -half + 0.3, 0);
 
-  // ---------- shelving units ----------
-  const FACE = {
-    px: new Vector3(1, 0, 0), nx: new Vector3(-1, 0, 0),
-    pz: new Vector3(0, 0, 1), nz: new Vector3(0, 0, -1),
-  };
-  const zones = []; // { pos, unit, face, dist, height, focusZoom }
+  // ---------- shelving units (built from the mock JSON) ----------
+  const zones = []; // { id, type, rotY, data, pos, unit, face, dist, height, focusZoom }
 
-  function gondola(x, z, length, rotY = 0) {
+  // product boxes on the shelves tint from the shelf's own catalogue items so
+  // the 3D scene and the LIVE STOCK panel tell one story; shelves with no
+  // items fall back to the global palette
+  const itemPalette = (sh) =>
+    sh.items?.length ? sh.items.map((it) => parseInt(it.color.slice(1), 16)) : productColors;
+
+  function gondola(x, z, length, rotY = 0, colors = productColors) {
     const g = group('gondola');
     const depth = 1.5, gheight = 3.6;
     box(length, gheight, 0.18, mat.shelfDk, 0, 0, 0).parent = g;
@@ -279,7 +403,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
           if (Math.random() < 0.1) continue;
           const px = -length / 2 + 0.75 + i;
           const ph = 0.5 + Math.random() * 0.4;
-          const col = productColors[(i + Math.round(ly * 2)) % productColors.length];
+          const col = colors[(i + Math.round(ly * 2)) % colors.length];
           box(0.62, ph, 0.55, prodMat(col), px, ly, pz).parent = g;
         }
         box(length, 0.16, 0.04, mat.label, 0, ly + 0.08, side * (depth / 2 + 0.02)).parent = g;
@@ -293,7 +417,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     return g;
   }
 
-  function wallShelf(length, rotY, x, z) {
+  function wallShelf(length, rotY, x, z, colors = productColors) {
     const g = group('wallShelf');
     const depth = 1.3, gheight = 6.5;
     box(length, gheight, 0.15, mat.shelfDk, 0, 0, -depth / 2).parent = g;
@@ -304,7 +428,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
         if (Math.random() < 0.08) continue;
         const px = -length / 2 + 0.7 + i;
         const ph = 0.55 + Math.random() * 0.45;
-        const col = productColors[(i * 2 + Math.round(ly)) % productColors.length];
+        const col = colors[(i * 2 + Math.round(ly)) % colors.length];
         box(0.6, ph, 0.5, prodMat(col), px, ly, 0.1).parent = g;
       }
       box(length, 0.16, 0.04, mat.label, 0, ly + 0.08, depth / 2 - 0.02).parent = g;
@@ -315,14 +439,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     return g;
   }
 
-  zones.push({ pos: new Vector3(-2, 8, -half + 1.6), unit: wallShelf(16, 0, -3, -half + 1.6), face: FACE.pz, dist: 15, height: 4, focusZoom: 2.0 });
-  zones.push({ pos: new Vector3(2.5, 5.5, 1), unit: gondola(2.5, 1, 11), face: FACE.pz, dist: 14, height: 4, focusZoom: 2.2 });
-  zones.push({ pos: new Vector3(half - 1.6, 8, 0), unit: wallShelf(16, Math.PI / 2, half - 1.6, 1), face: FACE.px, dist: 14, height: 4, focusZoom: 2.0 });
-  zones.push({ pos: new Vector3(-8.5, 5.5, 4), unit: gondola(-8.5, 4, 9), face: FACE.pz, dist: 14, height: 4, focusZoom: 2.2 });
-  zones.push({ pos: new Vector3(-6, 5.5, 10), unit: gondola(-6, 10, 7, Math.PI / 2), face: FACE.px, dist: 14, height: 4, focusZoom: 2.2 });
-
-  // ---------- checkout counter (zone 06) ----------
-  function checkout(x, z) {
+  function checkout(x, z, rotY = 0) {
     const g = group('checkout');
     box(5.5, 1.1, 2.4, mat.counter, 0, 0, 0).parent = g;
     box(5.5, 0.18, 2.6, mat.metal, 0, 1.1, 0).parent = g;
@@ -334,31 +451,62 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     screen.parent = g;
     box(5.5, 0.12, 0.05, pbr('costrip', { color: 0x0c1730, emissive: 0x35c3ff, emissiveIntensity: 1.6, roughness: 0.4 }), 0, 0.45, 1.22).parent = g;
     g.position.set(x, 0, z);
+    g.rotation.y = rotY;
     g.parent = world;
     return g;
   }
-  const co = checkout(7, 9);
-  zones.push({ pos: new Vector3(7, 3.2, 9), unit: co, face: FACE.pz, dist: 13, height: 4, focusZoom: 2.3 });
 
-  // ---------- floating numbered zone badges (01–06) ----------
+  for (const sh of shelves) {
+    const td = SHELF_TYPE[sh.type];
+    if (!td) continue; // validateShelfLayout already flagged it
+    const rotY = ((sh.rotation ?? 0) * Math.PI) / 180;
+    const colors = itemPalette(sh);
+    const unit =
+      sh.type === 'wall' ? wallShelf(sh.length, rotY, sh.x, sh.z, colors)
+      : sh.type === 'checkout' ? checkout(sh.x, sh.z, rotY)
+      : gondola(sh.x, sh.z, sh.length, rotY, colors);
+    zones.push({
+      id: sh.id, type: sh.type, rotY, data: sh,
+      pos: new Vector3(sh.x, td.badgeH, sh.z),
+      // the unit's local +z rotated into world — where its front points
+      face: new Vector3(Math.sin(rotY), 0, Math.cos(rotY)),
+      unit, dist: td.dist, height: td.height, focusZoom: td.focusZoom,
+    });
+  }
+  const zoneById = new Map(zones.map((zn) => [zn.id, zn]));
+
+  // ---------- floating numbered zone badges ----------
   function makeBadge(num) {
     const size = 256;
     const tex = new DynamicTexture('badge' + num, { width: size, height: size }, scene, true);
     tex.hasAlpha = true;
     const ctx = tex.getContext();
     ctx.clearRect(0, 0, size, size);
+    // Soft navy backdrop halo: a radial gradient whose core is nearly opaque —
+    // enough to mute whatever is behind the badge (e.g. the emissive wall band)
+    // so it reads as a circle instead of a rectangular strip framing the number
+    // — then feathers to full transparency at the rim, so the edge glows softly
+    // rather than cutting a hard opaque disc.
+    const cx = size / 2, cy = size / 2;
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, size / 2 - 4);
+    grad.addColorStop(0.0, 'rgba(11,22,44,0.95)');
+    grad.addColorStop(0.6, 'rgba(11,22,44,0.9)');
+    grad.addColorStop(0.86, 'rgba(11,22,44,0.45)');
+    grad.addColorStop(1.0, 'rgba(11,22,44,0.0)');
+    ctx.fillStyle = grad;
     ctx.beginPath();
-    ctx.arc(size / 2, size / 2, size / 2 - 16, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(11,22,44,0.92)';
+    ctx.arc(cx, cy, size / 2 - 4, 0, Math.PI * 2);
     ctx.fill();
-    ctx.lineWidth = 12;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 102, 0, Math.PI * 2);
+    ctx.lineWidth = 6;
     ctx.strokeStyle = '#35c3ff';
     ctx.shadowColor = '#35c3ff';
-    ctx.shadowBlur = 44;
+    ctx.shadowBlur = 42;
     ctx.stroke();
     ctx.shadowBlur = 0;
     ctx.fillStyle = '#eaf6ff';
-    ctx.font = 'bold 116px ui-sans-serif, system-ui, sans-serif';
+    ctx.font = 'bold 104px ui-sans-serif, system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(num, size / 2, size / 2 + 4);
@@ -381,7 +529,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     m.disableDepthWrite = true;
     m.backFaceCulling = false;
 
-    const plane = MeshBuilder.CreatePlane('badge', { size: 2.2 }, scene);
+    const plane = MeshBuilder.CreatePlane('badge', { size: 2.8 }, scene);
     plane.material = m;
     plane.billboardMode = TransformNode.BILLBOARDMODE_ALL;
     plane.renderingGroupId = 1;
@@ -391,9 +539,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
 
   const badges = [];
   zones.forEach((zn, i) => {
-    const b = makeBadge(String(i + 1).padStart(2, '0'));
+    const b = makeBadge(String(zn.id).padStart(2, '0'));
     b.position.copyFrom(zn.pos);
-    b.metadata = { shelfId: i + 1, base: zn.pos.y, t: i * 0.9 };
+    b.metadata = { shelfId: zn.id, base: zn.pos.y, t: i * 0.9 };
     b.parent = world;
     badges.push(b);
     const line = MeshBuilder.CreateLines('badgeLine', {
@@ -406,9 +554,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   });
 
   // ---------- shelf selection: tag every mesh of each unit with its shelf id ----------
-  zones.forEach((zn, i) => {
-    const sid = i + 1;
-    zn.unit.getChildMeshes().forEach((o) => { o.metadata = { ...(o.metadata || {}), shelfId: sid }; o.isPickable = true; });
+  zones.forEach((zn) => {
+    zn.unit.getChildMeshes().forEach((o) => { o.metadata = { ...(o.metadata || {}), shelfId: zn.id }; o.isPickable = true; });
   });
 
   // ---------- shelf locks: sliding glass doors + status LEDs on every zone ----------
@@ -445,25 +592,26 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     unlockTex.update();
   }
 
-  const shelfLocks = zones.map((zn, i) => {
-    const tagMat = new StandardMaterial('unlockTagMat' + (i + 1), scene);
+  const shelfLocks = zones.map((zn) => {
+    const tagMat = new StandardMaterial('unlockTagMat' + zn.id, scene);
     tagMat.disableLighting = true;
     tagMat.emissiveTexture = unlockTex;
     tagMat.opacityTexture = unlockTex;
     tagMat.backFaceCulling = false;
-    const tag = MeshBuilder.CreatePlane('unlockTag' + (i + 1), { width: 2.4, height: 0.6 }, scene);
+    const tag = MeshBuilder.CreatePlane('unlockTag' + zn.id, { width: 2.4, height: 0.6 }, scene);
     tag.material = tagMat;
     tag.billboardMode = TransformNode.BILLBOARDMODE_ALL;
     tag.isPickable = false;
     tag.isVisible = false;
     tag.parent = world;
     return {
-      id: i + 1, locked: true, offline: i + 1 === 5,
+      id: zn.id, locked: true, offline: !zn.data.online,
       masterOpen: false, masterAmt: 0, heldSeams: 0, seams: [],
       flash: 0, scanStamp: -9, panels: [], ledMats: [],
       tag, tagMat, tagT: Infinity,
     };
   });
+  const lockById = new Map(shelfLocks.map((lk) => [lk.id, lk]));
   const emitShelfEvent = (shelfId, type) => onShelfEvent?.({ shelfId, type });
 
   function buildShelfLockRig(lk, unit, { length, zFront, faces, hBase, hTop, nseg: nsegOpt }) {
@@ -474,12 +622,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const segW = length / nseg;
     // interior seams: openable units — each owns the two panes flanking it
     // (their glide toward segment centers parts the glass at the seam). The
-    // anchor is the seam's world position, used to pair pick slots to seams.
+    // anchor is the seam's world position; localX lets the slot generator put
+    // a browse stand + QR pedestal on every seam.
     for (let si = 0; si < nseg - 1; si++) {
       const sx = -length / 2 + segW * (si + 1);
       const anchor = Vector3.TransformCoordinates(
         new Vector3(sx, 0, zFront * faces[0]), unit.computeWorldMatrix(true));
-      lk.seams.push({ openAmt: 0, holders: 0, anchor });
+      lk.seams.push({ openAmt: 0, holders: 0, anchor, localX: sx });
     }
     for (const face of faces) { // 1 / -1 → the unit's local ±z front
       for (let si = 0; si < nseg; si++) {
@@ -508,21 +657,26 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       strip.metadata = { shelfId: lk.id };
     }
   }
-  // shelves 01/03 take nseg 5: their 4 interior seams sit 1:1 on the pick
-  // slots, so each shopper's scan parts the glass exactly where they stand
-  buildShelfLockRig(shelfLocks[0], zones[0].unit, { length: 16, zFront: 0.76, faces: [1], hBase: 0.25, hTop: 5.85, nseg: 5 });
-  buildShelfLockRig(shelfLocks[1], zones[1].unit, { length: 11, zFront: 0.86, faces: [1, -1], hBase: 0.12, hTop: 3.95 });
-  buildShelfLockRig(shelfLocks[2], zones[2].unit, { length: 16, zFront: 0.76, faces: [1], hBase: 0.25, hTop: 5.85, nseg: 5 });
-  buildShelfLockRig(shelfLocks[3], zones[3].unit, { length: 9, zFront: 0.86, faces: [1, -1], hBase: 0.12, hTop: 3.95 });
-  buildShelfLockRig(shelfLocks[4], zones[4].unit, { length: 7, zFront: 0.86, faces: [1, -1], hBase: 0.12, hTop: 3.95 });
-  { // checkout (06): status strip only
-    const led = basic('lockLed6', { color: 0xe04848 });
-    shelfLocks[5].ledMats.push(led);
-    const strip = box(5.5, 0.08, 0.06, led, 0, 1.32, 1.28);
-    shadowGen.removeShadowCaster(strip);
-    strip.parent = zones[5].unit;
-    strip.metadata = { shelfId: 6 };
-  }
+  // rig params come from the shelf's type (see SHELF_TYPE): every seam is a
+  // browse-slot candidate, so nseg derives from the type's seam span — a
+  // 16m wall shelf lands on the classic nseg 5 / 4-seam layout.
+  zones.forEach((zn, i) => {
+    const lk = shelfLocks[i];
+    const td = SHELF_TYPE[zn.type];
+    if (!td.lock) { // checkout: nothing to enclose — status strip only
+      const led = basic('lockLed' + zn.id, { color: 0xe04848 });
+      lk.ledMats.push(led);
+      const strip = box(5.5, 0.08, 0.06, led, 0, 1.32, 1.28);
+      shadowGen.removeShadowCaster(strip);
+      strip.parent = zn.unit;
+      strip.metadata = { shelfId: zn.id };
+      return;
+    }
+    buildShelfLockRig(lk, zn.unit, {
+      length: zn.data.length, ...td.lock,
+      nseg: Math.max(2, Math.round(zn.data.length / td.seamSpan)),
+    });
+  });
 
   // scan-kit shared materials — the per-shopper meshes are built in makeShopper
   const phoneBodyMat = pbr('phoneBody', { color: 0x101724, roughness: 0.35, metalness: 0.5 });
@@ -641,12 +795,33 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   let homePose = null;
 
   function landingPoseFor(id) {
-    const zn = zones[id - 1];
+    const zn = zoneById.get(id);
     const b = unitBounds(zn.unit);
     const center = b.center;
     const pos = center.add(zn.face.scale(zn.dist)).add(new Vector3(0, zn.height, 0));
     const pose = poseFromOffset(pos.subtract(center));
     return { ...pose, target: center.clone(), zoom: zn.focusZoom ?? 1.8 };
+  }
+
+  // double-click on a browsing shopper: frame *them* at their slot instead of
+  // the shelf center (long shelves would crop them out). Yaw swings off the
+  // face normal toward the shelf end they stand nearest, so the shelf recedes
+  // into frame past them. dist/height keep beta ≈ PI/2.6 through poseFromOffset.
+  const PFOCUS = { yaw: 0.61, dist: 13, height: 4.9, targetY: 1.5, zoom: 2.6 };
+  let pendingFocusPose = null; // { id, pose } — consumed by the next selectShelf round-trip
+  function personFocusPoseFor(e) {
+    const s = SLOTS[e.ref.slot];
+    const away = new Vector3(-Math.sin(s.ry), 0, -Math.cos(s.ry)); // slot ry faces the shelf
+    const along = new Vector3(away.z, 0, -away.x);
+    const c = unitBounds(zoneById.get(s.shelfId).unit).center;
+    const side = (e.h.position.x - c.x) * along.x + (e.h.position.z - c.z) * along.z >= 0 ? 1 : -1;
+    const dir = away.scale(Math.cos(PFOCUS.yaw)).add(along.scale(side * Math.sin(PFOCUS.yaw)));
+    const pose = poseFromOffset(dir.scale(PFOCUS.dist).add(new Vector3(0, PFOCUS.height, 0)));
+    return {
+      ...pose,
+      target: new Vector3(e.h.position.x, PFOCUS.targetY, e.h.position.z),
+      zoom: PFOCUS.zoom,
+    };
   }
 
   function shortestAngle(from, to) {
@@ -737,6 +912,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   let hoverId = null;
   let hoverProgress = 0;
   function selectShelf(id) {
+    const pf = pendingFocusPose; // dbl-click pose rides one round-trip, then dies
+    pendingFocusPose = null;
     const prev = selectedId;
     selectedId = id || null;
     if (!selectedId) {
@@ -745,12 +922,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       if (homePose) { flyTo(homePose); homePose = null; }
       return;
     }
+    if (!zoneById.has(selectedId)) { selectedId = prev; return; } // unknown id — leave the camera alone
     if (!prev && !homePose) {
       homePose = { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone(), zoom };
     }
-    frameOutline(selOutline, zones[selectedId - 1].unit, 0.5);
+    frameOutline(selOutline, zoneById.get(selectedId).unit, 0.5);
     setDim(selectedId);
-    flyTo(landingPoseFor(selectedId));
+    flyTo(pf && pf.id === selectedId ? pf.pose : landingPoseFor(selectedId));
   }
 
   // ---------- picking (shelves + people share one nearest-hit ray) ----------
@@ -770,7 +948,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   }
   function setHoverGlow(id) {
     hoverId = id;
-    const b = unitBounds(zones[id - 1].unit);
+    const zn = zoneById.get(id);
+    if (!zn) return;
+    const b = unitBounds(zn.unit);
     const pad = 0.35;
     const ud = hoverGlow.metadata;
     ud.sx = b.size.x + pad; ud.sy = b.size.y + pad; ud.sz = b.size.z + pad;
@@ -792,6 +972,15 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       if (t && t.type === 'person') onSelectPerson?.(t.id);      // React toggles / clears shelf
       else if (t && t.type === 'shelf') onSelectShelf?.(t.id);   // React toggles / clears person
       else { onSelectShelf?.(null); onSelectPerson?.(null); }    // empty floor clears either focus
+    } else if (pi.type === PointerEventTypes.POINTERDOUBLETAP) {
+      // dbl-click a browsing shopper → shelf focus, framed at their slot.
+      // pickTarget's shelf-focus lock still applies: clear focus first.
+      const t = pickTarget();
+      if (!t || t.type !== 'person') return;
+      const p = persons.get(t.id);
+      if (!p || p.ref.mode !== 'browse' || p.ref.slot < 0) return;
+      pendingFocusPose = { id: SLOTS[p.ref.slot].shelfId, pose: personFocusPoseFor(p) };
+      onSelectShelf?.(pendingFocusPose.id); // round-trips back into selectShelf
     } else if (pi.type === PointerEventTypes.POINTERMOVE) {
       if (downPos) return;
       const t = pickTarget();
@@ -862,6 +1051,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const HAIR_FASHION = ['#d96fa8', '#4fb8c9']; // ~1 in 7 spawns goes dyed
   const HAIR_GREY = ['#9b9b9b', '#cfcbc2', '#6e6e6e', '#e9e5db']; // OldClassy only
   const SKIN_TONES = ['#ffeedd', '#f0c08e', '#c98d55', '#8a5730'];
+  const EYE_DARK = '#2a2118'; // the 'Face' primitive is the eye/brow band, kept dark
   const SHIRTS = ['#6b8fc9', '#c96b5a', '#55a87a', '#c9a25a', '#8a7ac9', '#52b0b8', '#c97a9e', '#7a8899', '#4a5d7a', '#b8bdc4'];
   const PANTS = ['#2e3a52', '#3d3d45', '#6a6152', '#4c503a', '#6b4a36', '#2f4c44'];
   const SUITS = ['#232a3d', '#2f2f33', '#3a2f28', '#20302a']; // suits stay sober
@@ -870,7 +1060,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   function buildLook(file) {
     const i = ++lookSeq;
     const pick = (arr, stride) => arr[(i * stride) % arr.length];
-    const look = { Face: pick(SKIN_TONES, 3) };
+    // 'Skin' is the whole body (head/neck/arms/hands); 'Face' is the thin
+    // eye/brow band at the front of the head — skin tone on the body, a dark
+    // colour on the band so the eyes read against the skin instead of vanishing
+    const skin = pick(SKIN_TONES, 3);
+    const look = { Skin: skin, Face: EYE_DARK };
     if (file === 'Suit_Male') {
       look.Black = pick(SUITS, 3); // 'Black' is the jacket+trousers material
       look.Shirt = pick(DRESS_SHIRTS, 2);
@@ -908,11 +1102,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
           const hex = u.look[m.material.name];
           if (hex) m.material.albedoColor = Color3.FromHexString(hex).toLinearSpace();
           // emissive lift: the blue light rig reflects nothing off warm tones,
-          // so let every body part glow its own albedo a little. 'Skin' is the
-          // eyes/brows material — it must stay dead black to read as a face.
-          if (m.material.name !== 'Skin') {
-            m.material.emissiveColor = m.material.albedoColor.scale(0.3);
-          }
+          // so let every body part glow its own albedo a little. body skin
+          // ('Skin') gets a stronger lift so warm tones still read under the
+          // blue rig instead of crushing to black; the 'Face' eye band gets no
+          // lift so the eyes stay dark against the skin.
+          const name = m.material.name;
+          const lift = name === 'Skin' ? 0.5 : name === 'Face' ? 0 : 0.3;
+          m.material.emissiveColor = m.material.albedoColor.scale(lift);
         }
       });
       u.mats = [...mats];
@@ -935,14 +1131,49 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   }
 
   // ---------- person identity + selection (click a shopper → floating card) ----------
-  // Every shopper gets a mock Thai identity, gender-matched to its GLTF
-  // file, plus an invisible pick capsule (picking the skinned meshes directly
-  // is both costly and wrong — Babylon tests the bind pose, not the animated
-  // pose). React renders the card; the render loop writes its screen-space
-  // transform every frame so it follows the shopper without re-rendering.
-  const THAI_FIRST_M = ['สมชาย', 'อนุชา', 'ธนกร', 'วีระพล', 'กิตติ', 'ณัฐพล', 'ประเสริฐ', 'ศุภกร'];
-  const THAI_FIRST_F = ['พิมพ์ชนก', 'สุดารัตน์', 'กมลวรรณ', 'อรทัย', 'นภัสสร', 'ชลธิชา', 'มณีรัตน์', 'วรรณิภา'];
-  const THAI_LAST = ['วงศ์สว่าง', 'ใจดี', 'ศรีสุข', 'ทองดี', 'บุญมาก', 'แก้วใส', 'พงษ์พันธ์', 'รุ่งเรือง', 'สุขสันต์', 'จันทร์เพ็ญ'];
+  // Identities come from the mock customer roster (users.json), consumed in
+  // file order — so the roster's first entries are the shoppers already in the
+  // store at open. Walk-ins beyond the roster get generated Thai identities
+  // whose customer numbers continue past the roster's highest id; exited
+  // customers are not recycled. Every shopper also gets an invisible pick
+  // capsule (picking the skinned meshes directly is both costly and wrong —
+  // Babylon tests the bind pose, not the animated pose). React renders the
+  // card; the render loop writes its screen-space transform every frame so it
+  // follows the shopper without re-rendering.
+  const FIRST_M = ['James', 'Liam', 'Noah', 'William', 'Ethan', 'Mason', 'Lucas', 'Henry'];
+  const FIRST_F = ['Emma', 'Olivia', 'Sophia', 'Ava', 'Isabella', 'Mia', 'Charlotte', 'Amelia'];
+  const LAST = ['Carter', 'Wilson', 'Brown', 'Davis', 'Miller', 'Taylor', 'Anderson', 'Thomas', 'Martin', 'Walker'];
+
+  let rosterIdx = 0; // next unconsumed roster entry (from GET /users at boot)
+  // walk-in custNos live in their own 500+ range so they can never collide
+  // with ids the users API assigns to customers added later via POST
+  let identSeq = Math.max(500, users.reduce((m, u) => Math.max(m, u.id), 0));
+  const identFromUser = (u) => ({
+    custNo: String(u.id).padStart(2, '0'), name: u.name,
+    female: u.gender === 'female', apiId: u.id,
+  });
+  // a freshly minted (apiId-less) walk-in identity — the random crowd. Never
+  // touches the roster, so these stay off the users API entirely.
+  function genIdentity() {
+    const id = ++identSeq;
+    const female = id % 2 === 0; // walk-ins alternate so both wardrobes stay in play
+    const firsts = female ? FIRST_F : FIRST_M;
+    const first = firsts[(id * 3 + (female ? 1 : 0)) % firsts.length];
+    const last = LAST[(id * 7 + 3) % LAST.length]; // stride coprime with 10 → all 10 surnames cycle
+    return { custNo: String(id).padStart(2, '0'), name: `${first} ${last}`, female };
+  }
+  function nextIdentity() {
+    // only customers the API says are inside may be seeded onto the floor;
+    // outside/waiting ones arrive through checkin, never as ambient fill
+    while (rosterIdx < users.length && users[rosterIdx].status && users[rosterIdx].status !== 'inside') rosterIdx++;
+    if (rosterIdx < users.length) return identFromUser(users[rosterIdx++]);
+    return genIdentity();
+  }
+  // first + last word of the name (roster names are free text, may be one word)
+  function initialsOf(name) {
+    const w = name.trim().split(/\s+/);
+    return w[0].charAt(0) + (w.length > 1 ? w[w.length - 1].charAt(0) : '');
+  }
 
   // avatar chip = the shopper's torso tint, lifted toward mid-brightness so
   // the white initials stay readable (suits are near-black otherwise)
@@ -960,27 +1191,31 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   let hoverPersonId = null;
   let cardEl = null; // React-owned card wrapper — the scene only writes its transform
 
-  function registerPerson(h, kind, file, ref) {
-    const id = ++personSeq;
-    const female = file.includes('Female');
-    const firsts = female ? THAI_FIRST_F : THAI_FIRST_M;
-    const first = firsts[(id * 3 + (female ? 1 : 0)) % firsts.length];
-    const last = THAI_LAST[(id * 7 + 3) % THAI_LAST.length]; // stride coprime with 10 → all 10 surnames cycle
-    const cap = MeshBuilder.CreateCapsule('personCap' + id, { radius: 0.5, height: 2.6, tessellation: 8 }, scene);
+  // invisible pick proxy — rides along and is disposed with the person's body
+  function makePickCap(personId, h) {
+    const cap = MeshBuilder.CreateCapsule('personCap' + personId, { radius: 0.5, height: 2.6, tessellation: 8 }, scene);
     cap.position.y = 1.3;
     cap.visibility = 0;
     cap.isPickable = true;
-    cap.metadata = { personId: id };
-    cap.parent = h; // rides along and is disposed with the person
+    cap.metadata = { personId };
+    cap.parent = h;
+    return cap;
+  }
+
+  function registerPerson(h, kind, ident, ref) {
+    const id = ++personSeq;
+    makePickCap(id, h);
     const entry = {
       id, h, kind, ref, // ref: the shopper sim object (mode/exit/slot live there)
-      custNo: String(id).padStart(2, '0'),
-      name: `${first} ${last}`,
-      initials: first.charAt(0) + last.charAt(0),
+      custNo: ident.custNo,
+      name: ident.name,
+      initials: initialsOf(ident.name),
+      female: ident.female,
+      apiId: ident.apiId ?? null, // set for roster/API customers, null for walk-ins
       color: cardColor(h.metadata.look.torso),
       spawnT: elapsed,
       picks: 0,
-      nearShelf: 1, // set when a browse session starts; walking: computed live in getPersonData
+      nearShelf: zones[0]?.id ?? 1, // set when a browse session starts; walking: computed live in getPersonData
     };
     persons.set(id, entry);
     return entry;
@@ -1008,10 +1243,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     if (!e) return null;
     let status, near, picks = null;
     const nearestZone = () => {
-      let best = Infinity, nz = 1;
-      zones.forEach((zn, i) => {
+      let best = Infinity, nz = zones[0]?.id ?? 1;
+      zones.forEach((zn) => {
         const d = (zn.pos.x - e.h.position.x) ** 2 + (zn.pos.z - e.h.position.z) ** 2;
-        if (d < best) { best = d; nz = i + 1; }
+        if (d < best) { best = d; nz = zn.id; }
       });
       return nz;
     };
@@ -1021,13 +1256,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     } else {
       status = e.ref.verifying ? 'verifying'
         : e.ref.paying ? 'paying'
-        : (e.ref.exit || e.ref.mode === 'exitwalk') ? 'leaving' : 'walking';
+        : (e.ref.exit || e.ref.retreat || e.ref.mode === 'exitwalk') ? 'leaving' : 'walking';
       near = nearestZone();
     }
     picks = e.picks; // cumulative across every browse session this visit
     return {
       id, custNo: e.custNo, name: e.name, initials: e.initials, color: e.color,
-      kind: e.kind, status, near, picks,
+      kind: e.kind, status, near, picks, api: e.apiId != null,
       inStoreSec: Math.max(0, Math.floor(elapsed - e.spawnT)),
     };
   }
@@ -1077,15 +1312,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     return { pointAt, tangentAt, length: total };
   }
 
-  // waypoints verified against every obstacle footprint (spline min clearance
-  // 0.68 units incl. the curve's bow) — the old V4 loop cut through two
-  // gondolas and the checkout counter
-  const walkPath = makePath([
-    new Vector3(0, 0, 12.2), new Vector3(-4.4, 0, 9.2), new Vector3(-3.5, 0, 5.6),
-    new Vector3(-3.5, 0, 2.6), new Vector3(-9.3, 0, 0.6), new Vector3(-3, 0, -6),
-    new Vector3(4, 0, -7), new Vector3(9, 0, -2), new Vector3(10.4, 0, 4.0),
-    new Vector3(11.7, 0, 9.6), new Vector3(6.8, 0, 12.5),
-  ], true);
+  // waypoints verified against the default layout's footprints (spline min
+  // clearance 0.68 units incl. the curve's bow); fixed architecture — JSON
+  // shelves that would sit on the loop are rejected by validateShelfLayout
+  const walkPath = makePath(WALK_WAYPOINTS.map(([x, z]) => new Vector3(x, 0, z)), true);
   // coarse arc samples for "is the robot parked astride the walk line" checks
   const walkPathPts = [];
   for (let i = 0; i < 200; i++) walkPathPts.push(walkPath.pointAt(i / 200));
@@ -1159,6 +1389,32 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   });
   let exitDoorOpenAmt = 0;
 
+  // ---------- perimeter glass: close the two open stretches ----------
+  // the door rigs only glaze from x/z = −1.56 to the shared corner; the rest
+  // of each open side (front z=+half, right x=+half) ran bare to the solid
+  // walls. Fill both with the same rig language — 4 panes split by mullion
+  // posts, header + cyan trim continuing the door rigs' line — so the low
+  // storefront reads corner-to-corner. A0 hugs the solid wall's inner face;
+  // A1 butts the existing panes' ends, with a post at the junction.
+  (function perimeterGlass() {
+    const H = 2.5;
+    const A0 = -14.8, A1 = -1.56, SEG = (A1 - A0) / 4;
+    for (const alongX of [true, false]) {
+      // a = coordinate along the facade; the other axis pins to the wall plane
+      const put = (wa, h, tn, a, m, y = 0) => {
+        const mesh = alongX
+          ? box(wa, h, tn, m, a, y, half)
+          : box(tn, h, wa, m, half, y, a);
+        mesh.parent = world;
+        return mesh;
+      };
+      for (let i = 0; i < 4; i++) put(SEG - 0.02, H - 0.1, 0.06, A0 + SEG * (i + 0.5), glassMat);
+      for (let i = 1; i <= 4; i++) put(0.16, H, 0.16, A0 + SEG * i, mat.metal);
+      put(13.48, 0.22, 0.2, -8.29, mat.metal, H);       // header, −15.03 → −1.55
+      put(13.48, 0.06, 0.22, -8.29, trimMat, H + 0.22); // cyan trim
+    }
+  })();
+
   // fare-gate posts with camera heads + status lamps flanking the scan spot
   const gateLampMats = [];
   for (const side of [-1, 1]) {
@@ -1189,8 +1445,27 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   gateBeam.position.set(EXIT.x, 1, GATE.z);
   gateBeam.parent = world;
 
+  // shared verdict-tag renderer — every pass/fail badge (scan + payment, front
+  // + right doors) draws through this so one size/weight bump lands on all of
+  // them. Text is a flat 72px/weight-900 with a same-colour stroke (system-ui
+  // often lacks a true 900 cut, so the stroke guarantees the heft). Pass tags
+  // sit on a 384×144 canvas; the long "DECLINED ✗" fail word overruns that, so
+  // its tag passes a wider canvas (and a matching wider plane) to stay uncut.
+  const drawVerdictTag = (ctx, text, color, w = 384, h = 144, size = 72) => {
+    ctx.clearRect(0, 0, w, h);
+    ctx.font = `900 ${size}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+    ctx.strokeText(text, w / 2, h / 2 + 2);
+    ctx.fillStyle = color;
+    ctx.fillText(text, w / 2, h / 2 + 2);
+  };
+
   // floating "฿xxx ✓" receipt that pops over the gate on payment success
-  const paidTex = new DynamicTexture('paidTag', { width: 256, height: 96 }, scene, true);
+  const paidTex = new DynamicTexture('paidTag', { width: 384, height: 144 }, scene, true);
   paidTex.update(); // never-updated DynamicTextures stay !isReady and stall scene.executeWhenReady — the boot overlay would spin forever
   paidTex.hasAlpha = true;
   paidTex.uScale = -1; paidTex.uOffset = 1; // un-mirror text under right-handed billboard
@@ -1211,16 +1486,36 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     // shoppers carry no real basket (picked items fly back to the shelf), so
     // the charged amount is decorative
     const amt = 60 + Math.floor(Math.random() * 560);
-    const ctx = paidTex.getContext();
-    ctx.clearRect(0, 0, 256, 96);
-    ctx.font = 'bold 54px system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#4caf72';
-    ctx.fillText(`฿${amt} ✓`, 128, 50);
+    drawVerdictTag(paidTex.getContext(), `฿${amt} ✓`, '#4caf72');
     paidTex.update();
     paidTagT = 0;
     paidTag.isVisible = true;
+  }
+
+  // red "DECLINED" twin of the paid tag — pops when an API payment fails so
+  // it reads why the shopper is stuck at the gate (not just red lamps)
+  const declinedTex = new DynamicTexture('declinedTag', { width: 480, height: 144 }, scene, true);
+  declinedTex.update();
+  declinedTex.hasAlpha = true;
+  declinedTex.uScale = -1; declinedTex.uOffset = 1;
+  const declinedMat = new StandardMaterial('declinedTagMat', scene);
+  declinedMat.disableLighting = true;
+  declinedMat.emissiveTexture = declinedTex;
+  declinedMat.opacityTexture = declinedTex;
+  declinedMat.backFaceCulling = false;
+  const declinedTag = MeshBuilder.CreatePlane('declinedTagPlane', { width: 2.37, height: 0.71 }, scene);
+  declinedTag.material = declinedMat;
+  declinedTag.billboardMode = TransformNode.BILLBOARDMODE_ALL;
+  declinedTag.isPickable = false;
+  declinedTag.isVisible = false;
+  declinedTag.position.set(EXIT.x, 2.1, GATE.z);
+  declinedTag.parent = world;
+  let declinedTagT = Infinity;
+  function showDeclinedTag() {
+    drawVerdictTag(declinedTex.getContext(), 'DECLINED ✗', '#e2574c', 480);
+    declinedTex.update();
+    declinedTagT = 0;
+    declinedTag.isVisible = true;
   }
 
   // ---------- entry verification gate: scan-to-enter on the entrance spur ----------
@@ -1228,6 +1523,14 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // the loop; ~1 in 7 fails the first pass (red lamps) and rescans, everyone
   // passes eventually. Queue slots stretch back through the door (spurMove).
   const ENTRY_GATE = { z: 14.0, secs: 1.6, spacing: 1.25 };
+  // waiting line runs sideways along the storefront, away from the exit door:
+  // rank 0 = at the scanner, rank 1 = the pivot right outside the door, ranks
+  // 2+ step left (−x) along Q_LINE.z on the sidewalk. minX stops the slots at
+  // the sidewalk's far edge — an overflowing line just bunches up there.
+  const Q_LINE = { z: 16.2, minX: -13.8 };
+  const queueSlot = (r) => r === 0
+    ? { x: DOOR.x, z: ENTRY_GATE.z }
+    : { x: Math.max(DOOR.x - ENTRY_GATE.spacing * (r - 1), Q_LINE.minX), z: Q_LINE.z };
   const entryLampMats = [];
   for (const side of [-1, 1]) {
     box(0.18, 1.18, 0.18, mat.metal, DOOR.x + side * 0.8, 0, ENTRY_GATE.z).parent = world;
@@ -1248,16 +1551,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // floating "ID ✓" tag over the entry gate on a successful verification —
   // static text, so it's drawn once here (the update() also keeps
   // scene.executeWhenReady from stalling, same as paidTex above)
-  const idTex = new DynamicTexture('idTag', { width: 256, height: 96 }, scene, true);
+  const idTex = new DynamicTexture('idTag', { width: 384, height: 144 }, scene, true);
   idTex.hasAlpha = true;
   idTex.uScale = -1; idTex.uOffset = 1; // un-mirror text under right-handed billboard
   {
-    const ctx = idTex.getContext();
-    ctx.font = 'bold 54px system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#4caf72';
-    ctx.fillText('ID ✓', 128, 50);
+    drawVerdictTag(idTex.getContext(), 'ID ✓', '#4caf72');
     idTex.update();
   }
   const idMat = new StandardMaterial('idTagMat', scene);
@@ -1281,6 +1579,80 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // entry gate state: deny > 0 while the red "rescan" flash runs
   const entryGate = { user: null, flash: 0, deny: 0 };
   let enterSeq = 0; // queue order = spawn order at the outside pad
+
+  // ---------- sidewalk aprons: storefront + right wall ----------
+  // Both strips are cut to the same depth so the pavement reads as a
+  // symmetric L. front strip: the checkin line stands here (runs sideways
+  // along −x at z≈16.2, so this depth is clearance, not queue length) —
+  // without pavement the queue would float in the void. The right-wall
+  // strip hosts the random crowd's queue/retreat spots (farthest stand is
+  // x≈17.4, 2.4m out); it runs past the corner to the front strip's far
+  // edge so the two read as one continuous L of pavement.
+  const WALK_DEPTH = 5;
+  const R_WALK_DEPTH = 5;
+  (function sidewalk() {
+    const padM = pbr('sidewalkM', { color: 0x0d1729, roughness: 1, metalness: 0.05 });
+    const pad = MeshBuilder.CreatePlane('sidewalk', { width: ROOM, height: WALK_DEPTH }, scene);
+    pad.rotation.x = Math.PI / 2;
+    // a curb step below the store slab so the seam reads as a real edge
+    pad.position.set(0, -0.02, half + WALK_DEPTH / 2);
+    pad.material = padM;
+    pad.receiveShadows = true;
+    pad.isPickable = false;
+    pad.parent = world;
+
+    // right-wall strip: full wall length, extended past the corner to z =
+    // half + WALK_DEPTH so it shares the front strip's far edge (the planes
+    // abut at x = half — no overlap, no z-fight)
+    const padR = MeshBuilder.CreatePlane('sidewalkR', { width: R_WALK_DEPTH, height: ROOM + WALK_DEPTH }, scene);
+    padR.rotation.x = Math.PI / 2;
+    padR.position.set(half + R_WALK_DEPTH / 2, -0.02, WALK_DEPTH / 2);
+    padR.material = padM;
+    padR.receiveShadows = true;
+    padR.isPickable = false;
+    padR.parent = world;
+
+    // faint glowing rim tracing the L's outer boundary (the two wall-side
+    // edges are the curb and stay unmarked)
+    const e = ROOM / 2 - 0.25, zFar = half + WALK_DEPTH - 0.25;
+    const xFar = half + R_WALK_DEPTH - 0.25, zBot = -half + 0.25;
+    const rim = MeshBuilder.CreateLines('sidewalkRim', {
+      points: [
+        new Vector3(-e, 0.02, half + 0.1), new Vector3(-e, 0.02, zFar),
+        new Vector3(xFar, 0.02, zFar), new Vector3(xFar, 0.02, zBot),
+        new Vector3(half + 0.1, 0.02, zBot),
+      ],
+    }, scene);
+    rim.color = ACCENT;
+    rim.alpha = 0.22;
+    rim.isPickable = false;
+    rim.parent = world;
+
+    // queue lane in front of the entry gate only (leavers don't queue).
+    // The line hugs the storefront and runs left (−x, away from the exit
+    // door): rails either side of Q_LINE.z plus a tick between every 1.25m
+    // slot. The store-side rail leaves a gap across the doorway so the walk
+    // from the pivot slot to the scanner isn't fenced off.
+    const zIn = Q_LINE.z - 0.8, zOut2 = Q_LINE.z + 0.8;
+    const xEnd = Q_LINE.minX - 0.2, xCap = DOOR.x + 0.8;
+    const lines = [
+      // store-side rail, doorway gap between DOOR.x ± 0.8
+      [new Vector3(xEnd, 0.03, zIn), new Vector3(DOOR.x - 0.8, 0.03, zIn)],
+      // outer rail, full length + right end cap behind the pivot slot
+      [new Vector3(xEnd, 0.03, zOut2), new Vector3(xCap, 0.03, zOut2)],
+      [new Vector3(xCap, 0.03, zOut2), new Vector3(xCap, 0.03, zIn)],
+      // left end cap
+      [new Vector3(xEnd, 0.03, zIn), new Vector3(xEnd, 0.03, zOut2)],
+    ];
+    for (let x = DOOR.x - ENTRY_GATE.spacing * 0.5; x > Q_LINE.minX; x -= ENTRY_GATE.spacing) {
+      lines.push([new Vector3(x, 0.03, zIn), new Vector3(x, 0.03, zOut2)]);
+    }
+    const lane = MeshBuilder.CreateLineSystem('queueLane', { lines }, scene);
+    lane.color = ACCENT;
+    lane.alpha = 0.45;
+    lane.isPickable = false;
+    lane.parent = world;
+  })();
 
   // ---------- face-detection reticle: Face-ID corner brackets over the head ----------
   // one per gate, attached to whoever owns the scanner right now. Pure
@@ -1363,14 +1735,20 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
 
   // gate state: one shopper scans at a time (single-file queue behind —
   // see gateRank/spurMove); flash keeps the lamps green just after a payment
-  const gate = { user: null, flash: 0 };
+  const gate = { user: null, flash: 0, deny: 0 };
   let exitSeq = 0; // queue order = order of turning onto the exit spur
 
   // ---------- crowd control (React steppers drive these) ----------
-  // cycle through the character files — 9 files vs the 8-person cap means no
-  // two people on the floor ever share a model (tints differ regardless)
-  let charSeq = 0;
-  const nextCharFile = () => CHAR_FILES[charSeq++ % CHAR_FILES.length];
+  // the identity picks the wardrobe, not the other way round: each spawn pops
+  // its user first (roster, then generated) and takes the next character file
+  // of that gender. Consecutive same-gender spawns never share a model; a
+  // same-model pair on the floor is possible but rare, and tints differ anyway.
+  const MALE_FILES = CHAR_FILES.filter((f) => !f.includes('Female'));
+  const FEMALE_FILES = CHAR_FILES.filter((f) => f.includes('Female'));
+  const charSeq = { male: 0, female: 0 };
+  const nextCharFile = (female) => (female
+    ? FEMALE_FILES[charSeq.female++ % FEMALE_FILES.length]
+    : MALE_FILES[charSeq.male++ % MALE_FILES.length]);
   const MAX_PEOPLE = 8; // one cap for the whole crowd
   // every person in the store is a shopper: one agent that walks the loop and
   // sometimes turns off at a shelf for a browse session (mode machine:
@@ -1381,11 +1759,18 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   let loopTraffic = [];
   let pendingEntries = 0; // people queued to walk in through the door
   let pendingRemovals = 0; // − presses that must wait for a browse session to end
+  const pendingApiEntries = []; // POSTed customers waiting outside for room
   const browsingCount = () =>
     shoppers.filter((s) => s.mode === 'browse' || s.mode === 'toshelf').length;
-  const totalPeople = () =>
+  // committedBodies = everyone who is or will inevitably be on the floor from
+  // the sim's own queues; totalPeople adds the API arrivals still waiting
+  // outside so the stepper's cap can't be blown past by a curl. Check-in
+  // customers holding at the gate (gateHold) haven't been admitted — they
+  // stand outside the capacity boundary until their verify passes.
+  const committedBodies = () =>
     shoppers.length + pendingEntries - pendingRemovals
-    - shoppers.filter((s) => s.exit).length;
+    - shoppers.filter((s) => s.exit || s.gateHold || s.retreat).length;
+  const totalPeople = () => committedBodies() + pendingApiEntries.length;
 
   // where the entrance spur meets the walk loop
   let tMerge = 0;
@@ -1410,10 +1795,190 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       if (d < best) { best = d; tExit = i / 400; }
     }
   }
+  const nearestLoopT = (x, z) => {
+    let best = Infinity, bt = 0;
+    for (let i = 0; i < 400; i++) {
+      const pt = walkPath.pointAt(i / 400);
+      const d = Math.hypot(pt.x - x, pt.z - z);
+      if (d < best) { best = d; bt = i / 400; }
+    }
+    return bt;
+  };
 
-  function makeShopper(mode, t) {
-    const file = nextCharFile();
-    const h = makeHuman(file);
+  // ---------- right-side doors: auto entry + exit for the random crowd --------
+  // A second gated storefront on the right wall (x = +half), an exact mirror
+  // of the front facade around the shared corner (15,15) but driven
+  // automatically — random shoppers self-scan in, browse, and pay their own
+  // way out (with the odd DECLINED retry). The front doors stay API-only.
+  // Mirroring puts the exit door low on the wall, so its spur and a deep
+  // (≥3) pay queue can straddle the x=11.2 robot lane — accepted: shoppers
+  // already brake for robots and the crowd cap keeps queues shallow.
+  const R_ENTRY_Z = 11;  // corner-side, mirrors the front EXIT door (4 from the corner)
+  const R_EXIT_Z = 3.4;  // mirrors the front ENTRANCE door (7.6 door spacing, like the front)
+  // per-door rig proportions lifted verbatim from the front wall: the door
+  // near the corner wears the front EXIT rig, the far one the ENTRANCE rig.
+  // panes: [width, along-wall offset]; header: [length, offset]; gateD:
+  // scanner depth inward from the wall.
+  const R_RIG = {
+    entry: { panes: [[1.36, -1.96], [2.72, 2.64]], header: [6.7, 0.68], gateD: 1.0 },
+    exit: { panes: [[3.6, -3.16], [3.6, 3.16]], header: [9.9, 0], gateD: 1.9 },
+  };
+  // build one gated doorway on the right wall. kind: 'entry' | 'exit'
+  function makeRightDoorway(centerZ, kind) {
+    const rig = R_RIG[kind];
+    const H = 2.5;
+    // world point: a = along the wall (+z), d = depth inward (+ = into store)
+    const W = (a, d) => ({ x: half - d, z: centerZ + a });
+    const facing = -Math.PI / 2; // face −x, into the store
+    // a wall box spanning `wa` along z (world depth) and `tn` through x (world
+    // width), floor-anchored at (a, d), optional y lift
+    const wput = (wa, h, tn, a, d, m, y = 0) => {
+      const p = W(a, d);
+      const mesh = box(tn, h, wa, m, p.x, y, p.z);
+      mesh.parent = world;
+      return mesh;
+    };
+    wput(0.16, H, 0.16, -1.28, 0, mat.metal);
+    wput(0.16, H, 0.16, 1.28, 0, mat.metal);
+    for (const [pw, pa] of rig.panes) wput(pw, H - 0.1, 0.06, pa, 0, glassMat);
+    wput(rig.header[0], 0.22, 0.2, rig.header[1], 0, mat.metal, H);
+    wput(rig.header[0], 0.06, 0.22, rig.header[1], 0, trimMat, H + 0.22);
+    wput(3.4, 0.04, 2.6, 0, -1.35, mat.counter); // pad outside
+    wput(3.4, 0.02, 0.14, 0, -0.35, trimMat, 0.04); // cyan strip on the pad
+    const panels = [-1, 1].map((s) => {
+      const p0 = W(s * 0.62, 0.14);
+      // box() floor-anchors its y param — 0.02 puts the panel centre at 1.19,
+      // matching the front doors (which set the centre absolutely)
+      const panel = box(0.07, 2.34, 1.24, doorGlassMat, p0.x, 0.02, p0.z);
+      box(0.08, 2.34, 0.1, trimMat, 0, -1.17, 0).parent = panel;
+      panel.parent = world;
+      return { mesh: panel, side: s, closedZ: p0.z };
+    });
+    const lampMats = [];
+    for (const s of [-1, 1]) {
+      const gp = W(s * 0.8, rig.gateD);
+      box(0.18, 1.18, 0.18, mat.metal, gp.x, 0, gp.z).parent = world;
+      const cam = box(0.3, 0.13, 0.13, mat.shelfDk, gp.x, 1.18, gp.z);
+      cam.rotation.y = facing; cam.rotation.x = 0.32;
+      cam.parent = world;
+      const lm = basic(`rGateLamp${kind}${s}`, { color: 0x35c3ff, alpha: 0.95 });
+      lampMats.push(lm);
+      box(0.2, 0.05, 0.2, lm, gp.x, 1.33, gp.z).parent = world;
+    }
+    const gw = W(0, rig.gateD);
+    const beam = MeshBuilder.CreateBox(`rGateBeam${kind}`, { width: 0.7, height: 0.05, depth: 1.42 }, scene);
+    beam.material = gateBeamMat; beam.isPickable = false; beam.isVisible = false;
+    beam.position.set(gw.x, 1, gw.z); beam.parent = world;
+    // floating verdict tag over the gate
+    const mkTag = (draw, tw = 384, pw = 1.9) => {
+      const key = `${kind}${centerZ}${Math.random()}`;
+      const tex = new DynamicTexture(`rTagTex${key}`, { width: tw, height: 144 }, scene, true);
+      tex.hasAlpha = true; tex.uScale = -1; tex.uOffset = 1;
+      const m = new StandardMaterial(`rTagMat${key}`, scene);
+      m.disableLighting = true; m.emissiveTexture = tex; m.opacityTexture = tex; m.backFaceCulling = false;
+      const plane = MeshBuilder.CreatePlane(`rTagPl${key}`, { width: pw, height: 0.71 }, scene);
+      plane.material = m; plane.billboardMode = TransformNode.BILLBOARDMODE_ALL;
+      plane.isPickable = false; plane.isVisible = false;
+      plane.position.set(gw.x, 2.1, gw.z); plane.parent = world;
+      if (draw) draw(tex.getContext());
+      tex.update();
+      return { plane, mat: m, tex };
+    };
+    const doorAnchor = { x: W(0, 0).x, z: centerZ };
+    const reticle = makeFaceReticle(`rReticle${kind}${centerZ}`);
+    return { panels, lampMats, beam, gateWorld: gw, doorAnchor, reticle, mkTag, openAmt: 0 };
+  }
+
+  const rEntry = makeRightDoorway(R_ENTRY_Z, 'entry');
+  const rExit = makeRightDoorway(R_EXIT_Z, 'exit');
+  // right entry ID tag (static "ID ✓")
+  const rIdTag = rEntry.mkTag((ctx) => drawVerdictTag(ctx, 'ID ✓', '#4caf72'));
+  const rPaidTag = rExit.mkTag(null);
+  const rDeclinedTag = rExit.mkTag((ctx) => drawVerdictTag(ctx, 'DECLINED ✗', '#e2574c', 480), 480, 2.37);
+  // queue lane on the right apron — the front lane turned 90°. The random
+  // crowd waits along the wall (rightPC entrySlot: x = half+1.9, slots step
+  // +1.25m from the entry door, capped at z=14 where an overflow just
+  // bunches). Wall-side rail leaves a gap across the doorway so the walk
+  // from the pivot slot to the scanner isn't fenced off; the cap behind the
+  // pivot mirrors the front one.
+  (function rightQueueLane() {
+    const QX = half + 1.9, SPACING = 1.25, Z_MAX = 14;
+    const xIn = QX - 0.8, xOut = QX + 0.8;
+    const zEnd = Z_MAX + 0.2, zCap = R_ENTRY_Z - 0.8;
+    const lines = [
+      // wall-side rail, doorway gap between R_ENTRY_Z ± 0.8
+      [new Vector3(xIn, 0.03, zEnd), new Vector3(xIn, 0.03, R_ENTRY_Z + 0.8)],
+      // outer rail, full length + cap behind the pivot slot
+      [new Vector3(xOut, 0.03, zEnd), new Vector3(xOut, 0.03, zCap)],
+      [new Vector3(xOut, 0.03, zCap), new Vector3(xIn, 0.03, zCap)],
+      // far end cap
+      [new Vector3(xIn, 0.03, zEnd), new Vector3(xOut, 0.03, zEnd)],
+    ];
+    for (let z = R_ENTRY_Z + SPACING * 0.5; z < Z_MAX; z += SPACING) {
+      lines.push([new Vector3(xIn, 0.03, z), new Vector3(xOut, 0.03, z)]);
+    }
+    const lane = MeshBuilder.CreateLineSystem('queueLaneR', { lines }, scene);
+    lane.color = ACCENT;
+    lane.alpha = 0.45;
+    lane.isPickable = false;
+    lane.parent = world;
+  })();
+  // right loop attachments: entry merges high (near [11.7,9.6]); exit leaves
+  // lower (near [10.4,4.0], right beside the mirrored exit door) so a random
+  // shopper browses a full loop between
+  const tMergeR = nearestLoopT(half - 2.0, R_ENTRY_Z);
+  const mergePointR = walkPath.pointAt(tMergeR);
+  const tExitR = nearestLoopT(11, R_EXIT_Z + 0.2);
+
+  // shared crowd target (random population size); Backdoor drives it via SSE.
+  // Hard cap 5 — API users are uncapped and counted separately.
+  // Opening random crowd starts at 1 (independent of the API roster); the API
+  // is the source of truth and reconciles this via SSE, but boot to the same
+  // value so there's no 5→1 flash before the first crowd event lands.
+  const CROWD_MAX = 5;
+  const CROWD_START = 1;
+  let crowdTarget = CROWD_START;
+  let booted = false; // true once the opening crowd is on the loop
+
+  // ---------- portal configs: the front (API) and right (random) doorways ----
+  // The per-shopper movement code (spurMove / ranks / gate claim) reads these
+  // so it stays door-agnostic; each shopper carries its portal in p.pc.
+  const frontPC = {
+    key: 'front',
+    entrySlot: (r) => queueSlot(r),
+    mergePoint,
+    retreat: { x: DOOR.x, z: DOOR.zOut + 1.6 },
+    exitSlot: (r) => ({ x: EXIT.x, z: GATE.z - GATE.spacing * r }),
+    exitDoorPoint: { x: EXIT.x, z: EXIT.zDoor },
+    exitOutPoint: { x: EXIT.x, z: EXIT.zOut + 0.5 },
+    entryGate, gate,
+    entryCleared: (p) => p.h.position.z < ENTRY_GATE.z - 0.9,
+    exitCleared: (p) => p.h.position.z > GATE.z + 0.9,
+    tMerge, tExit,
+  };
+  const rightPC = {
+    key: 'right',
+    entrySlot: (r) => (r === 0
+      ? { x: rEntry.gateWorld.x, z: rEntry.gateWorld.z }
+      : { x: half + 1.9, z: Math.min(R_ENTRY_Z + 1.25 * (r - 1), 14) }),
+    mergePoint: mergePointR,
+    retreat: { x: half + 2.4, z: R_ENTRY_Z },
+    exitSlot: (r) => ({ x: rExit.gateWorld.x - 1.25 * r, z: rExit.gateWorld.z }),
+    exitDoorPoint: { x: half, z: R_EXIT_Z },
+    exitOutPoint: { x: half + 1.6, z: R_EXIT_Z },
+    entryGate: { user: null, flash: 0, deny: 0 },
+    gate: { user: null, flash: 0, deny: 0 },
+    entryCleared: (p) => p.h.position.x < rEntry.gateWorld.x - 0.9,
+    exitCleared: (p) => p.h.position.x > rExit.gateWorld.x + 0.9,
+    tMerge: tMergeR, tExit: tExitR,
+    // runtime visuals for the right frame block
+    rig: { rEntry, rExit, rIdTag, rPaidTag, rDeclinedTag },
+    idTagT: Infinity, paidTagT: Infinity, declinedTagT: Infinity,
+  };
+
+  function makeShopper(mode, t, identOverride, pc = frontPC) {
+    const ident = identOverride ?? nextIdentity();
+    const h = makeHuman(nextCharFile(ident.female));
     // browse kit, disabled until a shelf visit: product box that rides the
     // hand, phone + beam for the QR scan, green access ring for the feet
     const itemMat = pbr('pickItemM', { color: productColors[0], roughness: 0.7 });
@@ -1446,6 +2011,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     ring.parent = world;
     const p = {
       h,
+      pc, // portal config: front (API) or right (random) doorway
       mode, // 'enter' | 'loop' | 'exitwalk' | 'toshelf' | 'browse' | 'fromshelf'
       t: t ?? tMerge,
       wp: 0,
@@ -1468,7 +2034,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     };
     if (mode === 'enter') p.enterSeq = ++enterSeq;
     p.h.parent = world;
-    p.person = registerPerson(p.h, 'shopper', file, p);
+    p.person = registerPerson(p.h, 'shopper', ident, p);
     shoppers.push(p);
     return p;
   }
@@ -1480,7 +2046,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   }
   // initial shoppers only: they were "already in the store" when the
   // dashboard opened, so they spawn directly on the loop
-  function spawnOnLoop() {
+  function spawnOnLoop(identOverride, pc = frontPC) {
     let t = Math.random();
     for (let tries = 0; tries < 12; tries++) {
       const clear = shoppers.every((q) => {
@@ -1491,7 +2057,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       if (clear) break;
       t = Math.random();
     }
-    makeShopper('loop', t);
+    makeShopper('loop', t, identOverride, pc);
   }
   function addPerson() {
     if (totalPeople() < MAX_PEOPLE) pendingEntries++;
@@ -1509,17 +2075,37 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // soonest to reach the exit junction walks out first. Only people actually
   // walking are candidates — browsers are never yanked out of a session; a
   // pending removal waits in pendingRemovals until someone rejoins the loop.
+  // API-owned customers (apiId set) are never picked: the users API is the
+  // sole authority over their exits (checkout / verify fail / delete), which
+  // is what keeps its status field truthful.
   function flagExit() {
     if (exitQueueLoad() >= 3) return false;
     let pick = null, best = 2;
     for (const w of shoppers) {
-      if (w.exit || w.slot >= 0) continue;
+      if (w.exit || w.slot >= 0 || w.person?.apiId != null) continue;
       if (w.mode !== 'loop' && w.mode !== 'enter') continue;
-      const d = w.mode === 'loop' ? (((tExit - w.t) % 1) + 1) % 1 : 1.5;
+      const d = w.mode === 'loop' ? (((w.pc.tExit - w.t) % 1) + 1) % 1 : 1.5;
       if (d < best) { best = d; pick = w; }
     }
     if (pick) pick.exit = true;
     return !!pick;
+  }
+  // random-crowd census + reconcile toward crowdTarget (API users are never
+  // counted here — they are commanded, not ambient)
+  const isRandom = (p) => p.person?.apiId == null;
+  const randomOnFloor = () =>
+    shoppers.filter((p) => isRandom(p) && !p.exit && !p.retreat && p.fadeStart == null).length;
+  const randomLive = () => randomOnFloor() + pendingEntries;
+  function setCrowdTarget(n) {
+    crowdTarget = Math.max(0, Math.min(CROWD_MAX, Math.round(n)));
+    // before the opening crowd is seeded onto the loop, just record the target
+    // (boot spawns exactly crowdTarget on the loop); reconciling here would
+    // double-count against a floor that isn't populated yet
+    if (!booted) return crowdTarget;
+    let live = randomLive();
+    while (live < crowdTarget) { pendingEntries++; live++; }   // queue the deficit at the right door
+    while (live > crowdTarget && flagExit()) live--;           // send the surplus out the right door
+    return crowdTarget;
   }
   function removePerson() {
     if (pendingEntries > 0) pendingEntries--;
@@ -1527,20 +2113,174 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     return totalPeople();
   }
 
-  // browsing spots sit within arm's reach of the two wall shelves, clear of
-  // the robot lanes at z=-11.5 and x=11.2 (people face the shelf products)
-  // every slot stands exactly on a door seam of its shelf (01 back wall:
-  // x = unit −3 ± {1.6, 4.8}; 03 right wall: z = unit 1 ± {1.6, 4.8}) so the
-  // glass parts right in front of the shopper — see buildShelfLockRig
-  const PICK_SLOTS = [
-    [-1.4, -12.35, Math.PI], [14.55, -0.6, -Math.PI / 2],
-    [-4.6, -12.35, Math.PI], [14.55, -3.8, -Math.PI / 2],
-    [1.8, -12.35, Math.PI], [14.55, 2.6, -Math.PI / 2],
-    [-7.8, -12.35, Math.PI], [14.55, 5.8, -Math.PI / 2],
-  ];
-  // QR scan pedestals: a card-reader post per pick slot, offset half a step
-  // along the shelf so the flying pick items never thread through it.
-  // PLATE_POS doubles as the beam target for the phone scan.
+  // ---------- users API control channel (SSE → Dashboard → here) ----------
+  // The users API owns the customer roster; these hooks make its mutations
+  // visible in the running store. Sim walk-ins/outs and the crowd stepper
+  // never write back — the roster is who is *known*, not who is inside.
+  function shopperByApiId(apiId) {
+    for (const p of shoppers) if (p.person?.apiId === apiId) return p;
+    return null;
+  }
+  // POST /users → a brand-new customer (status `waiting`) appears at the
+  // storefront and HOLDS at the scanner for a verify verdict, exactly like
+  // checkin — not a walk-straight-in. They queue behind any existing line and
+  // don't count toward MAX_PEOPLE until verify-pass admits them. Delegates to
+  // the checkin spawn so both paths stay identical.
+  function apiAddUser(u) {
+    apiCheckinUser(u);
+  }
+  // DELETE /users/:id → fade out in place (no walk-out); customers still in a
+  // queue (gate or unconsumed roster) just never materialise
+  function apiRemoveUser(id) {
+    const qi = pendingApiEntries.findIndex((i) => i.apiId === id);
+    if (qi >= 0) { pendingApiEntries.splice(qi, 1); return; }
+    for (let i = rosterIdx; i < users.length; i++) {
+      if (users[i].id === id) { users.splice(i, 1); return; }
+    }
+    const p = shopperByApiId(id);
+    if (!p || p.fadeStart != null) return;
+    p.fadeStart = elapsed;
+    if (entryGate.user === p) entryGate.user = null; // don't wedge the scanner
+    p.item.setEnabled(false); p.phone.setEnabled(false);
+    p.beam.setEnabled(false); p.ring.setEnabled(false);
+  }
+  // PATCH /users/:id → names refresh live; a gender change respawns the same
+  // customer in place with a new gender-matched body
+  function apiUpdateUser(u) {
+    const q = pendingApiEntries.find((i) => i.apiId === u.id);
+    if (q) { Object.assign(q, identFromUser(u)); return; }
+    for (let i = rosterIdx; i < users.length; i++) {
+      if (users[i].id === u.id) { users[i] = u; return; }
+    }
+    const p = shopperByApiId(u.id);
+    if (!p || p.fadeStart != null) return;
+    const e = p.person;
+    e.name = u.name;
+    e.initials = initialsOf(u.name);
+    const female = u.gender === 'female';
+    if (female !== e.female) { e.female = female; respawnBody(p, female); }
+  }
+  // abandon any shelf business mid-flight and rejoin the loop at the nearest
+  // point — used when an API command needs the shopper walkable NOW (body
+  // swaps, forced checkout). No-op for people already on a walkable leg.
+  function snapToLoop(p) {
+    if (p.mode === 'loop' || p.mode === 'enter' || p.mode === 'exitwalk') return;
+    releaseShelfAccess(p);
+    p.slot = -1; p.mv = null; p.idling = false; p.shelfScan = null;
+    p.picksLeft = 0; p.ringT = Infinity;
+    p.item.setEnabled(false); p.phone.setEnabled(false);
+    p.beam.setEnabled(false); p.ring.setEnabled(false);
+    let best = Infinity, bt = 0;
+    for (let i = 0; i < 200; i++) {
+      const pt = walkPath.pointAt(i / 200);
+      const d = (pt.x - p.h.position.x) ** 2 + (pt.z - p.h.position.z) ** 2;
+      if (d < best) { best = d; bt = i / 200; }
+    }
+    p.mode = 'loop'; p.t = bt;
+  }
+  // POST /users/:id/checkout → drop everything, walk to the exit gate at a
+  // normal pace, and HOLD there to pay (payHold) instead of scanning out on
+  // their own — the exit-side mirror of gateHold. Ordinary loop traffic rules
+  // apply the whole way (braking, robot stop, single-file gate queue).
+  // Release comes from apiPaymentUser.
+  function apiCheckoutUser(id) {
+    const qi = pendingApiEntries.findIndex((i) => i.apiId === id);
+    if (qi >= 0) { pendingApiEntries.splice(qi, 1); return; } // never arrived
+    for (let i = rosterIdx; i < users.length; i++) {
+      if (users[i].id === id) { users.splice(i, 1); return; }
+    }
+    const p = shopperByApiId(id);
+    if (!p || p.fadeStart != null || p.done) return;
+    snapToLoop(p);
+    p.payHold = true;
+    p.exit = true;
+  }
+  // POST /users/:id/payment → verdict for a payHold customer at the exit fare
+  // gate. pass: the beam sweeps them, they pay and walk out. fail: red deny
+  // blink + DECLINED tag, they stay put to try again — the one asymmetry with
+  // verify (a failed entry turns you away; a failed payment just holds you).
+  function applyPayment(p, result) {
+    p.payVerdict = undefined;
+    if (result === 'pass') {
+      p.scan = 0; // hand over to the normal sweep; success clears payHold
+      p.payHold = false;
+    } else {
+      gate.deny = 0.9;
+      showDeclinedTag();
+    }
+  }
+  function apiPaymentUser(id, result) {
+    const p = shopperByApiId(id);
+    if (!p || !p.payHold || p.fadeStart != null || p.done) return;
+    if (gate.user === p) applyPayment(p, result);
+    else p.payVerdict = result; // applies the moment they reach the scanner
+  }
+  // POST /users/:id/checkin → the customer shows up outside and joins the
+  // entry line, holding at the scanner (gateHold) until a verify verdict
+  // arrives — no self-scan like ambient walk-ins. Long lines stack visibly
+  // out the door: each spawn starts behind the current tail.
+  function apiCheckinUser(u) {
+    if (shopperByApiId(u.id)) return; // body still on the floor (race) — skip
+    for (let i = rosterIdx; i < users.length; i++) {
+      if (users[i].id === u.id) { users.splice(i, 1); break; } // no double life
+    }
+    const queueLen = shoppers.filter((q) => q.mode === 'enter' && q.wp === 0).length;
+    const p = makeShopper('enter', undefined, identFromUser(u));
+    p.gateHold = true;
+    // appear one slot beyond the current tail of the sideways line
+    const s = queueSlot(queueLen + 1);
+    p.h.position.set(Math.max(s.x - ENTRY_GATE.spacing, Q_LINE.minX), 0, Q_LINE.z);
+    p.h.rotation.y = Math.PI / 2; // facing along the line toward the door
+    p.cur = 0;
+  }
+  // POST /users/:id/verify → verdict for a gateHold customer. pass: the beam
+  // sweeps them like any shopper and they walk in. fail: red deny blink, they
+  // turn around and leave (despawn outside) — checkin can bring them back.
+  function applyVerdict(p, result) {
+    p.verdict = undefined;
+    if (result === 'pass') {
+      p.scan = 0; // hand over to the normal sweep; success path clears gateHold
+      p.verifyFail = false;
+    } else {
+      p.gateHold = false;
+      p.verifying = false;
+      p.retreat = true;
+      if (entryGate.user === p) { entryGate.user = null; entryGate.deny = 0.9; }
+    }
+  }
+  function apiVerifyUser(id, result) {
+    const p = shopperByApiId(id);
+    if (!p || !p.gateHold || p.fadeStart != null || p.done) return;
+    if (entryGate.user === p) applyVerdict(p, result);
+    else if (result === 'fail') applyVerdict(p, result); // turned away from anywhere in line
+    else p.verdict = result; // pre-approved: sweeps the moment they reach the scanner
+  }
+  // body swap: keep the sim object and the person entry (custNo, picks, the
+  // followed card), replace only the 3D body. Mid-browse swaps first snap the
+  // shopper back onto the loop — a pick sequence can't survive losing its arms.
+  function respawnBody(p, female) {
+    const e = p.person;
+    snapToLoop(p);
+    const old = p.h;
+    const nh = makeHuman(nextCharFile(female));
+    nh.parent = world;
+    nh.position.copyFrom(old.position);
+    nh.rotation.y = old.rotation.y;
+    p.h = nh;
+    p.started = false; // any browse session died with the old body
+    p.headNode = null; // cached bones point into the old skeleton — re-resolve
+    e.h = nh; // re-point the entry BEFORE disposing — unregisterPerson then no-ops
+    e.color = cardColor(nh.metadata.look.torso);
+    makePickCap(e.id, nh);
+    disposeHuman(old);
+  }
+
+  // ---------- browse slots: generated from every shelf's door seams ----------
+  // every online, non-checkout shelf takes a stand point + QR pedestal on
+  // each door seam of each glass face (gondolas get both sides), so the glass
+  // parts right in front of the shopper exactly like the classic wall-shelf
+  // slots. Offline shelves get none — their doors never open, so nobody is
+  // sent to scan at a dead reader.
   const qrTex = new DynamicTexture('qrTex', { width: 128, height: 128 }, scene, true);
   {
     const ctx = qrTex.getContext();
@@ -1563,23 +2303,149 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   qrMat.disableLighting = true;
   qrMat.emissiveTexture = qrTex;
   qrMat.specularColor = Color3.Black();
-  const PLATE_POS = PICK_SLOTS.map(([bx, bz]) => (bz < -10
-    ? new Vector3(bx + 0.85, 1.42, -12.62)
-    : new Vector3(14.2, 1.42, bz + 0.85)));
-  PLATE_POS.forEach((pp, i) => {
-    const back = PICK_SLOTS[i][1] < -10; // faces +z (back wall) or +x (right wall)
-    box(0.07, 1.2, 0.07, mat.metal, pp.x, 0, pp.z).parent = world;
-    const plate = back
-      ? box(0.36, 0.36, 0.045, qrMat, pp.x, 1.24, pp.z)
-      : box(0.045, 0.36, 0.36, qrMat, pp.x, 1.24, pp.z);
-    plate.parent = world;
+
+  // one record per slot — everything the browse machinery needs: stand point,
+  // facing, arm reach, the seam whose glass parts for this shopper, the QR
+  // plate the phone beam aims at, and (filled below) the walk route
+  const SLOTS = []; // { x, z, ry, reach, shelfId, seam, plate, itemColor, route }
+  for (const zn of zones) {
+    const td = SHELF_TYPE[zn.type];
+    if (!td.lock || !zn.data.online) continue;
+    const lk = lockById.get(zn.id);
+    const colors = itemPalette(zn.data);
+    const wm = zn.unit.computeWorldMatrix(true);
+    for (const face of td.lock.faces) {
+      for (const sm of lk.seams) {
+        const stand = Vector3.TransformCoordinates(new Vector3(sm.localX, 0, td.stand * face), wm);
+        // pedestal offset half a step along the shelf so flying pick items
+        // never thread through it; the plate sits right at the glass plane
+        const plate = Vector3.TransformCoordinates(
+          new Vector3(sm.localX + 0.85, 1.42, (td.lock.zFront + 0.06) * face), wm);
+        box(0.07, 1.2, 0.07, mat.metal, plate.x, 0, plate.z).parent = world;
+        const pl = box(0.36, 0.36, 0.045, qrMat, plate.x, 1.24, plate.z);
+        pl.rotation.y = zn.rotY;
+        pl.parent = world;
+        const nx = Math.sin(zn.rotY) * face, nz = Math.cos(zn.rotY) * face; // world face normal
+        SLOTS.push({
+          x: stand.x, z: stand.z,
+          ry: Math.atan2(-nx, -nz), // stand facing the shelf
+          reach: td.reach, shelfId: zn.id, seam: sm, plate,
+          itemColor: colors[SLOTS.length % colors.length],
+          route: null,
+        });
+      }
+    }
+  }
+
+  // ---------- shopper navgrid: loop → slot spur routes ----------
+  // shelves come from data now, so the spur between the walk loop and a
+  // browse slot can't be hand-authored anymore. A coarse grid over the floor
+  // marks every shelf footprint blocked; a BFS from each slot flows out to
+  // the nearest walk-loop cell (nearest by walking, so it naturally rounds
+  // shelf ends the way the old hand-tuned corridor route did), and the cell
+  // path is pulled taut with line-of-sight smoothing so people still walk
+  // natural straight legs.
+  const NAV = { min: -14.2, cell: 0.45 };
+  NAV.n = Math.ceil((14.2 - NAV.min) / NAV.cell) + 1;
+  const navIdx = (ix, iz) => iz * NAV.n + ix;
+  const navCell = (x, z) => [
+    Math.min(NAV.n - 1, Math.max(0, Math.round((x - NAV.min) / NAV.cell))),
+    Math.min(NAV.n - 1, Math.max(0, Math.round((z - NAV.min) / NAV.cell))),
+  ];
+  const navBlocked = new Uint8Array(NAV.n * NAV.n);
+  {
+    // 0.2 margin: tight, but this store has always walked people right along
+    // the glass (the old corridor behind the right wall shelf was 0.85 wide)
+    const MARGIN = 0.2;
+    for (let iz = 0; iz < NAV.n; iz++) {
+      for (let ix = 0; ix < NAV.n; ix++) {
+        const x = NAV.min + ix * NAV.cell, z = NAV.min + iz * NAV.cell;
+        if (shelves.some((sh) => SHELF_TYPE[sh.type] && inFootprint(x, z, sh, MARGIN)))
+          navBlocked[navIdx(ix, iz)] = 1;
+      }
+    }
+    // stand pockets: slots stand tight to the glass — inside the inflated
+    // footprint at grid resolution — so their cells are explicitly walkable
+    for (const s of SLOTS) { const [ix, iz] = navCell(s.x, s.z); navBlocked[navIdx(ix, iz)] = 0; }
+  }
+  const navFree = (x, z) => { const [ix, iz] = navCell(x, z); return !navBlocked[navIdx(ix, iz)]; };
+  function navLineFree(ax, az, bx, bz) {
+    const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / (NAV.cell * 0.5)));
+    for (let s = 0; s <= steps; s++) {
+      const k = s / steps;
+      if (!navFree(ax + (bx - ax) * k, az + (bz - az) * k)) return false;
+    }
+    return true;
+  }
+  function nearestT(x, z) {
+    let best = Infinity, bt = 0;
+    for (let i = 0; i < 400; i++) {
+      const pt = walkPath.pointAt(i / 400);
+      const d = (pt.x - x) ** 2 + (pt.z - z) ** 2;
+      if (d < best) { best = d; bt = i / 400; }
+    }
+    return bt;
+  }
+  // cells the walk loop passes through — the BFS goal set
+  const loopCellT = new Map();
+  walkPathPts.forEach((p, i) => {
+    const [ix, iz] = navCell(p.x, p.z);
+    const id = navIdx(ix, iz);
+    if (!loopCellT.has(id)) loopCellT.set(id, i / walkPathPts.length);
   });
+  function routeFromLoop(sx, sz) {
+    const [six, siz] = navCell(sx, sz);
+    const start = navIdx(six, siz);
+    const prev = new Int32Array(NAV.n * NAV.n).fill(-1);
+    prev[start] = start;
+    const queue = [start];
+    let goal = -1;
+    for (let qi = 0; qi < queue.length && goal < 0; qi++) {
+      const cur = queue[qi];
+      const cx = cur % NAV.n, cz = (cur / NAV.n) | 0;
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+        const nx2 = cx + dx, nz2 = cz + dz;
+        if (nx2 < 0 || nz2 < 0 || nx2 >= NAV.n || nz2 >= NAV.n) continue;
+        const ni = navIdx(nx2, nz2);
+        if (prev[ni] >= 0 || navBlocked[ni]) continue;
+        // no diagonal corner-cutting through a blocked cell
+        if (dx && dz && (navBlocked[navIdx(nx2, cz)] || navBlocked[navIdx(cx, nz2)])) continue;
+        prev[ni] = cur;
+        if (loopCellT.has(ni)) { goal = ni; break; }
+        queue.push(ni);
+      }
+    }
+    if (goal < 0) return null; // walled in — the slot is unreachable
+    const pts = [];
+    for (let c = goal; c !== start; c = prev[c]) pts.push({ x: NAV.min + (c % NAV.n) * NAV.cell, z: NAV.min + ((c / NAV.n) | 0) * NAV.cell });
+    pts.push({ x: sx, z: sz }); // exact stand point replaces the start cell
+    const jp = walkPath.pointAt(loopCellT.get(goal));
+    pts[0] = { x: jp.x, z: jp.z }; // exact junction point on the loop
+    // taut rope: keep only the corners a straight walk can't skip
+    const wps = [];
+    let a = 0;
+    while (a < pts.length - 1) {
+      let b = pts.length - 1;
+      while (b > a + 1 && !navLineFree(pts[a].x, pts[a].z, pts[b].x, pts[b].z)) b--;
+      if (b < pts.length - 1) wps.push(new Vector3(pts[b].x, 0, pts[b].z));
+      a = b;
+    }
+    return { t: nearestT(jp.x, jp.z), wps };
+  }
+  for (let i = SLOTS.length - 1; i >= 0; i--) {
+    const r = routeFromLoop(SLOTS[i].x, SLOTS[i].z);
+    if (r) SLOTS[i].route = r;
+    else {
+      console.warn(`[smartStore] browse slot on shelf ${SLOTS[i].shelfId} is unreachable — skipped`);
+      SLOTS.splice(i, 1);
+    }
+  }
 
   // a fresh stand point every time a slot is taken: slide along the shelf,
   // lean in or out a touch, and face it slightly off-square — nobody stands
   // on the exact same mark twice
   function jitterSlot(i) {
-    const [bx, bz, bry] = PICK_SLOTS[i];
+    const { x: bx, z: bz, ry: bry } = SLOTS[i];
     // parallel to the shelf — tight enough that hands stay inside the
     // shopper's own ~1.5m seam gap (±jitter ±pickLat must be < ~0.75)
     const along = (Math.random() * 2 - 1) * 0.25;
@@ -1590,57 +2456,20 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       ry: bry + (Math.random() * 2 - 1) * 0.16,
     };
   }
-  const freePickSlots = () => PICK_SLOTS.map((_, i) => i)
+  const freePickSlots = () => SLOTS.map((_, i) => i)
     .filter((i) => !shoppers.some((p) => p.slot === i));
-
-  // slot → its door seam (nearest anchor on the shelf the slot faces); 1:1 by
-  // construction, so slot reservation doubles as seam exclusivity
-  const SLOT_SEAM = PICK_SLOTS.map(([bx, bz]) => {
-    const lk = bz < -10 ? shelfLocks[0] : shelfLocks[2];
-    let best = null, bd = Infinity;
-    for (const sm of lk.seams) {
-      const d = (sm.anchor.x - bx) ** 2 + (sm.anchor.z - bz) ** 2;
-      if (d < bd) { bd = d; best = sm; }
-    }
-    return best;
-  });
-
-  // ---------- shelf visit: turn off the loop, browse, walk back ----------
-  // each slot joins the walk loop at a junction. Back-wall slots take a
-  // straight spur north (the strip between shelf 01 and the loop's south
-  // stretch is free of fixtures). Right-wall slots sit in the narrow corridor
-  // behind shelf 03 (x 14.05–15), so they thread it at x=14.72 — squeezing
-  // past any occupied slots — and round the shelf's south end at z=-8.8.
-  function nearestT(x, z) {
-    let best = Infinity, bt = 0;
-    for (let i = 0; i < 400; i++) {
-      const pt = walkPath.pointAt(i / 400);
-      const d = (pt.x - x) ** 2 + (pt.z - z) ** 2;
-      if (d < best) { best = d; bt = i / 400; }
-    }
-    return bt;
-  }
-  const CORRIDOR_X = 14.72;
-  const SLOT_ROUTES = PICK_SLOTS.map(([bx, bz]) => {
-    if (bz < -10) return { t: nearestT(bx, bz), wps: [] };
-    return {
-      t: nearestT(11.5, -8.8),
-      wps: [new Vector3(11.5, 0, -8.8), new Vector3(CORRIDOR_X, 0, -8.8), new Vector3(CORRIDOR_X, 0, bz)],
-    };
-  });
 
   // shared session setup: reserve the slot, size the basket, tint the item,
   // aim the facing/sideways vectors the pick cycle animates along
   function beginSession(p, slot, ry) {
     p.slot = slot;
     p.picksLeft = 1 + Math.floor(Math.random() * 3); // 1–3 items this visit
-    p.itemMat.albedoColor = C3(productColors[(slot * 3 + 1) % productColors.length]);
+    p.itemMat.albedoColor = C3(SLOTS[slot].itemColor); // picked item = one of this shelf's own products
     p.f.set(Math.sin(ry), 0, Math.cos(ry));
     p.s.set(Math.cos(ry), 0, -Math.sin(ry));
     p.item.rotation.y = ry;
-    const back = PICK_SLOTS[slot][1] < -10;
-    p.reach = back ? 0.95 : 1.3; // right-wall slots stand farther back
-    if (p.person) p.person.nearShelf = back ? 1 : 3; // slots face wall shelf 01 (back) or 03 (right)
+    p.reach = SLOTS[slot].reach;
+    if (p.person) p.person.nearShelf = SLOTS[slot].shelfId;
     p.started = false;
     p.idling = false;
     p.pickT = 0;
@@ -1653,7 +2482,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     p.mode = 'toshelf';
     p.cur = p.cur ?? p.speed;
     p.mv = {
-      wps: [...SLOT_ROUTES[slot].wps, new Vector3(g.x, 0, g.z)],
+      wps: [...SLOTS[slot].route.wps, new Vector3(g.x, 0, g.z)],
       wi: 0, targetRy: g.ry, settleT: -1, // -1: still walking the leg
     };
   }
@@ -1667,7 +2496,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     if (u.groups.PickUp) u.groups.PickUp.stop();
     u.movingState = undefined; // let applyGait start the Walk clip cleanly
     p.item.setEnabled(false);
-    const route = SLOT_ROUTES[p.slot];
+    const route = SLOTS[p.slot].route;
     p.mode = 'fromshelf';
     p.cur = 0;
     p.mv = {
@@ -1749,7 +2578,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const SCAN_UNLOCK_AT = SCAN_RAISE + SCAN_BEAM * 0.5;
   const _beamTo = new Vector3();
   const _hipPt = new Vector3(), _fistPt = new Vector3();
-  function shelfLockOf(p) { return shelfLocks[(p.person?.nearShelf ?? 1) - 1]; }
+  function shelfLockOf(p) { return lockById.get(p.person?.nearShelf) ?? shelfLocks[0]; }
   // hip-pocket anchor, tracked per frame so the idle bob doesn't detach it
   function hipAnchor(p, out) {
     out.copyFrom(p.s).scaleInPlace(0.24).addInPlace(p.h.position);
@@ -1771,7 +2600,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     s.t += dt;
     const u = p.h.metadata;
     const lk = shelfLockOf(p);
-    const plate = PLATE_POS[p.slot];
+    const plate = SLOTS[p.slot]?.plate;
     if (u.fist) {
       p.phone.setEnabled(true);
       p.phone.rotation.y = p.h.rotation.y;
@@ -1824,7 +2653,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // from fully shut to its first open seam, 'scan_ok' for every scan after.
   function takeAccess(p) {
     const lk = shelfLockOf(p);
-    const sm = SLOT_SEAM[p.slot];
+    const sm = SLOTS[p.slot]?.seam;
     p.access = lk.id;
     p.accessSeam = sm;
     const wasOpen = lk.masterOpen || lk.heldSeams > 0;
@@ -1849,7 +2678,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       p.beam?.setEnabled(false);
     }
     if (p.access) {
-      const lk = shelfLocks[p.access - 1];
+      const lk = lockById.get(p.access);
       const sm = p.accessSeam;
       // their door glides shut behind them (unless the dashboard master holds it)
       if (sm && sm.holders > 0 && --sm.holders === 0) lk.heldSeams = Math.max(0, lk.heldSeams - 1);
@@ -1974,17 +2803,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   }
 
   // ---------- robot navigation network ----------
-  const NODES = [
-    [-10, -11.5], [4, -11.5], [9, -11.5], [11.2, -6], [11.2, 1], [11.2, 6.5],
-    [-3.3, -1.2], [4, -1.2], [9, -1.2], [-3.3, 2.7], [9, 2.7], [-3.7, 2.7],
-    [-13.5, 2.7], [-13.5, 6], [-3.7, 6], [4, 7], [-4.3, 6], [-8, 6], [-8, 14], [-4.3, 14],
-  ];
-  const EDGES = [
-    [0, 1], [1, 2], [1, 7], [2, 3], [3, 4], [4, 5], [4, 8],
-    [6, 7], [7, 8], [6, 9], [8, 10], [9, 10], [9, 11], [11, 12],
-    [12, 13], [13, 14], [14, 11], [5, 15], [15, 14], [14, 16],
-    [16, 17], [17, 18], [18, 19], [19, 16],
-  ];
+  // fixed architecture, hoisted to module scope so validateShelfLayout can
+  // refuse shelf placements that block a lane
+  const NODES = ROBOT_NODES;
+  const EDGES = ROBOT_EDGES;
   const EDGE_Y = 0.06;
   const EDGE_BASE_OPACITY = 0.28;
 
@@ -2103,11 +2925,24 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       (rx * Math.sin(h.rotation.y) + rz * Math.cos(h.rotation.y)) / (rd || 1) > 0.15;
   }
 
-  // stride comes from the GLB Walk clip; swap to Idle while held up
+  // stride comes from the GLB Walk clip; swap to Idle while held up. "Moving"
+  // is measured from real per-frame translation, not the target speed, so a
+  // shopper parked at a gate — queued behind it, or held under the scanner
+  // waiting on an API verdict — settles into Idle instead of running in place.
+  let frameDt = 0.016; // last frame's dt, published by the frame loop below
+  const GAIT_MIN_VEL = 0.4; // world-units/sec: above lateral-ease jitter, below any real walk
   function applyGait(p) {
     const u = p.h.metadata;
     if (!u.ready) return;
-    const moving = p.cur > p.speed * 0.25;
+    const pos = p.h.position;
+    let vel = 0;
+    if (p.prevPos) {
+      vel = Math.hypot(pos.x - p.prevPos.x, pos.z - p.prevPos.z) / Math.max(frameDt, 1e-4);
+      p.prevPos.copyFrom(pos);
+    } else {
+      p.prevPos = pos.clone(); // seed on first use — spawns/teleports read as still
+    }
+    const moving = vel > GAIT_MIN_VEL;
     if (u.movingState !== moving) {
       u.movingState = moving;
       const on = moving ? u.groups.Walk : u.groups.Idle;
@@ -2118,11 +2953,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     if (moving && u.groups.Walk) u.groups.Walk.speedRatio = p.cur * 45;
   }
 
-  // exit-queue rank: 0 owns the scanner next, n waits n slots behind the gate
+  // exit-queue rank: 0 owns the scanner next, n waits n slots behind the gate.
+  // Ranks are per-portal — the two doorways queue independently.
   function gateRank(p) {
     let r = 0;
     for (const q of shoppers) {
-      if (q !== p && q.mode === 'exitwalk' && q.wp === 0 && q.exitSeq < p.exitSeq) r++;
+      if (q !== p && q.pc === p.pc && q.mode === 'exitwalk' && q.wp === 0 && q.exitSeq < p.exitSeq) r++;
     }
     return r;
   }
@@ -2130,7 +2966,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   function entryRank(p) {
     let r = 0;
     for (const q of shoppers) {
-      if (q !== p && q.mode === 'enter' && q.wp === 0 && q.enterSeq < p.enterSeq) r++;
+      if (q !== p && q.pc === p.pc && q.mode === 'enter' && q.wp === 0 && q.enterSeq < p.enterSeq) r++;
     }
     return r;
   }
@@ -2141,19 +2977,24 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // (queue single-file behind it), 1 = exit door, 2 = outside → despawn.
   const _spurTgt = new Vector3();
   function spurMove(p, dt) {
+    const pc = p.pc;
     if (p.mode === 'enter') {
-      if (p.wp === 0) _spurTgt.set(DOOR.x, 0, ENTRY_GATE.z + ENTRY_GATE.spacing * entryRank(p));
-      else _spurTgt.copyFrom(mergePoint);
+      if (p.retreat) _spurTgt.set(pc.retreat.x, 0, pc.retreat.z); // turned away → back outside
+      else if (p.wp === 0) {
+        const s = pc.entrySlot(entryRank(p));
+        _spurTgt.set(s.x, 0, s.z);
+      }
+      else _spurTgt.copyFrom(pc.mergePoint);
     }
-    else if (p.wp === 0) _spurTgt.set(EXIT.x, 0, GATE.z - GATE.spacing * gateRank(p));
-    else _spurTgt.set(EXIT.x, 0, p.wp === 1 ? EXIT.zDoor : EXIT.zOut + 0.5);
+    else if (p.wp === 0) { const s = pc.exitSlot(gateRank(p)); _spurTgt.set(s.x, 0, s.z); }
+    else { const s = p.wp === 1 ? pc.exitDoorPoint : pc.exitOutPoint; _spurTgt.set(s.x, 0, s.z); }
     const dx = _spurTgt.x - p.h.position.x, dz = _spurTgt.z - p.h.position.z;
     const dist = Math.hypot(dx, dz);
     let target = p.speed;
     // arriving: wait by the junction if the loop is congested right there
     if (p.mode === 'enter' && p.wp === 1 && dist < 1.6) {
       const busy = shoppers.some((q) => q !== p && q.mode === 'loop' &&
-        Math.hypot(q.h.position.x - mergePoint.x, q.h.position.z - mergePoint.z) < 1.3);
+        Math.hypot(q.h.position.x - pc.mergePoint.x, q.h.position.z - pc.mergePoint.z) < 1.3);
       if (busy) target = 0;
     }
     if (p.scan !== undefined) target = 0; // held between the gate posts mid-scan
@@ -2167,20 +3008,37 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     }
     if (dist <= Math.max(0.12, step)) {
       if (p.mode === 'enter') {
-        if (p.wp === 0) {
+        if (p.retreat) p.done = true; // out the door and gone
+        else if (p.wp === 0) {
           // head of the entry queue claims the scanner; the sweep runs in the
           // frame loop and advances wp to 1 (→ merge point) once verified
-          if (!entryGate.user && p.scan === undefined && entryRank(p) === 0) {
-            entryGate.user = p; p.scan = 0; p.verifying = true;
-            p.verifyFail = Math.random() < 0.15; // first sweep rejected → rescan
+          if (!pc.entryGate.user && p.scan === undefined && entryRank(p) === 0) {
+            pc.entryGate.user = p; p.verifying = true;
+            if (p.gateHold) {
+              // check-in customers hold under the reticle for the API verdict;
+              // a verdict that arrived while they queued applies right away
+              if (p.verdict) applyVerdict(p, p.verdict);
+            } else {
+              p.scan = 0;
+              p.verifyFail = Math.random() < 0.15; // first sweep rejected → rescan
+            }
           }
-        } else { p.mode = 'loop'; p.t = tMerge; }
+        } else { p.mode = 'loop'; p.t = pc.tMerge; }
       }
       else if (p.wp === 0) {
+        // reached the exit gate line.
         // head of the queue claims the scanner as soon as it frees up; the
         // scan itself runs in the frame loop and advances wp when paid
-        if (!gate.user && p.scan === undefined && gateRank(p) === 0) {
-          gate.user = p; p.scan = 0; p.paying = true;
+        if (!pc.gate.user && p.scan === undefined && gateRank(p) === 0) {
+          pc.gate.user = p; p.paying = true;
+          if (p.payHold) {
+            // API-checkout customers hold under the reticle for a payment
+            // verdict; one that arrived while they queued applies right away
+            if (p.payVerdict) applyPayment(p, p.payVerdict);
+          } else {
+            p.scan = 0; // auto exiters pay themselves out…
+            p.payFail = p.pc.key === 'right' && Math.random() < 0.3; // …but random ones may get DECLINED first
+          }
         }
       } else if (p.wp === 1) p.wp = 2;
       else p.done = true; // out the door and gone — collected after the update
@@ -2215,7 +3073,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       const stepFrac = (((p.t - prevT) % 1) + 1) % 1;
       let cand = null, nc = 0;
       for (const i of freePickSlots()) {
-        const d = (((SLOT_ROUTES[i].t - prevT) % 1) + 1) % 1;
+        const d = (((SLOTS[i].route.t - prevT) % 1) + 1) % 1;
         if (d > stepFrac) continue; // junction not crossed this frame
         if (Math.random() * ++nc < 1) cand = i; // reservoir pick among crossed slots
       }
@@ -2241,9 +3099,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     p.h.position.x += tan.z * off;
     p.h.position.z -= tan.x * off;
 
-    // flagged to leave → turn onto the exit spur at the junction
+    // flagged to leave → turn onto its portal's exit spur at the junction
     if (p.exit) {
-      const d = (((tExit - p.t) % 1) + 1) % 1 * walkPath.length;
+      const d = (((p.pc.tExit - p.t) % 1) + 1) % 1 * walkPath.length;
       if (d < 0.6) { p.mode = 'exitwalk'; p.wp = 0; p.exitSeq = ++exitSeq; }
     }
     applyGait(p);
@@ -2257,34 +3115,62 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   scene.executeWhenReady(() => {
     scene.onAfterRenderObservable.addOnce(() => {
       onReady?.();
-      for (let i = 0; i < 5; i++) spawnOnLoop();
+      // roster 'inside' users seed onto the loop as API customers…
+      const seedCount = users.filter((u) => !u.status || u.status === 'inside').length;
+      for (let i = 0; i < seedCount; i++) spawnOnLoop();
+      // …then the opening random crowd (auto, right-door population)
+      for (let i = 0; i < crowdTarget; i++) spawnOnLoop(genIdentity(), rightPC);
+      booted = true; // future target changes now reconcile through the doors
+      // customers the API left mid-checkin resume their wait at the gate
+      users.filter((u) => u.status === 'waiting').forEach((u) => apiCheckinUser(u));
     });
   });
 
-  let nextSwap = 18; // ambient door traffic: one leaves, another arrives
+  let nextSwap = 18; // ambient right-door churn: one random leaves, another arrives
   // per-frame update. forcedDt lets the debug handle fast-forward the sim
   // (controller._step) in a throttled background tab without real frames
   const frame = (forcedDt) => {
     const dt = forcedDt ?? Math.min(engine.getDeltaTime() / 1000, 0.05);
+    frameDt = dt; // publish for applyGait's real-velocity gait test
     elapsed += dt;
     const time = elapsed;
 
-    // door queue: spawn the next queued arrival once the pad is clear
-    if (pendingEntries > 0) {
+    // front door queue (API only): admit the next POSTed customer once the
+    // front pad is clear. API arrivals are uncapped — the roster is authority.
+    if (pendingApiEntries.length > 0) {
       const padBusy = shoppers.some((w) =>
         Math.hypot(w.h.position.x - DOOR.x, w.h.position.z - DOOR.zOut) < 1.6);
       if (!padBusy) {
-        pendingEntries--;
-        const p = makeShopper('enter');
+        const p = makeShopper('enter', undefined, pendingApiEntries.shift(), frontPC);
         p.h.position.set(DOOR.x, 0, DOOR.zOut);
         p.h.rotation.y = Math.PI; // facing into the store
         p.cur = 0;
       }
     }
-    // every so often a shopper heads home and a new one shows up (count stays)
+    // right door queue (random only): admit the next auto walk-in once the
+    // right pad is clear, up to the crowd target (hard cap 5).
+    if (pendingEntries > 0) {
+      const padX = half + 1.9;
+      const padBusy = shoppers.some((w) =>
+        Math.hypot(w.h.position.x - padX, w.h.position.z - R_ENTRY_Z) < 1.6);
+      if (!padBusy) {
+        pendingEntries--;
+        const p = makeShopper('enter', undefined, genIdentity(), rightPC);
+        p.h.position.set(padX, 0, R_ENTRY_Z);
+        p.h.rotation.y = -Math.PI / 2; // facing into the store (−x)
+        p.cur = 0;
+      }
+    }
+    // ambient right-door churn: keep the floor at crowdTarget, and at target
+    // rotate faces (one random out, one in) so the crowd never looks static.
     if (time > nextSwap) {
       nextSwap = time + 14 + Math.random() * 10;
-      if (shoppers.some((w) => w.mode === 'loop' && !w.exit) && flagExit()) pendingEntries++;
+      const live = randomLive();
+      if (live < crowdTarget) pendingEntries++;
+      else if (live > crowdTarget) flagExit();
+      else if (shoppers.some((w) => isRandom(w) && w.mode === 'loop' && !w.exit) && flagExit()) {
+        pendingEntries++; // net-zero swap
+      }
     }
     // − presses that found nobody flaggable (all browsing, or the exit queue
     // full) wait here until a walking shopper frees up
@@ -2296,6 +3182,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       else if (p.mode === 'toshelf' || p.mode === 'fromshelf') shelfLegMove(p, dt);
       else walk(p, dt);
     });
+    // DELETEd customers dissolve where they stand (~1.2s), then despawn
+    for (const p of shoppers) {
+      if (p.fadeStart == null) continue;
+      const k = 1 - (elapsed - p.fadeStart) / 1.2;
+      if (k <= 0) { p.done = true; continue; }
+      for (const m of p.h.getChildMeshes()) m.visibility = Math.min(m.visibility, k);
+    }
     for (let i = shoppers.length - 1; i >= 0; i--) {
       if (shoppers[i].done) { disposeShopper(shoppers[i]); shoppers.splice(i, 1); }
     }
@@ -2320,11 +3213,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       }
     }
 
-    // scan-to-pay gate: sweep the beam, flash green on success, release
+    // scan-to-pay gate: sweep the beam, flash green on success, red on a
+    // declined API payment (deny blink, mirror of the entry gate)
     {
       const u = gate.user;
-      if (u && u.scan !== undefined) {
-        if (exitReticle.target !== u) exitReticle.start(u); // face lock-on
+      // face lock-on — payHold customers get it too while awaiting payment
+      if (u && (u.scan !== undefined || u.payHold) && exitReticle.target !== u) exitReticle.start(u);
+      if (u && u.scan !== undefined && gate.deny <= 0) {
         u.scan += dt / GATE.secs;
         gateBeam.isVisible = true;
         // two full sweeps through the body over the scan
@@ -2339,7 +3234,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
         }
       } else {
         gateBeam.isVisible = false;
-        if (gate.flash > 0) {
+        if (gate.deny > 0) { // declined — red blink, payer stays to retry
+          gate.deny -= dt;
+          const blink = Math.sin(elapsed * 16) > 0 ? 1 : 0.25;
+          for (const m of gateLampMats) m.emissiveColor.copyFrom(LAMP_RED).scaleInPlace(blink);
+        } else if (gate.flash > 0) {
           gate.flash -= dt;
           for (const m of gateLampMats) m.emissiveColor.copyFrom(LAMP_GREEN);
         } else {
@@ -2355,13 +3254,20 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
         paidMat.alpha = paidTagT < 0.9 ? 1 : Math.max(0, 1 - (paidTagT - 0.9) / 0.6);
         if (paidTagT >= 1.5) paidTag.isVisible = false;
       }
+      if (declinedTagT < 1.5) { // declined pop: same motion, red
+        declinedTagT += dt;
+        declinedTag.position.y = 2.1 + declinedTagT * 0.45;
+        declinedMat.alpha = declinedTagT < 0.9 ? 1 : Math.max(0, 1 - (declinedTagT - 0.9) / 0.6);
+        if (declinedTagT >= 1.5) declinedTag.isVisible = false;
+      }
     }
 
     // entry verification gate: sweep the beam; a failed first pass blinks the
     // lamps red (deny) and rescans, success flashes green and pops the ID tag
     {
       const u = entryGate.user;
-      if (u && u.scan !== undefined && entryReticle.target !== u) entryReticle.start(u); // face lock-on
+      // face lock-on — gateHold customers get it too while awaiting a verdict
+      if (u && (u.scan !== undefined || u.gateHold) && entryReticle.target !== u) entryReticle.start(u);
       if (u && u.scan !== undefined && entryGate.deny <= 0) {
         u.scan += dt / ENTRY_GATE.secs;
         entryBeam.isVisible = true;
@@ -2375,7 +3281,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
             u.scan = 0;
             entryGate.deny = 0.9;
           } else { // verified — green light, ID tag pop, walk on in
-            u.scan = undefined; u.verifying = false; u.wp = 1;
+            u.scan = undefined; u.verifying = false; u.gateHold = false; u.wp = 1;
             entryGate.flash = 1.4;
             showIdTag();
             entryReticle.succeed();
@@ -2407,7 +3313,111 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
 
     // face reticles track their gate owners (red blink rides the entry deny)
     entryReticle.step(dt, entryGate.deny > 0);
-    exitReticle.step(dt, false);
+    exitReticle.step(dt, gate.deny > 0);
+
+    // ---------- right-side doors: the same rig, driven automatically ----------
+    {
+      const eg = rightPC.entryGate, xg = rightPC.gate;
+      // auto sliding doors (right doorways slide along z)
+      // only the queue head (walking to the scanner / mid-scan) opens the
+      // door — the wait queue, spawn pad and retreat spot all sit inside the
+      // 2.6 radius, and the auto churn parks people there near-constantly,
+      // which held the door open for shoppers who weren't coming in yet
+      const nearIn = shoppers.some((w) => w.pc === rightPC &&
+        w.mode === 'enter' && w.wp === 0 && entryRank(w) === 0 &&
+        Math.hypot(w.h.position.x - rEntry.doorAnchor.x, w.h.position.z - rEntry.doorAnchor.z) < 2.6);
+      rEntry.openAmt += ((nearIn ? 1 : 0) - rEntry.openAmt) * Math.min(1, dt * 5);
+      for (const pnl of rEntry.panels) pnl.mesh.position.z = pnl.closedZ + pnl.side * rEntry.openAmt * 1.18;
+      const nearOut = shoppers.some((w) => w.pc === rightPC && w.mode === 'exitwalk' && w.wp >= 1 &&
+        Math.hypot(w.h.position.x - rExit.doorAnchor.x, w.h.position.z - rExit.doorAnchor.z) < 2.6);
+      rExit.openAmt += ((nearOut ? 1 : 0) - rExit.openAmt) * Math.min(1, dt * 5);
+      for (const pnl of rExit.panels) pnl.mesh.position.z = pnl.closedZ + pnl.side * rExit.openAmt * 1.18;
+
+      // exit scan: auto-pay, with a random DECLINED-then-retry for realism
+      {
+        const u = xg.user;
+        if (u && u.scan !== undefined && xg.deny <= 0) {
+          if (rExit.reticle.target !== u) rExit.reticle.start(u);
+          u.scan += dt / GATE.secs;
+          rExit.beam.isVisible = true;
+          rExit.beam.position.y = 0.35 + 1.15 * (0.5 - 0.5 * Math.cos(Math.min(u.scan, 1) * Math.PI * 4));
+          const pulse = 1.0 + 0.4 * Math.sin(elapsed * 14);
+          for (const m of rExit.lampMats) m.emissiveColor.copyFrom(ACCENT).scaleInPlace(pulse);
+          if (u.scan >= 1) {
+            if (u.payFail) { // declined — red blink, then a second sweep that passes
+              u.payFail = false; u.scan = 0; xg.deny = 0.9;
+              rDeclinedTag.plane.isVisible = true; rightPC.declinedTagT = 0;
+            } else { // paid — green light, receipt pop, walk on out
+              u.scan = undefined; u.paying = false; u.wp = 1; xg.flash = 1.4;
+              const amt = 60 + Math.floor(Math.random() * 560);
+              drawVerdictTag(rPaidTag.tex.getContext(), `฿${amt} ✓`, '#4caf72');
+              rPaidTag.tex.update();
+              rPaidTag.plane.isVisible = true; rightPC.paidTagT = 0;
+              rExit.reticle.succeed();
+            }
+          }
+        } else {
+          rExit.beam.isVisible = false;
+          if (xg.deny > 0) {
+            xg.deny -= dt;
+            const blink = Math.sin(elapsed * 16) > 0 ? 1 : 0.25;
+            for (const m of rExit.lampMats) m.emissiveColor.copyFrom(LAMP_RED).scaleInPlace(blink);
+          } else if (xg.flash > 0) {
+            xg.flash -= dt;
+            for (const m of rExit.lampMats) m.emissiveColor.copyFrom(LAMP_GREEN);
+          } else {
+            for (const m of rExit.lampMats) m.emissiveColor.copyFrom(ACCENT);
+          }
+          if (u && rightPC.exitCleared(u)) xg.user = null;
+        }
+      }
+      // entry scan: self-verify, first sweep may rescan, always passes
+      {
+        const u = eg.user;
+        if (u && u.scan !== undefined && eg.deny <= 0) {
+          if (rEntry.reticle.target !== u) rEntry.reticle.start(u);
+          u.scan += dt / ENTRY_GATE.secs;
+          rEntry.beam.isVisible = true;
+          rEntry.beam.position.y = 0.35 + 1.15 * (0.5 - 0.5 * Math.cos(Math.min(u.scan, 1) * Math.PI * 4));
+          const pulse = 1.0 + 0.4 * Math.sin(elapsed * 14);
+          for (const m of rEntry.lampMats) m.emissiveColor.copyFrom(ACCENT).scaleInPlace(pulse);
+          if (u.scan >= 1) {
+            if (u.verifyFail) { u.verifyFail = false; u.scan = 0; eg.deny = 0.9; }
+            else {
+              u.scan = undefined; u.verifying = false; u.wp = 1; eg.flash = 1.4;
+              rIdTag.plane.isVisible = true; rightPC.idTagT = 0;
+              rEntry.reticle.succeed();
+            }
+          }
+        } else {
+          rEntry.beam.isVisible = false;
+          if (eg.deny > 0) {
+            eg.deny -= dt;
+            const blink = Math.sin(elapsed * 16) > 0 ? 1 : 0.25;
+            for (const m of rEntry.lampMats) m.emissiveColor.copyFrom(LAMP_RED).scaleInPlace(blink);
+          } else if (eg.flash > 0) {
+            eg.flash -= dt;
+            for (const m of rEntry.lampMats) m.emissiveColor.copyFrom(LAMP_GREEN);
+          } else {
+            for (const m of rEntry.lampMats) m.emissiveColor.copyFrom(ACCENT);
+          }
+          if (u && rightPC.entryCleared(u)) eg.user = null;
+        }
+      }
+      // verdict-tag pops (drift up, hold, fade)
+      const tagPop = (tag, key) => {
+        if (rightPC[key] >= 1.5) return;
+        rightPC[key] += dt;
+        tag.plane.position.y = 2.1 + rightPC[key] * 0.45;
+        tag.mat.alpha = rightPC[key] < 0.9 ? 1 : Math.max(0, 1 - (rightPC[key] - 0.9) / 0.6);
+        if (rightPC[key] >= 1.5) tag.plane.isVisible = false;
+      };
+      tagPop(rIdTag, 'idTagT');
+      tagPop(rPaidTag, 'paidTagT');
+      tagPop(rDeclinedTag, 'declinedTagT');
+      rEntry.reticle.step(dt, eg.deny > 0);
+      rExit.reticle.step(dt, xg.deny > 0);
+    }
 
     // robot graph traversal
     {
@@ -2656,13 +3666,20 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     // are read-only outcomes of the shoppers' own decisions, not targets)
     people: {
       add: addPerson, remove: removePerson,
-      maxTotal: MAX_PEOPLE,
-      // total is the stepper's logical head-count (includes queued entries and
-      // pending removals); walking/browsing are who is physically doing what
-      // right now, so they can transiently disagree with total
+      // Backdoor drives the random crowd via /crowd → SSE → here
+      setCrowdTarget,
+      // users API control channel: Dashboard forwards SSE events here
+      addUser: apiAddUser, updateUser: apiUpdateUser, removeUser: apiRemoveUser,
+      checkoutUser: apiCheckoutUser, paymentUser: apiPaymentUser,
+      checkinUser: apiCheckinUser, verifyUser: apiVerifyUser,
+      maxTotal: CROWD_MAX,
+      // total = the random (ambient) head-count only — API users are commanded,
+      // not part of the crowd meter. api = how many roster customers are on the
+      // floor. walking/browsing span everyone physically in the store.
       counts: () => {
         const browsing = shoppers.filter((s) => s.mode === 'browse').length;
-        return { total: totalPeople(), browsing, walking: shoppers.length - browsing };
+        const api = shoppers.filter((s) => s.person?.apiId != null).length;
+        return { total: randomLive(), api, browsing, walking: shoppers.length - browsing };
       },
       // person selection: React pushes the id in, polls live card data out,
       // and hands over the card element for the per-frame follow transform.
@@ -2684,7 +3701,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       // re-lock, seams still held by a shopper stay open until they leave —
       // releaseShelfAccess emits the final 'relocked' then.
       set: (id, locked) => {
-        const lk = shelfLocks[id - 1];
+        const lk = lockById.get(id);
         if (!lk || lk.offline) return false;
         lk.masterOpen = !locked;
         const open = lk.masterOpen || lk.heldSeams > 0;

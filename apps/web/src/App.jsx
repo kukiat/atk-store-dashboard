@@ -3,10 +3,13 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import ThreeScene from './components/ThreeScene.jsx';
 import ShelfDesigner from './components/ShelfDesigner.jsx';
 import Dashboard from './components/Dashboard.jsx';
+import Backdoor from './components/Backdoor.jsx';
 import { createLogisticsScene } from './scenes/logistics.js';
 import { createSmartShelfScene } from './scenes/smartShelf.js';
-import { createSmartStoreScene } from './scenes/smartStore.js';
 import { createSmartStoreBabylonScene } from './scenes/smartStoreBabylon.js';
+// NB scenes/smartStore.js (the retired Three.js V4 stage) is intentionally
+// kept on disk unimported — it is the layout/design/color reference for a
+// possible future "V4 theme" on V5.
 
 const VERSIONS = {
   v1: {
@@ -26,13 +29,6 @@ const VERSIONS = {
     title: 'Shelf Designer',
     sub: 'Drag products from the palette onto the 3D shelf',
     docTitle: 'Shelf Designer',
-  },
-  v4: {
-    dashboard: true,
-    sceneFactory: createSmartStoreScene,
-    title: 'Smart Shelf Dashboard',
-    sub: 'Intelligent retail solution',
-    docTitle: 'Smart Shelf Dashboard',
   },
   v5: {
     dashboard: true,
@@ -83,6 +79,9 @@ export default function App() {
         {Object.keys(VERSIONS).map((id) => (
           <Route key={id} path={`/${id}`} element={<VersionPage id={id} />} />
         ))}
+        {/* hidden operator backdoor — not a 3D "version", so it lives outside
+            VERSIONS and nothing links to it (type /backdoor by hand). */}
+        <Route path="/backdoor" element={<Backdoor />} />
         <Route path="*" element={<Navigate to={`/${DEFAULT_VERSION}`} replace />} />
       </Routes>
     </BrowserRouter>
