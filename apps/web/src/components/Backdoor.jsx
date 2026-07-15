@@ -10,12 +10,12 @@ const USERS_API_URL = 'http://localhost:3004/users';
 const CROWD_API_URL = 'http://localhost:3004/crowd';
 
 // which actions each status unlocks (mirrors the API's 409 state guards):
-//   outside --checkin--> waiting --verify--> inside --checkout--> paying --payment--> outside
+//   outside --enter--> waiting --verify--> inside --leave--> paying --pay--> outside
 const can = {
-  checkin: (s) => s === 'outside',
+  enter: (s) => s === 'outside',
   verify: (s) => s === 'waiting',
-  checkout: (s) => s === 'inside',
-  payment: (s) => s === 'paying',
+  leave: (s) => s === 'inside',
+  pay: (s) => s === 'paying',
 };
 
 const GENDERS = ['male', 'female'];
@@ -49,7 +49,9 @@ function Avatar({ user }) {
   const [broken, setBroken] = useState(false);
   const showImg = user.avatar_url && !broken;
   return showImg ? (
-    <img className="bd-avatar bd-avatar-img" src={user.avatar_url} alt="" onError={() => setBroken(true)} />
+    // no-referrer: googleusercontent avatars 403 hotlinked requests carrying a
+    // Referer header — without this the photo errors out to the chip fallback
+    <img className="bd-avatar bd-avatar-img" src={user.avatar_url} alt="" referrerPolicy="no-referrer" onError={() => setBroken(true)} />
   ) : (
     <span className="bd-avatar" style={{ background: avatarColor(user.id) }}>
       {initials(user.name)}
@@ -177,8 +179,8 @@ export default function Backdoor() {
   );
 
   // status transitions all hit one endpoint now: POST /:id/status with a
-  // { action, payload? } body. checkin/checkout carry no payload; verify/
-  // payment nest a pass/fail result. Thin wrapper over fire so the path and
+  // { action, payload? } body. enter/leave carry no payload; verify/
+  // pay nest a pass/fail result. Thin wrapper over fire so the path and
   // body shape live in one place.
   const act = useCallback(
     (u, action, ok, payload) =>
@@ -339,10 +341,10 @@ export default function Backdoor() {
                     <button className="bd-act edit" onClick={() => openEdit(u)}>✎ Edit</button>
                     <button
                       className="bd-act in"
-                      disabled={!can.checkin(u.status)}
-                      onClick={() => act(u, 'checkin', `${u.name} checked in`)}
+                      disabled={!can.enter(u.status)}
+                      onClick={() => act(u, 'enter', `${u.name} entered`)}
                     >
-                      Check-in
+                      Enter
                     </button>
                     <button
                       className="bd-act ok"
@@ -360,22 +362,22 @@ export default function Backdoor() {
                     </button>
                     <button
                       className="bd-act out"
-                      disabled={!can.checkout(u.status)}
-                      onClick={() => act(u, 'checkout', `${u.name} sent to pay`)}
+                      disabled={!can.leave(u.status)}
+                      onClick={() => act(u, 'leave', `${u.name} sent to pay`)}
                     >
-                      Check-out
+                      Leave
                     </button>
                     <button
                       className="bd-act ok"
-                      disabled={!can.payment(u.status)}
-                      onClick={() => act(u, 'payment', `${u.name} paid`, { result: 'pass' })}
+                      disabled={!can.pay(u.status)}
+                      onClick={() => act(u, 'pay', `${u.name} paid`, { result: 'pass' })}
                     >
                       Pay ✓
                     </button>
                     <button
                       className="bd-act bad"
-                      disabled={!can.payment(u.status)}
-                      onClick={() => act(u, 'payment', `${u.name} payment declined`, { result: 'fail' })}
+                      disabled={!can.pay(u.status)}
+                      onClick={() => act(u, 'pay', `${u.name} payment declined`, { result: 'fail' })}
                     >
                       Pay ✗
                     </button>

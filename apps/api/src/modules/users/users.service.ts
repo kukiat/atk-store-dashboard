@@ -1,25 +1,27 @@
 import { Elysia, status } from "elysia";
-import seed from "./seed.json";
 
 // In-memory stand-in for the future external users API — no DB on purpose.
-// State lives and dies with the process; seed.json is the boot roster.
+// State lives and dies with the process; the boot roster is fetched once at
+// startup from the external animation-api (see fetchBootRoster below), then
+// this store owns every mutation from there on.
 // The API owns each customer's lifecycle: the 3D sim never walks a roster
 // customer out on its own, so `status` here is authoritative.
-//   outside --checkin--> waiting --verify pass--> inside --checkout--> paying
-//                          '--verify fail--> outside      --payment pass--> outside
-//                                                         '--payment fail--> paying (retry)
-// Checkout no longer exits the store: it sends the shopper to queue at the
-// exit fare-gate (paying); a face-scan payment (pass) releases them outside,
+//   outside --enter--> waiting --verify pass--> inside --leave--> paying
+//                        '--verify fail--> outside      --pay pass--> outside
+//                                                       '--pay fail--> paying (retry)
+// Leave no longer exits the store: it sends the shopper to queue at the
+// exit fare-gate (paying); a face-scan pay (pass) releases them outside,
 // a fail keeps them at the gate to try again — the exit-side mirror of the
-// entrance checkin/verify flow.
+// entrance enter/verify flow.
 // All four status moves enter through one route — POST /:id/status with a
 // { action, payload? } body — which the service fans out via applyAction's
-// switch. The distinct per-transition SSE events (checkin/verify/checkout/
-// payment) are unchanged: only the HTTP surface collapsed, not the feed.
-// POST /users is "roster entry + auto-checkin" in one call: a freshly created
+// switch. The distinct per-transition SSE events (enter/verify/leave/pay)
+// are unchanged: only the HTTP surface collapsed, not the feed.
+// POST /users is "roster entry + auto-enter" in one call: a freshly created
 // user starts `waiting` (holding at the entrance scanner for a verify verdict),
-// the same place a `checkin` action lands them — not walking straight in.
-// The seed roster is the exception (those 5 boot as `inside`, the start crowd).
+// the same place an `enter` action lands them — not walking straight in.
+// The boot roster is the exception: those users start at the status mapped
+// from the external feed's `visit_status` (inside/outside), the start crowd.
 export type UserStatus = "outside" | "waiting" | "inside" | "paying";
 export type AuthMethod = "google" | "outlook" | "facebook";
 export type User = {
@@ -33,30 +35,102 @@ export type User = {
   auth_method: AuthMethod;
 };
 export type UserEvent =
-  | { type: "added" | "updated" | "checkin"; user: User }
-  | { type: "removed" | "checkout"; user: { id: number } }
+  | { type: "added" | "updated" | "enter"; user: User }
+  | { type: "removed" | "leave"; user: { id: number } }
   | {
-      type: "verify" | "payment";
+      type: "verify" | "pay";
       user: { id: number; result: "pass" | "fail" };
     };
 
 // body of POST /:id/status — mirror of the "users.action" model union.
-// checkin/checkout carry no data; verify/payment nest a pass/fail result.
+// enter/leave carry no data; verify/pay nest a pass/fail result.
 export type ActionInput =
-  | { action: "checkin" }
-  | { action: "checkout" }
+  | { action: "enter" }
+  | { action: "leave" }
   | { action: "verify"; payload: { result: "pass" | "fail" } }
-  | { action: "payment"; payload: { result: "pass" | "fail" } };
+  | { action: "pay"; payload: { result: "pass" | "fail" } };
+
+// ── external boot roster ──────────────────────────────────────────────
+// One row from GET {ATK_STORE_API_URL}/animation-api/users. Only a subset
+// maps onto our User; disabled_*/entered_at/exited_at have no home here.
+type ExternalUser = {
+  id: number;
+  name: string;
+  email: string;
+  avatar_url: string | null;
+  visit_status: string | null;
+};
+
+// external `visit_status` → our UserStatus, or null to drop the row.
+// exited → outside; a value already a UserStatus passes through as-is;
+// null and every unrecognized value are filtered out of the boot roster.
+function mapVisitStatus(v: string | null): UserStatus | null {
+  switch (v) {
+    case "inside":
+    case "outside":
+    case "waiting":
+    case "paying":
+      return v;
+    case "exited":
+      return "outside";
+    default:
+      return null;
+  }
+}
+
+// The external feed carries no gender, but the 3D sim needs one to pick a body
+// model. Best-effort: match the first name token against a small dictionary;
+// when the name gives no signal, fall back to id parity so it's stable per boot.
+const FEMALE_NAMES = new Set([
+  "mali", "pimchanok", "siriporn", "emma", "olivia",
+  "ploy", "fah", "napat", "kanya", "waan",
+]);
+const MALE_NAMES = new Set([
+  "narin", "tanawat", "buncha", "kukiat", "keemmer",
+  "james", "liam", "noah", "somchai", "anan",
+]);
+function guessGender(name: string, id: number): User["gender"] {
+  const first = name.trim().toLowerCase().split(/\s+/)[0] ?? "";
+  if (FEMALE_NAMES.has(first)) return "female";
+  if (MALE_NAMES.has(first)) return "male";
+  return id % 2 === 0 ? "female" : "male";
+}
+
+// Fetch the starting crowd once at module load. A failure here rejects the
+// top-level await below, which aborts server startup — external must be up.
+async function fetchBootRoster(): Promise<User[]> {
+  const url = `${process.env.ATK_STORE_API_URL}/animation-api/users`;
+  const res = await fetch(url);
+  if (!res.ok)
+    throw new Error(
+      `users boot roster fetch failed: ${res.status} ${res.statusText}`,
+    );
+  const rows = (await res.json()) as ExternalUser[];
+  return rows.flatMap((u) => {
+    const status = mapVisitStatus(u.visit_status);
+    if (status === null) return []; // drop visit_status null / unrecognized
+    const user: User = {
+      id: u.id,
+      name: u.name,
+      gender: guessGender(u.name, u.id),
+      status,
+      email: u.email,
+      avatar_url: u.avatar_url ?? "", // null → "" (UI falls back to initials)
+      auth_method: "google", // external only ever shows Google logins
+    };
+    return [user];
+  });
+}
 
 class UsersService {
-  private store = new Map<number, User>(
-    (seed.users as Omit<User, "status">[]).map((u) => [
-      u.id,
-      { ...u, status: "inside" as const }, // the seed 5 are the starting crowd
-    ]),
-  );
-  private nextId = Math.max(0, ...this.store.keys()) + 1;
+  private store: Map<number, User>;
+  private nextId: number;
   private listeners = new Set<(e: UserEvent) => void>();
+
+  constructor(roster: User[]) {
+    this.store = new Map(roster.map((u) => [u.id, u]));
+    this.nextId = Math.max(0, ...this.store.keys()) + 1;
+  }
 
   // event hub — the SSE route subscribes, mutations broadcast
   subscribe(fn: (e: UserEvent) => void) {
@@ -89,7 +163,7 @@ class UsersService {
     avatar_url?: string;
     auth_method?: AuthMethod;
   }) {
-    // land at the entrance queue for a verify verdict, like checkin —
+    // land at the entrance queue for a verify verdict, like enter —
     // the scene spawns `added` users holding at the gate, not walking in
     const id = this.nextId++;
     const user: User = {
@@ -132,14 +206,14 @@ class UsersService {
   // distinct event per transition — is untouched.
   applyAction(id: number, input: ActionInput): User {
     switch (input.action) {
-      case "checkin":
-        return this.checkin(id);
+      case "enter":
+        return this.enter(id);
       case "verify":
         return this.verify(id, input.payload.result);
-      case "checkout":
-        return this.checkout(id);
-      case "payment":
-        return this.payment(id, input.payload.result);
+      case "leave":
+        return this.leave(id);
+      case "pay":
+        return this.pay(id, input.payload.result);
       default: {
         // the model union already rejects unknown actions at validation;
         // this is a defensive backstop that also gives TS exhaustiveness
@@ -150,17 +224,17 @@ class UsersService {
   }
 
   // walk up to the entrance and wait in line for a verify verdict
-  private checkin(id: number) {
+  private enter(id: number) {
     const user = this.mustFind(id);
     if (user.status !== "outside")
-      throw status(409, `User is ${user.status}, checkin needs "outside"`);
+      throw status(409, `User is ${user.status}, enter needs "outside"`);
     user.status = "waiting";
-    this.emit({ type: "checkin", user });
+    this.emit({ type: "enter", user });
     return user;
   }
 
   // verdict for someone waiting at the gate: pass walks them in,
-  // fail turns them away (they must checkin again)
+  // fail turns them away (they must enter again)
   private verify(id: number, result: "pass" | "fail") {
     const user = this.mustFind(id);
     if (user.status !== "waiting")
@@ -171,31 +245,35 @@ class UsersService {
   }
 
   // command to the store — drop everything, hurry to the exit gate, and
-  // hold there to pay. Does NOT leave the store yet (that's payment pass).
+  // hold there to pay. Does NOT leave the store yet (that's pay pass).
   // Returns the full user (the /status route responds with the entity for
-  // every action); the SSE `checkout` event still carries just { id }.
-  private checkout(id: number) {
+  // every action); the SSE `leave` event still carries just { id }.
+  private leave(id: number) {
     const user = this.mustFind(id);
     if (user.status !== "inside")
-      throw status(409, `User is ${user.status}, checkout needs "inside"`);
+      throw status(409, `User is ${user.status}, leave needs "inside"`);
     user.status = "paying";
-    this.emit({ type: "checkout", user: { id } });
+    this.emit({ type: "leave", user: { id } });
     return user;
   }
 
   // face-scan at the exit fare-gate for someone holding there (paying):
   // pass walks them out of the store, fail keeps them at the gate to retry
-  private payment(id: number, result: "pass" | "fail") {
+  private pay(id: number, result: "pass" | "fail") {
     const user = this.mustFind(id);
     if (user.status !== "paying")
-      throw status(409, `User is ${user.status}, payment needs "paying"`);
+      throw status(409, `User is ${user.status}, pay needs "paying"`);
     if (result === "pass") user.status = "outside";
-    this.emit({ type: "payment", user: { id, result } });
+    this.emit({ type: "pay", user: { id, result } });
     return user;
   }
 }
 
+// top-level await: block module load (and thus server startup) until the
+// external roster is in hand — see fetchBootRoster's failure note above.
+const bootRoster = await fetchBootRoster();
+
 export const usersService = new Elysia({ name: "users.service" }).decorate(
   "usersService",
-  new UsersService(),
+  new UsersService(bootRoster),
 );

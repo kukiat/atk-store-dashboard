@@ -37,7 +37,7 @@ export const usersModel = new Elysia({ name: "users.model" }).model({
     avatar_url: t.Optional(t.String()),
     auth_method: t.Optional(AuthMethod),
   }),
-  // PATCH — every field optional (status moves only via checkin/verify/checkout)
+  // PATCH — every field optional (status moves only via enter/verify/leave/pay)
   "users.update": t.Object({
     name: t.Optional(t.String({ minLength: 1 })),
     gender: t.Optional(Gender),
@@ -46,18 +46,18 @@ export const usersModel = new Elysia({ name: "users.model" }).model({
     auth_method: t.Optional(AuthMethod),
   }),
   // single body for POST /:id/status — a discriminated union on `action`.
-  // checkin/checkout carry no data; verify/payment require a pass/fail result
+  // enter/leave carry no data; verify/pay require a pass/fail result
   // nested under `payload`. A wrong combo (verify without a result, etc.) is
   // rejected here at validation (422) before the service switch ever runs.
   "users.action": t.Union([
-    t.Object({ action: t.Literal("checkin") }),
-    t.Object({ action: t.Literal("checkout") }),
+    t.Object({ action: t.Literal("enter") }),
+    t.Object({ action: t.Literal("leave") }),
     t.Object({
       action: t.Literal("verify"),
       payload: t.Object({ result: Result }),
     }),
     t.Object({
-      action: t.Literal("payment"),
+      action: t.Literal("pay"),
       payload: t.Object({ result: Result }),
     }),
   ]),

@@ -81,10 +81,10 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
 
   // single status-transition endpoint. The { action, payload? } body is a
   // discriminated union (users.action); the service switches on `action`:
-  //   checkin  — outside  → waiting   (queue at the entrance for a verdict)
-  //   verify   — waiting  → inside/outside  (payload.result pass/fail)
-  //   checkout — inside   → paying    (hurry to the exit fare-gate)
-  //   payment  — paying   → outside   (payload.result pass leaves, fail retries)
+  //   enter   — outside  → waiting   (queue at the entrance for a verdict)
+  //   verify  — waiting  → inside/outside  (payload.result pass/fail)
+  //   leave   — inside   → paying    (hurry to the exit fare-gate)
+  //   pay     — paying   → outside   (payload.result pass leaves, fail retries)
   // Always responds with the full user entity. A wrong-state move 409s; a bad
   // action/payload combo 422s at validation before the switch runs.
   .post(

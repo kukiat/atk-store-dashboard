@@ -1151,6 +1151,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const identFromUser = (u) => ({
     custNo: String(u.id).padStart(2, '0'), name: u.name,
     female: u.gender === 'female', apiId: u.id,
+    // display-only profile fields carried through to the dashboard cards
+    avatarUrl: u.avatar_url ?? '', email: u.email ?? '',
   });
   // a freshly minted (apiId-less) walk-in identity — the random crowd. Never
   // touches the roster, so these stay off the users API entirely.
@@ -1164,7 +1166,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   }
   function nextIdentity() {
     // only customers the API says are inside may be seeded onto the floor;
-    // outside/waiting ones arrive through checkin, never as ambient fill
+    // outside/waiting ones arrive through enter, never as ambient fill
     while (rosterIdx < users.length && users[rosterIdx].status && users[rosterIdx].status !== 'inside') rosterIdx++;
     if (rosterIdx < users.length) return identFromUser(users[rosterIdx++]);
     return genIdentity();
@@ -1212,6 +1214,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       initials: initialsOf(ident.name),
       female: ident.female,
       apiId: ident.apiId ?? null, // set for roster/API customers, null for walk-ins
+      avatarUrl: ident.avatarUrl ?? '', // '' for walk-ins → card falls back to chip
+      email: ident.email ?? '', // '' for walk-ins → card hides the email
       color: cardColor(h.metadata.look.torso),
       spawnT: elapsed,
       picks: 0,
@@ -1262,6 +1266,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     picks = e.picks; // cumulative across every browse session this visit
     return {
       id, custNo: e.custNo, name: e.name, initials: e.initials, color: e.color,
+      avatarUrl: e.avatarUrl, email: e.email,
       kind: e.kind, status, near, picks, api: e.apiId != null,
       inStoreSec: Math.max(0, Math.floor(elapsed - e.spawnT)),
     };
@@ -1582,7 +1587,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
 
   // ---------- sidewalk aprons: storefront + right wall ----------
   // Both strips are cut to the same depth so the pavement reads as a
-  // symmetric L. front strip: the checkin line stands here (runs sideways
+  // symmetric L. front strip: the entry line stands here (runs sideways
   // along −x at z≈16.2, so this depth is clearance, not queue length) —
   // without pavement the queue would float in the void. The right-wall
   // strip hosts the random crowd's queue/retreat spots (farthest stand is
@@ -2076,7 +2081,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // walking are candidates — browsers are never yanked out of a session; a
   // pending removal waits in pendingRemovals until someone rejoins the loop.
   // API-owned customers (apiId set) are never picked: the users API is the
-  // sole authority over their exits (checkout / verify fail / delete), which
+  // sole authority over their exits (leave / verify fail / delete), which
   // is what keeps its status field truthful.
   function flagExit() {
     if (exitQueueLoad() >= 3) return false;
@@ -2123,11 +2128,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   }
   // POST /users → a brand-new customer (status `waiting`) appears at the
   // storefront and HOLDS at the scanner for a verify verdict, exactly like
-  // checkin — not a walk-straight-in. They queue behind any existing line and
+  // enter — not a walk-straight-in. They queue behind any existing line and
   // don't count toward MAX_PEOPLE until verify-pass admits them. Delegates to
-  // the checkin spawn so both paths stay identical.
+  // the enter spawn so both paths stay identical.
   function apiAddUser(u) {
-    apiCheckinUser(u);
+    apiEnterUser(u);
   }
   // DELETE /users/:id → fade out in place (no walk-out); customers still in a
   // queue (gate or unconsumed roster) just never materialise
@@ -2157,12 +2162,14 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const e = p.person;
     e.name = u.name;
     e.initials = initialsOf(u.name);
+    e.avatarUrl = u.avatar_url ?? ''; // PATCH reflects live in the cards, like name
+    e.email = u.email ?? '';
     const female = u.gender === 'female';
     if (female !== e.female) { e.female = female; respawnBody(p, female); }
   }
   // abandon any shelf business mid-flight and rejoin the loop at the nearest
   // point — used when an API command needs the shopper walkable NOW (body
-  // swaps, forced checkout). No-op for people already on a walkable leg.
+  // swaps, forced leave). No-op for people already on a walkable leg.
   function snapToLoop(p) {
     if (p.mode === 'loop' || p.mode === 'enter' || p.mode === 'exitwalk') return;
     releaseShelfAccess(p);
@@ -2178,12 +2185,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     }
     p.mode = 'loop'; p.t = bt;
   }
-  // POST /users/:id/checkout → drop everything, walk to the exit gate at a
+  // users API "leave" action → drop everything, walk to the exit gate at a
   // normal pace, and HOLD there to pay (payHold) instead of scanning out on
   // their own — the exit-side mirror of gateHold. Ordinary loop traffic rules
   // apply the whole way (braking, robot stop, single-file gate queue).
-  // Release comes from apiPaymentUser.
-  function apiCheckoutUser(id) {
+  // Release comes from apiPayUser.
+  function apiLeaveUser(id) {
     const qi = pendingApiEntries.findIndex((i) => i.apiId === id);
     if (qi >= 0) { pendingApiEntries.splice(qi, 1); return; } // never arrived
     for (let i = rosterIdx; i < users.length; i++) {
@@ -2195,11 +2202,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     p.payHold = true;
     p.exit = true;
   }
-  // POST /users/:id/payment → verdict for a payHold customer at the exit fare
+  // users API "pay" action → verdict for a payHold customer at the exit fare
   // gate. pass: the beam sweeps them, they pay and walk out. fail: red deny
   // blink + DECLINED tag, they stay put to try again — the one asymmetry with
-  // verify (a failed entry turns you away; a failed payment just holds you).
-  function applyPayment(p, result) {
+  // verify (a failed entry turns you away; a failed pay just holds you).
+  function applyPay(p, result) {
     p.payVerdict = undefined;
     if (result === 'pass') {
       p.scan = 0; // hand over to the normal sweep; success clears payHold
@@ -2209,17 +2216,17 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       showDeclinedTag();
     }
   }
-  function apiPaymentUser(id, result) {
+  function apiPayUser(id, result) {
     const p = shopperByApiId(id);
     if (!p || !p.payHold || p.fadeStart != null || p.done) return;
-    if (gate.user === p) applyPayment(p, result);
+    if (gate.user === p) applyPay(p, result);
     else p.payVerdict = result; // applies the moment they reach the scanner
   }
-  // POST /users/:id/checkin → the customer shows up outside and joins the
+  // users API "enter" action → the customer shows up outside and joins the
   // entry line, holding at the scanner (gateHold) until a verify verdict
   // arrives — no self-scan like ambient walk-ins. Long lines stack visibly
   // out the door: each spawn starts behind the current tail.
-  function apiCheckinUser(u) {
+  function apiEnterUser(u) {
     if (shopperByApiId(u.id)) return; // body still on the floor (race) — skip
     for (let i = rosterIdx; i < users.length; i++) {
       if (users[i].id === u.id) { users.splice(i, 1); break; } // no double life
@@ -2233,9 +2240,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     p.h.rotation.y = Math.PI / 2; // facing along the line toward the door
     p.cur = 0;
   }
-  // POST /users/:id/verify → verdict for a gateHold customer. pass: the beam
+  // users API "verify" action → verdict for a gateHold customer. pass: the beam
   // sweeps them like any shopper and they walk in. fail: red deny blink, they
-  // turn around and leave (despawn outside) — checkin can bring them back.
+  // turn around and leave (despawn outside) — enter can bring them back.
   function applyVerdict(p, result) {
     p.verdict = undefined;
     if (result === 'pass') {
@@ -3032,9 +3039,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
         if (!pc.gate.user && p.scan === undefined && gateRank(p) === 0) {
           pc.gate.user = p; p.paying = true;
           if (p.payHold) {
-            // API-checkout customers hold under the reticle for a payment
+            // API-leave customers hold under the reticle for a pay
             // verdict; one that arrived while they queued applies right away
-            if (p.payVerdict) applyPayment(p, p.payVerdict);
+            if (p.payVerdict) applyPay(p, p.payVerdict);
           } else {
             p.scan = 0; // auto exiters pay themselves out…
             p.payFail = p.pc.key === 'right' && Math.random() < 0.3; // …but random ones may get DECLINED first
@@ -3121,8 +3128,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       // …then the opening random crowd (auto, right-door population)
       for (let i = 0; i < crowdTarget; i++) spawnOnLoop(genIdentity(), rightPC);
       booted = true; // future target changes now reconcile through the doors
-      // customers the API left mid-checkin resume their wait at the gate
-      users.filter((u) => u.status === 'waiting').forEach((u) => apiCheckinUser(u));
+      // customers the API left mid-enter resume their wait at the gate
+      users.filter((u) => u.status === 'waiting').forEach((u) => apiEnterUser(u));
     });
   });
 
@@ -3670,8 +3677,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       setCrowdTarget,
       // users API control channel: Dashboard forwards SSE events here
       addUser: apiAddUser, updateUser: apiUpdateUser, removeUser: apiRemoveUser,
-      checkoutUser: apiCheckoutUser, paymentUser: apiPaymentUser,
-      checkinUser: apiCheckinUser, verifyUser: apiVerifyUser,
+      leaveUser: apiLeaveUser, payUser: apiPayUser,
+      enterUser: apiEnterUser, verifyUser: apiVerifyUser,
       maxTotal: CROWD_MAX,
       // total = the random (ambient) head-count only — API users are commanded,
       // not part of the crowd meter. api = how many roster customers are on the

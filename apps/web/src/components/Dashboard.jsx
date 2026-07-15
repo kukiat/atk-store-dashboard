@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import gsap from 'gsap';
 import { useGSAP } from '@gsap/react';
 import { Flip } from 'gsap/Flip';
@@ -7,6 +8,22 @@ import { createSmartStoreBabylonScene, validateShelfLayout, validateUsers } from
 gsap.registerPlugin(Flip);
 
 /* ---------- tiny presentational helpers ---------- */
+
+// Person avatar chip: the API customer's `avatar_url` as an <img>, falling back
+// to the initials chip (torso-tinted) when there's no url, it fails to load, or
+// the person is a walk-in (avatarUrl ''). Key this by url at the call site so a
+// changed url remounts and clears a stale onError.
+function PersonAvatar({ person, className = '' }) {
+  const [broken, setBroken] = useState(false);
+  const cls = `pc-avatar${className ? ` ${className}` : ''}`;
+  return person.avatarUrl && !broken ? (
+    // no-referrer: googleusercontent avatars 403 hotlinked requests that carry a
+    // Referer header — without this the photo errors out to the chip fallback
+    <img className={`${cls} pc-avatar-img`} src={person.avatarUrl} alt="" referrerPolicy="no-referrer" onError={() => setBroken(true)} />
+  ) : (
+    <span className={cls} style={{ background: person.color }}>{person.initials}</span>
+  );
+}
 
 // A smooth SVG sparkline from a list of values.
 function Spark({ data, color = '#35c3ff', w = 200, h = 42 }) {
@@ -260,7 +277,7 @@ function PersonDetailCard({ person, onClose, bindEl, shelfName }) {
       <div className="store-detail-card person-card">
         <button className="detail-close" onClick={onClose} title="Close (Esc)">✕</button>
         <div className="detail-head pc-head">
-          <span className="pc-avatar" style={{ background: person.color }}>{person.initials}</span>
+          <PersonAvatar key={person.avatarUrl || 'chip'} person={person} />
           <span className="pc-id">
             <span className="detail-title">{person.name}</span>
             <span className="pc-cust">CUSTOMER {person.custNo}</span>
@@ -268,6 +285,7 @@ function PersonDetailCard({ person, onClose, bindEl, shelfName }) {
         </div>
         <dl className="detail-rows">
           <dt>Status</dt><dd>{PERSON_STATUS[person.status]}</dd>
+          {person.email ? <><dt>Email</dt><dd className="pc-email">{person.email}</dd></> : null}
           <dt>Near</dt><dd>{shelfName[person.near] ?? '—'} ({shelfIdStr(person.near)})</dd>
           <dt>In store</dt><dd>{fmtDur(person.inStoreSec)}</dd>
           <dt>Items picked</dt><dd>{person.picks}</dd>
@@ -283,10 +301,63 @@ function PersonDetailCard({ person, onClose, bindEl, shelfName }) {
 // that move is FLIP-animated. Clicking a row focuses the person in 3D.
 const STATUS_ORDER = { scanning: 0, browsing: 1, walking: 2, verifying: 3, paying: 4, leaving: 5 };
 
+// initials (first + last word) for roster rows that have no 3D body to borrow
+// them from — the "exited" customers pulled straight from the users API.
+const custInitials = (name) => {
+  const w = (name || '?').trim().split(/\s+/);
+  return ((w[0]?.[0] ?? '') + (w.length > 1 ? w[w.length - 1][0] : '')).toUpperCase() || '?';
+};
+// muted slate for the exited-row avatar chip fallback (no torso tint to borrow)
+const EXITED_CHIP = '#3d4a63';
+
 function CustomersCard({ peopleRef, crowd, selectedPerson, onSelect, shelfName }) {
   const [list, setList] = useState([]);
   const ulRef = useRef(null);
   const flipState = useRef(null);
+
+  // email tooltip — a single fixed-position node placed on hover of a name, so
+  // it escapes the list's overflow-y:auto clipping (only API customers carry an
+  // email; walk-ins don't trigger it). Cleared on mouse-leave / row change.
+  const [tip, setTip] = useState(null); // { email, x, y } | null
+  const showTip = useCallback((email, el) => {
+    const r = el.getBoundingClientRect();
+    setTip({ email, x: r.left, y: r.top });
+  }, []);
+  const hideTip = useCallback(() => setTip(null), []);
+
+  // "exited" customers — the ones the API says are `outside`, so they have no
+  // 3D body and never appear in the scene's list(). Poll the users API for them
+  // (authoritative status source) and render them dimmed at the tail of the list.
+  const [outside, setOutside] = useState([]);
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const res = await fetch(USERS_API_URL);
+        if (!res.ok || !alive) return;
+        const users = await res.json();
+        if (!alive) return;
+        setOutside(
+          users
+            .filter((u) => u.status === 'outside')
+            .sort((a, b) => a.id - b.id)
+            .map((u) => ({
+              id: u.id,
+              name: u.name,
+              email: u.email,
+              avatarUrl: u.avatar_url ?? '',
+              initials: custInitials(u.name),
+              color: EXITED_CHIP,
+            })),
+        );
+      } catch {
+        /* transient fetch error → keep the last roster */
+      }
+    };
+    load();
+    const t = setInterval(load, 2000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
 
   useEffect(() => {
     const read = () => {
@@ -323,31 +394,69 @@ function CustomersCard({ peopleRef, crowd, selectedPerson, onSelect, shelfName }
         <span className="pill">{list.length} in store</span>
       </div>
       <ul className="cust-list" ref={ulRef}>
-        {list.length ? (
-          list.map((p) => (
-            <li
-              key={p.id}
-              data-flip-id={`cust-${p.id}`}
-              className={`cust-row${selectedPerson === p.id ? ' active' : ''}`}
-              onClick={() => onSelect(p.id)}
-            >
-              <span className="pc-avatar cust-avatar" style={{ background: p.color }}>{p.initials}</span>
-              <div className="cust-main">
-                <div className="cust-top">
-                  <span className="cust-name">{p.name}</span>
-                  <span className={`cust-tag ${p.api ? 'api' : 'random'}`}>{p.api ? 'API' : 'AUTO'}</span>
-                  <span className={`cust-pill ${p.status}`}>{PERSON_STATUS[p.status]}</span>
+        {list.length || outside.length ? (
+          <>
+            {list.map((p) => (
+              <li
+                key={p.id}
+                data-flip-id={`cust-${p.id}`}
+                className={`cust-row${selectedPerson === p.id ? ' active' : ''}`}
+                onClick={() => onSelect(p.id)}
+              >
+                <PersonAvatar key={p.avatarUrl || 'chip'} person={p} className="cust-avatar" />
+                <div className="cust-main">
+                  <div className="cust-top">
+                    <span
+                      className={`cust-name${p.email ? ' has-tip' : ''}`}
+                      onMouseEnter={p.email ? (e) => showTip(p.email, e.currentTarget) : undefined}
+                      onMouseLeave={p.email ? hideTip : undefined}
+                    >
+                      {p.name}
+                    </span>
+                    <span className={`cust-tag ${p.api ? 'api' : 'random'}`}>{p.api ? 'API' : 'AUTO'}</span>
+                    <span className={`cust-pill ${p.status}`}>{PERSON_STATUS[p.status]}</span>
+                  </div>
+                  <div className="cust-sub">
+                    {shelfName[p.near] ?? '—'} ({shelfIdStr(p.near)}) · {fmtDur(p.inStoreSec)}
+                  </div>
                 </div>
-                <div className="cust-sub">
-                  {shelfName[p.near] ?? '—'} ({shelfIdStr(p.near)}) · {fmtDur(p.inStoreSec)}
+              </li>
+            ))}
+            {/* exited customers (API `outside`) — always at the tail, dimmed and
+                non-clickable: there's no 3D body to focus. Email shows inline. */}
+            {outside.map((u) => (
+              <li
+                key={`out-${u.id}`}
+                data-flip-id={`cust-out-${u.id}`}
+                className="cust-row cust-row-exited"
+              >
+                <PersonAvatar key={u.avatarUrl || 'chip'} person={u} className="cust-avatar" />
+                <div className="cust-main">
+                  <div className="cust-top">
+                    <span className="cust-name">{u.name}</span>
+                    <span className="cust-tag api">API</span>
+                    <span className="cust-pill exited">Exited</span>
+                  </div>
+                  <div className="cust-sub">{u.email}</div>
                 </div>
-              </div>
-            </li>
-          ))
+              </li>
+            ))}
+          </>
         ) : (
           <li className="stk-empty">No customers in store</li>
         )}
       </ul>
+      {tip
+        ? createPortal(
+            // portal to <body> so the fixed tooltip isn't offset by the card's
+            // residual intro-animation transform (a transformed ancestor would
+            // otherwise become its containing block)
+            <div className="cust-email-tip" role="tooltip" style={{ left: tip.x, top: tip.y }}>
+              {tip.email}
+            </div>,
+            document.body,
+          )
+        : null}
     </section>
   );
 }
@@ -499,10 +608,10 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     es.addEventListener('added', fwd((u) => peopleRef.current?.addUser?.(u)));
     es.addEventListener('updated', fwd((u) => peopleRef.current?.updateUser?.(u)));
     es.addEventListener('removed', fwd((u) => peopleRef.current?.removeUser?.(u.id)));
-    es.addEventListener('checkout', fwd((u) => peopleRef.current?.checkoutUser?.(u.id)));
-    es.addEventListener('checkin', fwd((u) => peopleRef.current?.checkinUser?.(u)));
+    es.addEventListener('leave', fwd((u) => peopleRef.current?.leaveUser?.(u.id)));
+    es.addEventListener('enter', fwd((u) => peopleRef.current?.enterUser?.(u)));
     es.addEventListener('verify', fwd((u) => peopleRef.current?.verifyUser?.(u.id, u.result)));
-    es.addEventListener('payment', fwd((u) => peopleRef.current?.paymentUser?.(u.id, u.result)));
+    es.addEventListener('pay', fwd((u) => peopleRef.current?.payUser?.(u.id, u.result)));
     return () => es.close();
   }, []);
 

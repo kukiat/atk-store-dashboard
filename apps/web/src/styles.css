@@ -214,9 +214,13 @@ canvas { display: block; }
   color: #081120; font-size: 12px; font-weight: 700;
   box-shadow: 0 0 10px rgba(53,195,255,.25);
 }
+/* avatar_url <img> variant — same footprint as the initials chip, cropped */
+.pc-avatar-img { object-fit: cover; overflow: hidden; }
 .pc-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .pc-id .detail-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pc-cust { font-size: 10px; letter-spacing: .12em; color: #6f86b8; }
+/* email row in the floating person card — let long addresses wrap/ellipsis */
+.pc-email { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 @media (max-width: 720px) {
   .palette { width: 180px; }
@@ -325,10 +329,22 @@ canvas { display: block; }
 }
 .cust-row:hover { background: rgba(53,195,255,.06); }
 .cust-row.active { background: rgba(53,195,255,.12); border-left-color: #35c3ff; }
+/* exited customers (API `outside`): dimmed, not a focus target — no 3D body */
+.cust-row-exited { opacity: .5; cursor: default; }
+.cust-row-exited:hover { background: transparent; }
 .cust-avatar { width: 24px; height: 24px; font-size: 10px; box-shadow: none; }
 .cust-main { flex: 1; min-width: 0; }
 .cust-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .cust-name { color: #eaf6ff; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cust-name.has-tip:hover { color: #35c3ff; cursor: default; }
+/* fixed-position email tooltip — anchored on hover, escapes the list scroll */
+.cust-email-tip {
+  position: fixed; z-index: 60; transform: translateY(calc(-100% - 6px));
+  max-width: 260px; padding: 4px 8px; border-radius: 6px;
+  background: #0b1730; border: 1px solid #2a4c86; color: #eaf6ff;
+  font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  box-shadow: 0 6px 18px rgba(0,0,0,.45); pointer-events: none;
+}
 .cust-sub { color: #6f86b8; font-size: 10px; margin-top: 1px; }
 .cust-pill { flex: none; font-size: 9px; font-weight: 700; letter-spacing: .06em; padding: 2px 7px; border-radius: 999px; }
 .cust-pill.browsing { background: rgba(76,175,114,.15); color: #4caf72; }
@@ -337,6 +353,7 @@ canvas { display: block; }
 .cust-pill.verifying { background: rgba(159,230,255,.15); color: #9fe6ff; }
 .cust-pill.paying { background: rgba(55,194,201,.15); color: #37c2c9; }
 .cust-pill.leaving { background: rgba(239,178,58,.15); color: #efb23a; }
+.cust-pill.exited { background: rgba(111,134,184,.16); color: #8ea0c4; } /* muted slate — not in store */
 
 /* environment */
 .env-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 12px; }
