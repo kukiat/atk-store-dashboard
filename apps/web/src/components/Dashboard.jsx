@@ -619,6 +619,13 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     es.addEventListener('enter', fwd((u) => peopleRef.current?.enterUser?.(u)));
     es.addEventListener('verify', fwd((u) => peopleRef.current?.verifyUser?.(u.id, u.result)));
     es.addEventListener('pay', fwd((u) => peopleRef.current?.payUser?.(u.id, u.result)));
+    // shelf sub-machine: commanded walk-up, scan verdict, per-item picks, and
+    // the API-side session end (walkAway command / 30s shelfClose timer)
+    es.addEventListener('walkToShelf', fwd((u) => peopleRef.current?.walkToShelfUser?.(u.id, u.shelfId)));
+    es.addEventListener('scanQR', fwd((u) => peopleRef.current?.scanQRUser?.(u.id, u.result)));
+    es.addEventListener('inspectItem', fwd((u) => peopleRef.current?.inspectItemUser?.(u.id, u.result)));
+    es.addEventListener('walkAway', fwd((u) => peopleRef.current?.walkAwayUser?.(u.id)));
+    es.addEventListener('shelfClose', fwd((u) => peopleRef.current?.shelfCloseUser?.(u.id)));
     return () => es.close();
   }, []);
 

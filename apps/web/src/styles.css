@@ -557,7 +557,7 @@ canvas { display: block; }
 /* roster list */
 .bd-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
 .bd-row {
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 9px 12px; border-radius: 12px;
   border: 1px solid #16294f; background: rgba(14,24,48,.5);
 }
@@ -590,7 +590,30 @@ canvas { display: block; }
 .bd-status.outside { background: rgba(239,178,58,.14); color: #efb23a; }
 .bd-status.waiting { background: rgba(159,230,255,.15); color: #9fe6ff; }
 .bd-status.inside { background: rgba(76,175,114,.15); color: #4caf72; }
+.bd-status.scanning { background: rgba(53,195,255,.15); color: #35c3ff; }
+.bd-status.browsing { background: rgba(176,124,219,.16); color: #b07cdb; }
 .bd-status.paying { background: rgba(55,194,201,.15); color: #37c2c9; }
+
+/* shelf sub-machine strip (second line of a roster row) — only rendered in
+   the statuses whose actions are legal, so the strip narrates the machine */
+.bd-shelfstrip {
+  flex-basis: 100%; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-top: 2px; padding-top: 8px; border-top: 1px dashed #16294f;
+}
+.bd-shelf-lbl {
+  color: #5e76a8; font-size: 10px; font-weight: 700; letter-spacing: .08em;
+  white-space: nowrap;
+}
+.bd-shelfsel {
+  border: 1px solid #21407a; background: rgba(18,32,63,.7); color: #cfe0ff;
+  padding: 5px 8px; border-radius: 7px; font: inherit; font-size: 11px;
+  max-width: 220px;
+}
+.bd-shelfsel:focus { outline: none; border-color: var(--accent); }
+.bd-countdown {
+  margin-left: auto; color: #b07cdb; font-size: 11px; font-weight: 700;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
 
 /* per-row action buttons */
 .bd-actions { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }

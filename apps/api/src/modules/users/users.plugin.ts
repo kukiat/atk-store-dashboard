@@ -1,10 +1,12 @@
-import { Elysia, sse } from "elysia";
+import { Elysia, sse, status } from "elysia";
 import { usersModel } from "./users.model";
 import { usersService, type UserEvent } from "./users.service";
+import { shelfsService } from "../shelfs";
 
 export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
   .use(usersModel)
   .use(usersService)
+  .use(shelfsService)
 
   // Live feed for the 3D dashboard: added → walks in through the scan gate,
   // updated → card refresh / body respawn, removed → fades out in place.
@@ -81,15 +83,31 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
 
   // single status-transition endpoint. The { action, payload? } body is a
   // discriminated union (users.action); the service switches on `action`:
-  //   enter   — outside  → waiting   (queue at the entrance for a verdict)
-  //   verify  — waiting  → inside/outside  (payload.result pass/fail)
-  //   leave   — inside   → paying    (hurry to the exit fare-gate)
-  //   pay     — paying   → outside   (payload.result pass leaves, fail retries)
+  //   enter       — outside  → waiting   (queue at the entrance for a verdict)
+  //   verify      — waiting  → inside/outside  (payload.result pass/fail)
+  //   walkToShelf — inside   → scanning  (hold at the shelf reader for a verdict)
+  //   scanQR      — scanning → browsing (pass, arms the 30s timer) / stays (fail)
+  //   inspectItem — browsing → browsing  (one pick: keep or return)
+  //   walkAway    — scanning → inside    (give up waiting, rejoin the loop)
+  //   leave       — inside/scanning/browsing → paying (drops any shelf session)
+  //   pay         — paying   → outside   (payload.result pass leaves, fail retries)
   // Always responds with the full user entity. A wrong-state move 409s; a bad
   // action/payload combo 422s at validation before the switch runs.
+  // shelfClose has no HTTP action — the service's own browse timer fires it.
   .post(
     "/:id/status",
-    ({ usersService, params, body }) => usersService.applyAction(params.id, body),
+    ({ usersService, shelfsService, params, body }) => {
+      // the shelf must exist (404) and be powered (409) before the user-status
+      // side runs — the shelfs service owns the layout, users only the people
+      if (body.action === "walkToShelf") {
+        const shelf = shelfsService.findById(body.payload.shelfId);
+        if (!shelf.online)
+          throw status(409, `Shelf ${shelf.id} is offline, doors never unlock`);
+        if (shelf.type === "checkout")
+          throw status(409, `Shelf ${shelf.id} is a checkout counter — no doors`);
+      }
+      return usersService.applyAction(params.id, body);
+    },
     {
       params: "users.params",
       body: "users.action",

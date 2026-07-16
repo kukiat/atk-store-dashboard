@@ -1255,7 +1255,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       return nz;
     };
     if (e.ref.mode === 'browse') {
-      status = e.ref.shelfScan ? 'scanning' : 'browsing';
+      // commanded sessions (API shelf sub-machine): scanning until the door
+      // opens; ambient self-scanners only flash 'scanning' during the gesture
+      status = e.ref.shelfHold
+        ? (e.ref.access ? 'browsing' : 'scanning')
+        : e.ref.shelfScan ? 'scanning' : 'browsing';
       near = e.nearShelf;
     } else {
       status = e.ref.verifying ? 'verifying'
@@ -1522,6 +1526,21 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     declinedTagT = 0;
     declinedTag.isVisible = true;
   }
+
+  // PASS/FAILED badge over a shopper's head at a shelf reader (the scanQR
+  // verdict of the API shelf sub-machine). The words never change, so two
+  // shared textures; the billboard itself is per shopper (made in makeShopper)
+  // because several verdicts can float at once at different shelves.
+  const shelfPassTex = new DynamicTexture('shelfPassTag', { width: 384, height: 144 }, scene, true);
+  shelfPassTex.hasAlpha = true;
+  shelfPassTex.uScale = -1; shelfPassTex.uOffset = 1;
+  drawVerdictTag(shelfPassTex.getContext(), 'PASS ✓', '#4caf72');
+  shelfPassTex.update();
+  const shelfFailTex = new DynamicTexture('shelfFailTag', { width: 384, height: 144 }, scene, true);
+  shelfFailTex.hasAlpha = true;
+  shelfFailTex.uScale = -1; shelfFailTex.uOffset = 1;
+  drawVerdictTag(shelfFailTex.getContext(), 'FAILED ✗', '#e2574c');
+  shelfFailTex.update();
 
   // ---------- entry verification gate: scan-to-enter on the entrance spur ----------
   // arrivals stop between the posts for an identity sweep before merging onto
@@ -2014,6 +2033,17 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     ring.isPickable = false;
     ring.setEnabled(false);
     ring.parent = world;
+    // PASS/FAILED verdict billboard over the head — texture swapped per
+    // verdict from the shared shelfPassTex/shelfFailTex pair
+    const vtagMat = new StandardMaterial('shelfVtagMat', scene);
+    vtagMat.disableLighting = true;
+    vtagMat.backFaceCulling = false;
+    const vtag = MeshBuilder.CreatePlane('shelfVtag', { width: 1.35, height: 0.5 }, scene);
+    vtag.material = vtagMat;
+    vtag.billboardMode = TransformNode.BILLBOARDMODE_ALL;
+    vtag.isPickable = false;
+    vtag.isVisible = false;
+    vtag.parent = world;
     const p = {
       h,
       pc, // portal config: front (API) or right (random) doorway
@@ -2033,8 +2063,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       slot: -1, mv: null,
       cooldown: elapsed + 3 + Math.random() * 9, // no diving at a shelf right away
       item, itemMat, phone, beam, ring, ringMat, ringT: Infinity,
+      vtag, vtagMat, vtagT: Infinity,
       shelfScan: null, access: null, accessSeam: null, idling: false, started: false,
       picksLeft: 0, pickT: 0, pickLat: 0, reach: 1,
+      // commanded shelf session (API shelf sub-machine): shelfHold suppresses
+      // the self-scan/auto-pick loop; the verdict and picks arrive as events
+      shelfHold: false, scanVerdict: null, inspect: null, inspectQueue: [],
       f: new Vector3(0, 0, 1), s: new Vector3(1, 0, 0),
     };
     if (mode === 'enter') p.enterSeq = ++enterSeq;
@@ -2047,6 +2081,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     releaseShelfAccess(p); // last one out re-locks the shelf
     p.item.dispose(); p.itemMat.dispose();
     p.phone.dispose(); p.beam.dispose(); p.ring.dispose(); p.ringMat.dispose();
+    p.vtag.dispose(); p.vtagMat.dispose();
     disposeHuman(p.h);
   }
   // initial shoppers only: they were "already in the store" when the
@@ -2185,7 +2220,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     releaseShelfAccess(p);
     p.slot = -1; p.mv = null; p.idling = false; p.shelfScan = null;
     p.picksLeft = 0; p.ringT = Infinity;
-    p.item.setEnabled(false); p.phone.setEnabled(false);
+    p.shelfHold = false; p.scanVerdict = null; p.inspect = null; p.inspectQueue = [];
+    p.item.setEnabled(false); p.item.scaling.setAll(1); p.phone.setEnabled(false);
     p.beam.setEnabled(false); p.ring.setEnabled(false);
     let best = Infinity, bt = 0;
     for (let i = 0; i < 200; i++) {
@@ -2279,6 +2315,64 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     if (entryGate.user === p) applyVerdict(p, result);
     else if (result === 'fail') applyVerdict(p, result); // turned away from anywhere in line
     else p.verdict = result; // pre-approved: sweeps the moment they reach the scanner
+  }
+  // ---------- users API shelf sub-machine ----------
+  // walkToShelf / scanQR / inspectItem / walkAway arrive over SSE like the
+  // gate verdicts above; shelfClose is the API's own 30s browse timer firing.
+  // API-owned shoppers never roll the junction dice, so every shelf visit
+  // below is the only way they get one. Events for shoppers in the wrong
+  // phase are dropped, mirroring how the other API hooks tolerate skew.
+  function showShelfVerdict(p, pass) {
+    const tex = pass ? shelfPassTex : shelfFailTex;
+    p.vtagMat.emissiveTexture = tex;
+    p.vtagMat.opacityTexture = tex;
+    p.vtagMat.alpha = 1;
+    p.vtag.position.set(p.h.position.x, 2.15, p.h.position.z);
+    p.vtag.isVisible = true;
+    p.vtagT = 0;
+  }
+  // walk to a free reader slot on the shelf and hold there (no self-scan)
+  function apiWalkToShelfUser(id, shelfId) {
+    const p = shopperByApiId(id);
+    if (!p || p.fadeStart != null || p.done || p.slot >= 0) return;
+    if (p.mode !== 'loop') return; // still entering/exiting — not walkable
+    const free = [];
+    for (let i = 0; i < SLOTS.length; i++) {
+      if (SLOTS[i].shelfId === shelfId && !shoppers.some((q) => q.slot === i)) free.push(i);
+    }
+    if (free.length === 0) return; // every seam taken — the mock drops the event
+    startBrowse(p, free[Math.floor(Math.random() * free.length)]);
+    p.shelfHold = true; // commanded session: heldShelfCycle owns them at the shelf
+  }
+  // scanQR verdict — queued if they're still walking up; the phone gesture
+  // plays on arrival and pass/fail lands mid-beam (see updateShelfScan)
+  function apiScanShelfUser(id, result) {
+    const p = shopperByApiId(id);
+    if (!p || !p.shelfHold || p.access || p.fadeStart != null || p.done) return;
+    p.scanVerdict = result;
+  }
+  // one commanded pick: keep pockets it, return puts it back. Queued FIFO —
+  // even before the door is open (commands can outrun the walk + scan
+  // gesture); heldShelfCycle plays the queue only once access is granted
+  function apiInspectItemUser(id, result) {
+    const p = shopperByApiId(id);
+    if (!p || !p.shelfHold || p.fadeStart != null || p.done) return;
+    p.inspectQueue.push(result);
+  }
+  // gave up waiting for a verdict → rejoin the loop
+  function apiWalkAwayUser(id) {
+    const p = shopperByApiId(id);
+    if (!p || !p.shelfHold || p.fadeStart != null || p.done) return;
+    if (p.mode === 'browse') leaveSlot(p);
+    else snapToLoop(p); // still on the spur — bail to the nearest loop point
+  }
+  // the API's 30s browse timer fired: their seam glides shut behind them
+  // (releaseShelfAccess inside leaveSlot); an item mid-inspect goes with them
+  function apiShelfCloseUser(id) {
+    const p = shopperByApiId(id);
+    if (!p || !p.shelfHold || p.fadeStart != null || p.done) return;
+    if (p.mode === 'browse') leaveSlot(p);
+    else snapToLoop(p);
   }
   // body swap: keep the sim object and the person entry (custNo, picks, the
   // followed card), replace only the 3D body. Mid-browse swaps first snap the
@@ -2520,7 +2614,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     if (u.groups.Idle) u.groups.Idle.stop();
     if (u.groups.PickUp) u.groups.PickUp.stop();
     u.movingState = undefined; // let applyGait start the Walk clip cleanly
-    p.item.setEnabled(false);
+    p.shelfHold = false; p.scanVerdict = null; p.inspect = null; p.inspectQueue = [];
+    p.item.setEnabled(false); p.item.scaling.setAll(1);
     const route = SLOTS[p.slot].route;
     p.mode = 'fromshelf';
     p.cur = 0;
@@ -2655,12 +2750,20 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       p.beam.lookAt(_beamTo);
       phoneBeamMat.alpha = 0.4 + 0.3 * Math.abs(Math.sin(elapsed * 16));
     }
-    if (!s.done && s.t >= SCAN_UNLOCK_AT) { // scan reads → ring pops, access lands
+    if (!s.done && s.t >= SCAN_UNLOCK_AT) { // scan reads → the verdict lands
       s.done = true;
-      p.ringT = 0;
-      p.ring.position.set(p.h.position.x, 0.07, p.h.position.z);
-      p.ring.setEnabled(true);
-      takeAccess(p);
+      // ambient shoppers always pass; a commanded session (shelfHold) obeys
+      // the API's scanQR verdict — fail shows the badge and opens nothing,
+      // the shopper stays at the reader for the next verdict
+      const pass = p.shelfHold ? p.scanVerdict === 'pass' : true;
+      p.scanVerdict = null;
+      if (p.shelfHold) showShelfVerdict(p, pass);
+      if (pass) {
+        p.ringT = 0;
+        p.ring.position.set(p.h.position.x, 0.07, p.h.position.z);
+        p.ring.setEnabled(true);
+        takeAccess(p);
+      }
     }
     if (s.t < SCAN_SECS) return;
     // phone pocketed → settle into Idle and let the pick cycle take over
@@ -2670,7 +2773,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     p.idling = true;
     const gi = u.groups.Idle;
     if (gi) gi.start(true, 1.0, gi.from, gi.to);
-    p.pickT = PICK_PERIOD - 0.8 - Math.random() * 1.4; // first pick lands shortly after the door opens
+    if (!p.shelfHold) // commanded picks arrive as inspectItem events instead
+      p.pickT = PICK_PERIOD - 0.8 - Math.random() * 1.4; // first pick lands shortly after the door opens
   }
 
   // take the seam: every scan opens the scanner's own door pair. Shelf-level
@@ -2717,9 +2821,85 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   }
 
   const _shelfPt = new Vector3(), _handPt = new Vector3();
+
+  // ---------- commanded shelf session (API shelf sub-machine) ----------
+  // shelfHold shoppers never drive themselves: they idle at the reader until
+  // a scanQR verdict, then play exactly one pick per inspectItem command.
+  // Only the API side ends the session (shelfClose timer / walkAway / leave).
+  const INSPECT_SECS = 4.4; // reach (0.55–1.15) → look it over → keep/return
+  function startInspect(p, result) {
+    const u = p.h.metadata;
+    p.inspect = { t: 0, result, counted: false };
+    p.idling = false;
+    if (u.groups.Idle) u.groups.Idle.stop();
+    const g = u.groups.PickUp;
+    if (g) g.start(false, 0.7, g.from, g.to);
+    p.pickLat = (Math.random() - 0.5) * 0.8; // stay inside the shopper's own seam gap
+  }
+  function updateInspect(p, dt) {
+    const u = p.h.metadata;
+    const it = p.inspect;
+    it.t += dt;
+    if (!p.idling && it.t >= PICK_CLIP) { // pick clip done → back to Idle
+      p.idling = true;
+      const gi = u.groups.Idle;
+      if (gi) gi.start(true, 1.0, gi.from, gi.to);
+    }
+    // item flight: shelf → hand, held while looked over, then kept or returned
+    _shelfPt.copyFrom(p.f).scaleInPlace(p.reach).addInPlace(p.h.position)
+      .addInPlace(_handPt.copyFrom(p.s).scaleInPlace(p.pickLat));
+    _shelfPt.y = 1.3;
+    const t = it.t;
+    if (t >= 0.55 && u.fist) {
+      _handPt.copyFrom(u.fist.getAbsolutePosition());
+      if (t < 1.15) {
+        p.item.setEnabled(true);
+        p.item.scaling.setAll(1);
+        Vector3.LerpToRef(_shelfPt, _handPt, easeInOutCubic((t - 0.55) / 0.6), p.item.position);
+      } else if (t < 3.1) {
+        p.item.position.copyFrom(_handPt);
+      } else if (it.result === 'return') { // looked it over → back on the shelf
+        if (t < 3.8) Vector3.LerpToRef(_handPt, _shelfPt, easeInOutCubic((t - 3.1) / 0.7), p.item.position);
+        else p.item.setEnabled(false);
+      } else { // keep — the item shrinks away in the hand ("bagged", paid at the exit)
+        if (!it.counted) { it.counted = true; if (p.person) p.person.picks++; } // feeds "Items picked"
+        const k = Math.min(1, (t - 3.1) / 0.5);
+        p.item.position.copyFrom(_handPt);
+        p.item.scaling.setAll(1 - k);
+        if (k >= 1) p.item.setEnabled(false);
+      }
+    }
+    if (t >= INSPECT_SECS) { // cycle over — ready for the next command
+      p.item.setEnabled(false);
+      p.item.scaling.setAll(1);
+      p.inspect = null;
+    }
+  }
+  function heldShelfCycle(p, dt) {
+    const u = p.h.metadata;
+    if (!p.started) { // arrived at the reader: stand by until commanded
+      p.started = true;
+      p.idling = true;
+      const gi = u.groups.Idle;
+      if (gi) gi.start(true, 1.0, gi.from, gi.to);
+    }
+    if (p.shelfScan) { updateShelfScan(p, dt); return; }
+    if (!p.access) {
+      // holding for a verdict — one queued (possibly while still walking
+      // here) starts the phone gesture; updateShelfScan consumes it
+      if (p.scanVerdict != null) startShelfScan(p);
+      return;
+    }
+    // access granted but their own door still gliding open → hold Idle
+    if (Math.max(shelfLockOf(p).masterAmt, p.accessSeam?.openAmt ?? 0) < 0.7) return;
+    if (!p.inspect && p.inspectQueue.length) startInspect(p, p.inspectQueue.shift());
+    if (p.inspect) updateInspect(p, dt);
+  }
+
   function pickCycle(p, dt) {
     const u = p.h.metadata;
     if (!u.ready) return;
+    if (p.shelfHold) { heldShelfCycle(p, dt); return; } // commanded session — no self-drive
     if (!p.started) { // first frame at the shelf — everyone scans, no freebies
       p.started = true;
       startShelfScan(p);
@@ -3094,7 +3274,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     // in for a browse session. Odds shrink as the shelves fill (soft cap: at
     // most half the crowd browsing) and rest through a post-session cooldown.
     // The four right-wall slots share one junction — one roll covers them all.
-    if (!p.exit && p.slot < 0 && elapsed > p.cooldown) {
+    // API-owned customers never roll: their shelf visits are commanded through
+    // the users API (walkToShelf), keeping the roster `status` authoritative.
+    if (!p.exit && p.slot < 0 && isRandom(p) && elapsed > p.cooldown) {
       const stepFrac = (((p.t - prevT) % 1) + 1) % 1;
       let cand = null, nc = 0;
       for (const i of freePickSlots()) {
@@ -3140,8 +3322,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   scene.executeWhenReady(() => {
     scene.onAfterRenderObservable.addOnce(() => {
       onReady?.();
-      // roster 'inside' users seed onto the loop as API customers…
-      const seedCount = users.filter((u) => !u.status || u.status === 'inside').length;
+      // roster 'inside' users seed onto the loop as API customers… A user
+      // caught mid shelf-session (scanning/browsing) seeds as a plain walker:
+      // the session's visuals can't be reconstructed, and the API's own timer
+      // still closes it (the shelfClose event then no-ops here harmlessly).
+      const seedCount = users.filter((u) =>
+        !u.status || u.status === 'inside' || u.status === 'scanning' || u.status === 'browsing').length;
       for (let i = 0; i < seedCount; i++) spawnOnLoop();
       // …then the opening random crowd (auto, right-door population)
       for (let i = 0; i < crowdTarget; i++) spawnOnLoop(genIdentity(), rightPC);
@@ -3573,6 +3759,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
         pk.ringMat.alpha = 0.8 * (1 - k);
         if (k >= 1) pk.ring.setEnabled(false);
       }
+      if (pk.vtagT < 1.6) { // PASS/FAILED verdict pop: drift up, hold, fade
+        pk.vtagT += dt;
+        pk.vtag.position.set(pk.h.position.x, 2.15 + pk.vtagT * 0.45, pk.h.position.z);
+        pk.vtagMat.alpha = pk.vtagT < 1.0 ? 1 : Math.max(0, 1 - (pk.vtagT - 1.0) / 0.6);
+        if (pk.vtagT >= 1.6) pk.vtag.isVisible = false;
+      }
     }
 
     badges.forEach((b) => { b.position.y = b.metadata.base + Math.sin(time * 1.5 + b.metadata.t) * 0.4; });
@@ -3706,6 +3898,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       addUser: apiAddUser, updateUser: apiUpdateUser, removeUser: apiRemoveUser,
       leaveUser: apiLeaveUser, payUser: apiPayUser,
       enterUser: apiEnterUser, verifyUser: apiVerifyUser,
+      // shelf sub-machine (walkToShelf → scanQR → inspectItem…; shelfClose =
+      // the API's 30s browse timer, walkAway = gave up waiting for a verdict)
+      walkToShelfUser: apiWalkToShelfUser, scanQRUser: apiScanShelfUser,
+      inspectItemUser: apiInspectItemUser, walkAwayUser: apiWalkAwayUser,
+      shelfCloseUser: apiShelfCloseUser,
       maxTotal: CROWD_MAX,
       // total = the random (ambient) head-count only — API users are commanded,
       // not part of the crowd meter. api = how many roster customers are on the

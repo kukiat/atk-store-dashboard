@@ -8,18 +8,33 @@ import { useCallback, useEffect, useState } from 'react';
 // Nothing links here: type the URL by hand.
 const USERS_API_URL = 'http://localhost:3004/users';
 const CROWD_API_URL = 'http://localhost:3004/crowd';
+const SHELFS_API_URL = 'http://localhost:3004/shelfs';
 
 // which actions each status unlocks (mirrors the API's 409 state guards):
 //   outside --enter--> waiting --verify--> inside --leave--> paying --pay--> outside
+// plus the shelf sub-machine while inside:
+//   inside --walkToShelf--> scanning --scanQR pass--> browsing --(30s timer)--> inside
+//                           scanning --walkAway----> inside
 const can = {
   enter: (s) => s === 'outside',
   verify: (s) => s === 'waiting',
-  leave: (s) => s === 'inside',
+  leave: (s) => s === 'inside' || s === 'scanning' || s === 'browsing',
   pay: (s) => s === 'paying',
+  walkToShelf: (s) => s === 'inside',
+  scanQR: (s) => s === 'scanning',
+  walkAway: (s) => s === 'scanning',
+  inspectItem: (s) => s === 'browsing',
 };
 
 const GENDERS = ['male', 'female'];
-const STATUS_LABEL = { outside: 'Outside', waiting: 'Waiting', inside: 'Inside', paying: 'Paying' };
+const STATUS_LABEL = {
+  outside: 'Outside', waiting: 'Waiting', inside: 'Inside',
+  scanning: 'Scanning', browsing: 'Browsing', paying: 'Paying',
+};
+
+// a shelf you can actually send someone to: powered, and not the checkout
+// counter (it has nothing to enclose — the API 409s it too)
+const shelfUsable = (s) => s.online && s.type !== 'checkout';
 
 // the three sign-in providers the API accepts, with a text badge look (emoji +
 // per-provider colour class in styles.css — no external icon fetch, CSP-safe)
@@ -74,6 +89,12 @@ export default function Backdoor() {
   const [crowd, setCrowd] = useState({ target: 0, max: 5 });
   const [crowdBusy, setCrowdBusy] = useState(false);
 
+  // store layout for the walkToShelf picker (read-only, loaded once) and the
+  // per-user shelf choice; browsing rows tick a countdown against browse_until
+  const [shelves, setShelves] = useState([]);
+  const [shelfPick, setShelfPick] = useState({}); // userId → shelfId
+  const [now, setNow] = useState(Date.now());
+
   // user modal — one form for both add and edit (fields are identical). Mode
   // decides POST vs PATCH on Save; null = closed. editUser holds the row being
   // edited (null in create mode).
@@ -116,6 +137,27 @@ export default function Backdoor() {
       .then((d) => { if (d) setCrowd(d); })
       .catch(() => {});
   }, []);
+
+  // shelf list for the picker — static layout, one fetch is enough
+  useEffect(() => {
+    fetch(SHELFS_API_URL)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (Array.isArray(d)) setShelves(d); })
+      .catch(() => {});
+  }, []);
+
+  // browsing rows: tick the 30s countdown, and once the API's timer must have
+  // fired (browse_until passed), re-fetch so the row drops back to Inside
+  useEffect(() => {
+    if (!users.some((u) => u.status === 'browsing')) return;
+    const t = setInterval(() => {
+      setNow(Date.now());
+      if (users.some((u) => u.status === 'browsing' && u.browse_until != null && Date.now() > u.browse_until + 400)) {
+        refresh();
+      }
+    }, 500);
+    return () => clearInterval(t);
+  }, [users, refresh]);
 
   // +/- the random crowd: PATCH the absolute value the stepper would land on
   const bumpCrowd = useCallback(
@@ -318,7 +360,14 @@ export default function Backdoor() {
             <div className="bd-empty">No users. Add one above.</div>
           ) : (
             <ul className="bd-list">
-              {users.map((u) => (
+              {users.map((u) => {
+                // shelf the To Shelf button will target: sticky per-row pick,
+                // defaulting to the first usable shelf in the layout
+                const pick = shelfPick[u.id] ?? shelves.find(shelfUsable)?.id;
+                const countdown = u.status === 'browsing' && u.browse_until != null
+                  ? Math.max(0, Math.ceil((u.browse_until - now) / 1000))
+                  : null;
+                return (
                 <li className="bd-row" key={u.id}>
                   <Avatar key={u.avatar_url || 'chip'} user={u} />
 
@@ -388,8 +437,81 @@ export default function Backdoor() {
                       Delete
                     </button>
                   </div>
+
+                  {/* shelf sub-machine strip — appears only in the statuses
+                      where its actions are legal, so the visible buttons ARE
+                      the state machine (inside → scanning → browsing) */}
+                  {u.status === 'inside' && (
+                    <div className="bd-shelfstrip">
+                      <span className="bd-shelf-lbl">SHELF</span>
+                      <select
+                        className="bd-shelfsel"
+                        value={pick ?? ''}
+                        onChange={(e) => setShelfPick((s) => ({ ...s, [u.id]: Number(e.target.value) }))}
+                      >
+                        {shelves.map((s) => (
+                          <option key={s.id} value={s.id} disabled={!shelfUsable(s)}>
+                            #{s.id} {s.name}{!s.online ? ' — offline' : s.type === 'checkout' ? ' — no doors' : ''}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        className="bd-act in"
+                        disabled={pick == null}
+                        onClick={() => act(u, 'walkToShelf', `${u.name} → shelf #${pick}`, { shelfId: pick })}
+                      >
+                        → To Shelf
+                      </button>
+                    </div>
+                  )}
+                  {u.status === 'scanning' && (
+                    <div className="bd-shelfstrip">
+                      <span className="bd-shelf-lbl">AT SHELF #{u.shelf_id}</span>
+                      <button
+                        className="bd-act ok"
+                        onClick={() => act(u, 'scanQR', `${u.name} scanned in`, { result: 'pass' })}
+                      >
+                        Scan ✓
+                      </button>
+                      <button
+                        className="bd-act bad"
+                        onClick={() => act(u, 'scanQR', `${u.name} scan rejected`, { result: 'fail' })}
+                      >
+                        Scan ✗
+                      </button>
+                      <button
+                        className="bd-act out"
+                        onClick={() => act(u, 'walkAway', `${u.name} walked away`)}
+                      >
+                        Walk Away
+                      </button>
+                    </div>
+                  )}
+                  {u.status === 'browsing' && (
+                    <div className="bd-shelfstrip">
+                      <span className="bd-shelf-lbl">SHELF #{u.shelf_id} OPEN</span>
+                      <button
+                        className="bd-act ok"
+                        onClick={() => act(u, 'inspectItem', `${u.name} kept an item`, { result: 'keep' })}
+                      >
+                        Inspect · Keep
+                      </button>
+                      <button
+                        className="bd-act"
+                        onClick={() => act(u, 'inspectItem', `${u.name} returned an item`, { result: 'return' })}
+                      >
+                        Inspect · Return
+                      </button>
+                      {countdown != null && (
+                        <span className="bd-countdown" title="door auto-closes when this hits 0">
+                          ⏱ {countdown}s
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </li>
-              ))}
+                );
+              })}
             </ul>
           )}
         </section>
