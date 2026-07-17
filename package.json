@@ -13,6 +13,6 @@
     "dev:api": "bun run --filter '@atk-store-dashboard/api' dev",
     "build": "bun run --filter '@atk-store-dashboard/web' build",
     "build:api": "bun run --filter '@atk-store-dashboard/api' build",
-    "start:api": "bun run --filter '@atk-store-dashboard/api' start:prod"
+    "start:api": "bun run --filter '@atk-store-dashboard/api' start"
   }
 }
