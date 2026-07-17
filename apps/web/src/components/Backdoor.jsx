@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { apiFetch } from '../api';
 
 // Hidden operator "backdoor" — fires the in-memory users API (apps/api, {API_URL})
 // so the whole customer lifecycle can be driven from buttons instead of curl.
@@ -13,12 +14,15 @@ const SHELFS_API_URL = `${API_URL}/shelfs`;
 
 // which actions each status unlocks (mirrors the API's 409 state guards):
 //   outside --enter--> waiting --verify--> inside --leave--> paying --pay--> outside
+// verify also takes `outside` directly (rolls the enter step in), so Pass /
+// Turn away are live from outside too — one click walks them in or turns them
+// away without a separate Enter first.
 // plus the shelf sub-machine while inside:
 //   inside --walkToShelf--> scanning --scanQR pass--> browsing --(30s timer)--> inside
 //                           scanning --walkAway----> inside
 const can = {
   enter: (s) => s === 'outside',
-  verify: (s) => s === 'waiting',
+  verify: (s) => s === 'waiting' || s === 'outside',
   leave: (s) => s === 'inside' || s === 'scanning' || s === 'browsing',
   pay: (s) => s === 'paying',
   walkToShelf: (s) => s === 'inside',
@@ -84,6 +88,7 @@ export default function Backdoor() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [toasts, setToasts] = useState([]);
+  const [reloadBusy, setReloadBusy] = useState(false);
 
   // random ambient crowd (scalar, not roster) — drives the auto shoppers on
   // the right-side doors via /crowd → SSE → scene reconcile
@@ -115,9 +120,7 @@ export default function Backdoor() {
 
   const refresh = useCallback(async () => {
     try {
-      const res = await fetch(USERS_API_URL);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      const data = await apiFetch(USERS_API_URL);
       setUsers(Array.isArray(data) ? data : []);
       setLoadError(null);
     } catch (e) {
@@ -133,16 +136,14 @@ export default function Backdoor() {
 
   // load the current ambient-crowd target once on mount
   useEffect(() => {
-    fetch(CROWD_API_URL)
-      .then((r) => (r.ok ? r.json() : null))
+    apiFetch(CROWD_API_URL)
       .then((d) => { if (d) setCrowd(d); })
       .catch(() => {});
   }, []);
 
   // shelf list for the picker — static layout, one fetch is enough
   useEffect(() => {
-    fetch(SHELFS_API_URL)
-      .then((r) => (r.ok ? r.json() : null))
+    apiFetch(SHELFS_API_URL)
       .then((d) => { if (Array.isArray(d)) setShelves(d); })
       .catch(() => {});
   }, []);
@@ -167,13 +168,7 @@ export default function Backdoor() {
       if (next === crowd.target) return;
       setCrowdBusy(true);
       try {
-        const res = await fetch(CROWD_API_URL, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ target: next }),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const d = await res.json();
+        const d = await apiFetch(CROWD_API_URL, { method: 'PATCH', body: { target: next } });
         setCrowd(d);
         pushToast(`Random crowd → ${d.target}`, 'ok');
       } catch (e) {
@@ -191,25 +186,7 @@ export default function Backdoor() {
   const fire = useCallback(
     async ({ method, path = '', body, ok }) => {
       try {
-        const res = await fetch(`${USERS_API_URL}${path}`, {
-          method,
-          headers: body ? { 'Content-Type': 'application/json' } : undefined,
-          body: body ? JSON.stringify(body) : undefined,
-        });
-        if (!res.ok) {
-          let msg = `HTTP ${res.status}`;
-          try {
-            const j = await res.clone().json();
-            msg = j?.message || j?.error || msg;
-          } catch {
-            try {
-              msg = (await res.text()) || msg;
-            } catch {
-              /* keep HTTP status */
-            }
-          }
-          throw new Error(msg);
-        }
+        await apiFetch(`${USERS_API_URL}${path}`, { method, body });
         pushToast(ok, 'ok');
         await refresh();
         return true;
@@ -220,6 +197,30 @@ export default function Backdoor() {
     },
     [pushToast, refresh],
   );
+
+  // Hard reset: re-run the API's own boot fetch against the external service and
+  // replace the roster wholesale. Deliberately not wired through `fire` — this
+  // returns the fresh list, so it seeds state straight from the response instead
+  // of re-fetching, and it needs the confirm guard below.
+  const reloadFromExternal = useCallback(async () => {
+    if (!window.confirm(
+      'ล้าง roster ทั้งหมดแล้วดึงใหม่จาก external?\n\n'
+      + 'สถานะของทุกคนจะหายหมด (คนที่กำลังจ่ายเงิน/เปิดชั้นวางอยู่ก็ด้วย) '
+      + 'และคนในฉาก 3D จะ fade ออกทั้งหมด',
+    )) return;
+    setReloadBusy(true);
+    try {
+      const data = await apiFetch(`${USERS_API_URL}/roster/refresh`, { method: 'POST' });
+      const list = Array.isArray(data) ? data : [];
+      setUsers(list);
+      setLoadError(null);
+      pushToast(`โหลดใหม่แล้ว ${list.length} คน · reload /v5 เพื่อดูในฉาก`, 'ok');
+    } catch (e) {
+      pushToast(String(e?.message || e), 'err');
+    } finally {
+      setReloadBusy(false);
+    }
+  }, [pushToast]);
 
   // status transitions all hit one endpoint now: POST /:id/status with a
   // { action, payload? } body. enter/leave carry no payload; verify/
@@ -311,7 +312,20 @@ export default function Backdoor() {
             <h1>BACKDOOR</h1>
             <span>USER LIFECYCLE CONSOLE · {API_URL}</span>
           </div>
-          <button className="btn" onClick={refresh}>↻ Refresh</button>
+          {/* two very different buttons: Refresh only re-reads the store,
+              Reload wipes it and re-fetches external — hence the danger look
+              and the deliberately un-Refresh-like wording/icon */}
+          <div className="bd-headbtns">
+            <button className="btn" onClick={refresh}>↻ Refresh</button>
+            <button
+              className="btn bd-danger"
+              onClick={reloadFromExternal}
+              disabled={reloadBusy}
+              title="Wipe the roster and re-fetch it from the external API"
+            >
+              {reloadBusy ? '⤓ Reloading…' : '⤓ Reload from External'}
+            </button>
+          </div>
         </header>
 
         {/* random ambient crowd — auto shoppers on the right-side doors */}

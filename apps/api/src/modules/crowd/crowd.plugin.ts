@@ -1,10 +1,12 @@
 import { Elysia, sse } from "elysia";
 import { crowdModel } from "./crowd.model";
 import { crowdService, type CrowdEvent } from "./crowd.service";
+import { ok, envelopeError } from "../../envelope";
 
 export const crowdPlugin = new Elysia({ prefix: "/crowd", tags: ["crowd"] })
   .use(crowdModel)
   .use(crowdService)
+  .onError(envelopeError)
 
   // Live feed for the 3D dashboard: every target change broadcasts here so the
   // scene can reconcile its random population. Separate stream from /users/events
@@ -41,12 +43,12 @@ export const crowdPlugin = new Elysia({ prefix: "/crowd", tags: ["crowd"] })
     }
   })
 
-  .get("/", ({ crowdService }) => crowdService.get(), {
-    response: "crowd.entity",
+  .get("/", ({ crowdService }) => ok(crowdService.get()), {
+    response: "crowd.res.entity",
   })
 
   // absolute set (Backdoor holds the current value and PATCHes the new one)
-  .patch("/", ({ crowdService, body }) => crowdService.set(body.target), {
+  .patch("/", ({ crowdService, body }) => ok(crowdService.set(body.target)), {
     body: "crowd.set",
-    response: "crowd.entity",
+    response: "crowd.res.entity",
   });

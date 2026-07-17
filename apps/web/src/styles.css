@@ -509,6 +509,11 @@ canvas { display: block; }
 .bd-shell { max-width: 900px; margin: 0 auto; padding: 30px 22px 60px; display: flex; flex-direction: column; gap: 18px; }
 
 .bd-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.bd-headbtns { display: flex; align-items: center; gap: 8px; }
+/* destructive header action (Reload from External) — carries the red of the
+   row-level Delete so it can't be mistaken for the Refresh next to it */
+.bd-danger { border-color: #5b2620; color: #ff9a92; background: rgba(48,18,16,.5); }
+.bd-danger:hover:not(:disabled) { border-color: #e2574c; color: #ffc4bf; }
 .bd-brand h1 { font-size: 22px; font-weight: 800; letter-spacing: .14em; color: #eaf6ff; line-height: 1; }
 .bd-brand span { font-size: 10px; letter-spacing: .22em; color: var(--accent); }
 

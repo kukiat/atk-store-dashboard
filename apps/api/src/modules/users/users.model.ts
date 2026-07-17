@@ -1,4 +1,5 @@
 import { Elysia, t } from "elysia";
+import { envelope } from "../../envelope";
 
 const Gender = t.Union([t.Literal("male"), t.Literal("female")]);
 const Status = t.Union([
@@ -84,8 +85,11 @@ export const usersModel = new Elysia({ name: "users.model" }).model({
   ]),
   "users.entity": UserEntity,
   "users.list": t.Array(UserEntity),
-  "users.deleted": t.Object({
-    id: t.Integer(),
-    deleted: t.Boolean(),
-  }),
+  // success-response envelopes (see ../../envelope). DELETE returns just the id
+  // now — `deleted: true` was a third restatement of success (200 + success:
+  // true already say it) and `deleted: false` could never occur (a failed
+  // delete is a 404).
+  "users.res.entity": envelope(UserEntity),
+  "users.res.list": envelope(t.Array(UserEntity)),
+  "users.res.deleted": envelope(t.Object({ id: t.Integer() })),
 });

@@ -59,7 +59,7 @@ class GroupsService {
       .where(and(eq(groups.id, id), isNull(groups.deletedAt)))
       .returning({ id: groups.id });
     if (!row) throw status(404, "Group not found");
-    return { id: row.id, deleted: true as const };
+    return { id: row.id };
   }
 }
 

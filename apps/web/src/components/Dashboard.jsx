@@ -4,6 +4,7 @@ import gsap from 'gsap';
 import { useGSAP } from '@gsap/react';
 import { Flip } from 'gsap/Flip';
 import { createSmartStoreBabylonScene, validateShelfLayout, validateUsers } from '../scenes/smartStoreBabylon.js';
+import { apiFetch } from '../api';
 
 gsap.registerPlugin(Flip);
 
@@ -334,9 +335,7 @@ function CustomersCard({ peopleRef, crowd, selectedPerson, onSelect, shelfName }
     let alive = true;
     const load = async () => {
       try {
-        const res = await fetch(USERS_API_URL);
-        if (!res.ok || !alive) return;
-        const users = await res.json();
+        const users = await apiFetch(USERS_API_URL);
         if (!alive) return;
         setOutside(
           users
@@ -483,9 +482,12 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   const loadCatalog = useCallback(() => {
     setLoadError(null);
     setCatalog(null);
-    const grab = (url) =>
+    // shelves is a static mock file (plain JSON, never enveloped); users comes
+    // from the API (enveloped) — so they unwrap differently and can't share one
+    // grab() any more. apiFetch returns the users array already unwrapped.
+    const grabStatic = (url) =>
       fetch(url).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status} loading ${url}`); return r.json(); });
-    Promise.all([grab(MOCK_SHELVES_URL), grab(USERS_API_URL)])
+    Promise.all([grabStatic(MOCK_SHELVES_URL), apiFetch(USERS_API_URL)])
       .then(([shelfData, userData]) => {
         const errors = [...validateShelfLayout(shelfData?.shelves), ...validateUsers(userData)];
         if (errors.length) throw new Error(errors.join(' · '));
@@ -586,8 +588,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   // pull the current target once the scene is ready so it matches the API
   useEffect(() => {
     if (!crowd) return;
-    fetch(CROWD_API_URL)
-      .then((r) => (r.ok ? r.json() : null))
+    apiFetch(CROWD_API_URL)
       .then((d) => { if (d) peopleRef.current?.setCrowdTarget?.(d.target); })
       .catch(() => {});
   }, [crowd?.maxTotal]);

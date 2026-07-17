@@ -17,6 +17,10 @@ import { Elysia, status } from "elysia";
 // { action, payload? } body — which the service fans out via applyAction's
 // switch. The distinct per-transition SSE events (enter/verify/leave/pay)
 // are unchanged: only the HTTP surface collapsed, not the feed.
+// `verify` doubles as the one-shot entrance: called from `outside` it runs the
+// enter step itself (emitting `enter`) before the verdict (emitting `verify`),
+// so a single call takes a customer from the street to inside/turned-away.
+// `enter` stays a standalone action for parking someone at the gate first.
 // POST /users is "roster entry + auto-enter" in one call: a freshly created
 // user starts `waiting` (holding at the entrance scanner for a verify verdict),
 // the same place an `enter` action lands them — not walking straight in.
@@ -118,8 +122,10 @@ function guessGender(name: string, id: number): User["gender"] {
   return id % 2 === 0 ? "female" : "male";
 }
 
-// Fetch the starting crowd once at module load. A failure here rejects the
+// Fetch the crowd from external. At module load a failure here rejects the
 // top-level await below, which aborts server startup — external must be up.
+// Also called at runtime by refreshRoster (Backdoor's reload button), where a
+// failure is caught and turned into a 502 instead of killing the process.
 async function fetchBootRoster(): Promise<User[]> {
   const url = `${process.env.ATK_STORE_API_URL}/animation-api/users`;
   const res = await fetch(url);
@@ -147,16 +153,45 @@ async function fetchBootRoster(): Promise<User[]> {
 }
 
 class UsersService {
-  private store: Map<number, User>;
-  private nextId: number;
+  private store = new Map<number, User>();
+  private nextId = 1;
   private listeners = new Set<(e: UserEvent) => void>();
   // one live browse timer per user id — armed on scanQR pass, disarmed by
   // whatever ends the session first (timer itself, leave, delete)
   private browseTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
   constructor(roster: User[]) {
+    this.resetRoster(roster);
+  }
+
+  // Swap the whole store for a fresh roster — boot and refreshRoster share this.
+  // Disarming the browse timers is hygiene rather than a guard: shelfClose
+  // no-ops once its user is gone or has moved off browsing, and scanQR clears
+  // any stale handle before arming a new one. But a wiped roster shouldn't
+  // leave timers pending for departed users, and it keeps the postcondition
+  // simple — after this returns, no browse session is live.
+  private resetRoster(roster: User[]) {
+    for (const id of [...this.browseTimers.keys()]) this.clearBrowseTimer(id);
     this.store = new Map(roster.map((u) => [u.id, u]));
     this.nextId = Math.max(0, ...this.store.keys()) + 1;
+  }
+
+  // Backdoor's "Reload from External" button: put the store back to the state a
+  // fresh boot would leave it in, without restarting. The await lands before
+  // anything is touched, so an external failure leaves the store exactly as it
+  // was — there is nothing to roll back.
+  async refreshRoster() {
+    const roster = await fetchBootRoster();
+    // Every current body is dropped and none are re-announced: to the scene
+    // `added` means "walk in the front door and hold for verify" (it ignores
+    // status), so replaying the new roster would march `outside` users inside
+    // and wedge them at the scanner. The scene has no SSE vocabulary for
+    // reseeding a roster — it seeds from GET /users at construction, so the
+    // fresh crowd shows up on the next dashboard reload.
+    const gone = [...this.store.keys()];
+    this.resetRoster(roster);
+    for (const id of gone) this.emit({ type: "removed", user: { id } });
+    return this.list();
   }
 
   // event hub — the SSE route subscribes, mutations broadcast
@@ -226,7 +261,7 @@ class UsersService {
     if (!this.store.delete(id)) throw status(404, "User not found");
     this.clearBrowseTimer(id); // a deleted browser must not shelfClose later
     this.emit({ type: "removed", user: { id } });
-    return { id, deleted: true as const };
+    return { id };
   }
 
   private clearBrowseTimer(id: number) {
@@ -286,12 +321,21 @@ class UsersService {
     return user;
   }
 
-  // verdict for someone waiting at the gate: pass walks them in,
-  // fail turns them away (they must enter again)
+  // verdict for someone at the gate: pass walks them in, fail turns them away
+  // (they must enter again). Accepts `outside` too — there it first runs the
+  // enter step (outside → waiting, emits `enter`), then the verdict, so one
+  // call brings a customer from the street to inside/turned-away. The two SSE
+  // events still fire in order (enter then verify): the feed stays per-step,
+  // only the HTTP surface collapses. A `fail` from outside is a no-op round
+  // trip (outside → waiting → outside) that reads as "rejected at the door".
   private verify(id: number, result: "pass" | "fail") {
     const user = this.mustFind(id);
-    if (user.status !== "waiting")
-      throw status(409, `User is ${user.status}, verify needs "waiting"`);
+    if (user.status !== "waiting" && user.status !== "outside")
+      throw status(
+        409,
+        `User is ${user.status}, verify needs "waiting" or "outside"`,
+      );
+    if (user.status === "outside") this.enter(id); // → waiting, emits `enter`
     user.status = result === "pass" ? "inside" : "outside";
     this.emit({ type: "verify", user: { id, result } });
     return user;
