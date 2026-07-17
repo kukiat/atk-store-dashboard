@@ -86,8 +86,9 @@ const STAT_CARDS = [
 // feed drives live walk-ins (POST), card updates / body swaps (PATCH) and
 // fade-outs (DELETE) while the demo runs.
 const MOCK_SHELVES_URL = '/mock/shelves.json';
-const USERS_API_URL = 'http://localhost:3004/users';
-const CROWD_API_URL = 'http://localhost:3004/crowd';
+const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3004';
+const USERS_API_URL = `${API_URL}/users`;
+const CROWD_API_URL = `${API_URL}/crowd`;
 
 const shelfIdStr = (id) => String(id).padStart(2, '0');
 

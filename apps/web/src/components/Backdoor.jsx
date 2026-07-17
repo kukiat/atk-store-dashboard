@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
 
-// Hidden operator "backdoor" — fires the in-memory users API (apps/api, :3004)
+// Hidden operator "backdoor" — fires the in-memory users API (apps/api, {API_URL})
 // so the whole customer lifecycle can be driven from buttons instead of curl.
 // Open this in a second tab next to /v5 and watch the 3D store react (the
 // dashboard owns the SSE feed; this page is a plain roster manager — it loads
 // GET /users, re-fetches after each action, and offers a manual Refresh).
 // Nothing links here: type the URL by hand.
-const USERS_API_URL = 'http://localhost:3004/users';
-const CROWD_API_URL = 'http://localhost:3004/crowd';
-const SHELFS_API_URL = 'http://localhost:3004/shelfs';
+const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3004';
+const USERS_API_URL = `${API_URL}/users`;
+const CROWD_API_URL = `${API_URL}/crowd`;
+const SHELFS_API_URL = `${API_URL}/shelfs`;
 
 // which actions each status unlocks (mirrors the API's 409 state guards):
 //   outside --enter--> waiting --verify--> inside --leave--> paying --pay--> outside
@@ -308,7 +309,7 @@ export default function Backdoor() {
         <header className="bd-head">
           <div className="bd-brand">
             <h1>BACKDOOR</h1>
-            <span>USER LIFECYCLE CONSOLE · :3004</span>
+            <span>USER LIFECYCLE CONSOLE · {API_URL}</span>
           </div>
           <button className="btn" onClick={refresh}>↻ Refresh</button>
         </header>
