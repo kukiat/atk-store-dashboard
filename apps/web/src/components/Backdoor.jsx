@@ -16,7 +16,9 @@ const SHELFS_API_URL = `${API_URL}/shelfs`;
 //   outside --enter--> waiting --verify--> inside --leave--> paying --pay--> outside
 // verify also takes `outside` directly (rolls the enter step in), so Pass /
 // Turn away are live from outside too — one click walks them in or turns them
-// away without a separate Enter first.
+// away without a separate Enter first. pay mirrors this on the exit: live from
+// inside/scanning/browsing (rolls the leave step in), one click sends them to
+// the gate and charges — no separate Leave first.
 // plus the shelf sub-machine while inside:
 //   inside --walkToShelf--> scanning --scanQR pass--> browsing --(30s timer)--> inside
 //                           scanning --walkAway----> inside
@@ -24,7 +26,7 @@ const can = {
   enter: (s) => s === 'outside',
   verify: (s) => s === 'waiting' || s === 'outside',
   leave: (s) => s === 'inside' || s === 'scanning' || s === 'browsing',
-  pay: (s) => s === 'paying',
+  pay: (s) => s === 'paying' || can.leave(s),
   walkToShelf: (s) => s === 'inside',
   scanQR: (s) => s === 'scanning',
   walkAway: (s) => s === 'scanning',

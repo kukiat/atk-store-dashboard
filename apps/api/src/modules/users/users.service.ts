@@ -21,6 +21,10 @@ import { Elysia, status } from "elysia";
 // enter step itself (emitting `enter`) before the verdict (emitting `verify`),
 // so a single call takes a customer from the street to inside/turned-away.
 // `enter` stays a standalone action for parking someone at the gate first.
+// `pay` mirrors this on the exit: from inside/scanning/browsing it runs the
+// leave step (emitting `leave`) before the verdict (emitting `pay`), so one
+// call takes a shopper from the floor to out (pass) or stuck at the gate
+// (fail). `leave` stays standalone for parking someone at the fare-gate first.
 // POST /users is "roster entry + auto-enter" in one call: a freshly created
 // user starts `waiting` (holding at the entrance scanner for a verify verdict),
 // the same place an `enter` action lands them — not walking straight in.
@@ -435,11 +439,27 @@ class UsersService {
   }
 
   // face-scan at the exit fare-gate for someone holding there (paying):
-  // pass walks them out of the store, fail keeps them at the gate to retry
+  // pass walks them out of the store, fail keeps them at the gate to retry.
+  // Accepts `inside`/`scanning`/`browsing` too — there it first runs the leave
+  // step (→ paying, emits `leave`), then the verdict, so one call takes a
+  // shopper from the floor to out/stuck-at-the-gate. The two SSE events still
+  // fire in order (leave then pay): the feed stays per-step, only the HTTP
+  // surface collapses — the exit-side mirror of verify rolling in enter.
+  // Unlike verify's fail (a no-op round trip), a `fail` here still moved the
+  // shopper to the gate: net inside → paying, holding to retry.
   private pay(id: number, result: "pass" | "fail") {
     const user = this.mustFind(id);
-    if (user.status !== "paying")
-      throw status(409, `User is ${user.status}, pay needs "paying"`);
+    if (
+      user.status !== "paying" &&
+      user.status !== "inside" &&
+      user.status !== "scanning" &&
+      user.status !== "browsing"
+    )
+      throw status(
+        409,
+        `User is ${user.status}, pay needs "paying", "inside", "scanning" or "browsing"`,
+      );
+    if (user.status !== "paying") this.leave(id); // → paying, emits `leave`
     if (result === "pass") user.status = "outside";
     this.emit({ type: "pay", user: { id, result } });
     return user;
