@@ -10,8 +10,7 @@ import { crowdPlugin } from "./modules/crowd";
 const port = Number(process.env.PORT ?? 3004);
 
 const app = new Elysia()
-  // any localhost port — Vite may auto-assign one when 3003 is taken
-  .use(cors({ origin: /^https?:\/\/localhost(:\d+)?$/ }))
+  .use(cors({ origin: true }))
   .use(
     swagger({
       path: "/swagger",
