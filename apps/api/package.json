@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "bun --watch src/index.ts",
+    "build": "bun build src/index.ts --outdir dist --target bun --minify",
     "start": "bun src/index.ts",
+    "start:prod": "bun dist/index.js",
     "db:pull": "drizzle-kit pull",
     "db:studio": "drizzle-kit studio"
   },
