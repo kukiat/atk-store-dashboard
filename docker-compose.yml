@@ -1,0 +1,39 @@
+# Local build & smoke-test before pushing to Docker Hub.
+#   docker compose up --build
+# Then: web -> http://localhost:8080 , api -> http://localhost:3004/health
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: atk
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: ${DOCKERHUB_USER:-local}/atk-store-api:latest
+    environment:
+      PORT: 3004
+      DATABASE_URL: postgres://postgres:postgres@db:5432/atk
+    ports:
+      - "3004:3004"
+    depends_on:
+      - db
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    image: ${DOCKERHUB_USER:-local}/atk-store-web:latest
+    ports:
+      - "8080:80"
+
+volumes:
+  db_data:
