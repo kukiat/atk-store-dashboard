@@ -10,4 +10,11 @@ export default defineConfig({
     port: Number(process.env.PORT) || 3003,
     strictPort: true,
   },
+  // Railway (and other hosts) probe $PORT on 0.0.0.0 — default vite preview
+  // only binds localhost:4173, which causes "Application failed to respond"
+  preview: {
+    host: '0.0.0.0',
+    port: Number(process.env.PORT) || 4173,
+    strictPort: true,
+  },
 });
