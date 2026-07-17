@@ -25,7 +25,7 @@ import {
   Engine, Scene, ArcRotateCamera, Camera, Vector3, Color3, Color4,
   HemisphericLight, DirectionalLight, ShadowGenerator, MeshBuilder, TransformNode,
   PBRMaterial, StandardMaterial, DynamicTexture, Curve3, PointerEventTypes,
-  DefaultRenderingPipeline, ImageProcessingConfiguration, Scalar, SceneLoader, Matrix,
+  DefaultRenderingPipeline, ImageProcessingConfiguration, Scalar, SceneLoader, Matrix, Quaternion,
 } from '@babylonjs/core';
 import '@babylonjs/loaders/glTF';
 
@@ -2685,35 +2685,142 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const PICK_CLIP = 1.79; // PickUp is 1.25s, played at 0.7 speed
 
   // ---------- phone-scan unlock flow ----------
-  // a shopper arriving at a slot scans in before anything else: the PickUp
-  // clip doubles as the "hold the phone up" pose, a beam links the phone to
-  // the QR pedestal, then access is granted — the glass parts only at this
-  // shopper's own seam and glides shut again when they walk off (see
-  // releaseShelfAccess). All fx run world-space so nothing fights the rig.
-  // gesture timeline: pull the phone out of the hip pocket, hold it to the
+  // a shopper arriving at a slot scans in before anything else: Idle keeps
+  // looping while the right arm is procedurally reached out toward the QR
+  // pedestal (no PickUp bend — that clip is for actually grabbing items), a
+  // beam links the phone to the pedestal, then access is granted — the glass
+  // parts only at this shopper's own seam and glides shut again when they
+  // walk off (see releaseShelfAccess). Fx run world-space; the arm/head
+  // override rides onAfterAnimationsObservable so Idle can't stomp it.
+  // gesture timeline: pull the phone out of the hip pocket, extend it to the
   // reader while the beam runs, then pocket it again — access lands mid-beam
   // so the door is already gliding open while the phone goes away
   const SCAN_RAISE = 0.5, SCAN_BEAM = 1.1, SCAN_LOWER = 0.5;
   const SCAN_SECS = SCAN_RAISE + SCAN_BEAM + SCAN_LOWER;
   const SCAN_UNLOCK_AT = SCAN_RAISE + SCAN_BEAM * 0.5;
+  // the pedestal sits well off the stand point's facing (slots hug the glass,
+  // the plate is most of a metre sideways — ~70° typical), so the reach is
+  // split like a person would: the body half-turns toward the reader first,
+  // then the arm and head cover the rest
+  const SCAN_BODY_YAW = 0.6; // body may turn ±34° toward the pedestal
+  const SCAN_ARM_YAW = 0.7; // arm may swing a further ±40° off the turned body
+  const SCAN_HEAD_YAW = 0.52; // the head follows up to ±30° off the turned body
   const _beamTo = new Vector3();
   const _hipPt = new Vector3(), _fistPt = new Vector3();
+  const _aimAxis = new Vector3(), _aimA = new Vector3(), _aimD = new Vector3();
+  const _decS = new Vector3(), _decT = new Vector3();
   function shelfLockOf(p) { return lockById.get(p.person?.nearShelf) ?? shelfLocks[0]; }
-  // hip-pocket anchor, tracked per frame so the idle bob doesn't detach it
+  // hip-pocket anchor, tracked per frame so neither the idle bob nor the
+  // scan's body half-turn detaches it (side taken from the live facing,
+  // not the slot's p.s snapshot)
   function hipAnchor(p, out) {
-    out.copyFrom(p.s).scaleInPlace(0.24).addInPlace(p.h.position);
+    out.set(Math.cos(p.h.rotation.y), 0, -Math.sin(p.h.rotation.y))
+      .scaleInPlace(0.24).addInPlace(p.h.position);
     out.y = 0.82;
     return out;
   }
 
+  function clampAngle(a, lim) {
+    a = Math.atan2(Math.sin(a), Math.cos(a));
+    return Scalar.Clamp(a, -lim, lim);
+  }
+  // shortest-arc rotation taking world direction a onto d (both unit-length)
+  function arcQuat(a, d) {
+    Vector3.CrossToRef(a, d, _aimAxis);
+    const s = _aimAxis.length(), c = Vector3.Dot(a, d);
+    if (s < 1e-5) return c > 0 ? Quaternion.Identity()
+      : Quaternion.RotationAxis(Math.abs(a.y) < 0.9 ? Vector3.Up() : Vector3.Right(), Math.PI);
+    return Quaternion.RotationAxis(_aimAxis.scaleInPlace(1 / s), Math.atan2(s, c));
+  }
+  // Babylon only recomputes the node you ask for — every bone between it and
+  // the human root keeps last frame's matrix. The aim solve turns the body
+  // first, so the whole chain has to be refreshed or it solves against the
+  // un-turned pose.
+  function forceWorld(node, root) {
+    const chain = [];
+    for (let n = node; n && n !== root; n = n.parent) chain.push(n);
+    root.computeWorldMatrix(true);
+    for (let i = chain.length - 1; i >= 0; i--) chain[i].computeWorldMatrix(true);
+  }
+  // re-express a world-space rotation about the node's own origin as that
+  // node's local rotationQuaternion. Pure matrix algebra so the glTF
+  // __root__ handedness flip cancels out instead of corrupting the pose
+  // (composing quaternions across the mirrored ancestors would not).
+  function localizeRotation(node, rw, out) {
+    const pivot = node.getAbsolutePosition();
+    const rot = new Matrix();
+    rw.toRotationMatrix(rot);
+    node.getWorldMatrix()
+      .multiply(Matrix.Translation(-pivot.x, -pivot.y, -pivot.z))
+      .multiply(rot)
+      .multiply(Matrix.Translation(pivot.x, pivot.y, pivot.z))
+      .multiply(node.parent.getWorldMatrix().clone().invert())
+      .decompose(_decS, out, _decT);
+    return out;
+  }
+  // aim solve, once per scan start: rigid-rotate the whole right-arm subtree
+  // about its shoulder pivot so the fist ray points at the slot's QR plate
+  // (elbow bend preserved from whatever pose Idle is in right now), and yaw
+  // the head after it. Returns node-local target quaternions for the
+  // post-animation blend; null → gesture degrades to the phone travel alone.
+  function solveScanAim(p) {
+    const u = p.h.metadata;
+    const upper = u.fist?.parent?.parent ?? null; // Fist.R → LowerArm.R → UpperArm.R
+    const plate = SLOTS[p.slot]?.plate;
+    if (!upper?.rotationQuaternion || !plate) return null;
+    if (u.head === undefined)
+      u.head = p.h.getDescendants(false).find((n) => /head/i.test(n.name) && n.rotationQuaternion) ?? null;
+    const fy = Math.atan2(p.f.x, p.f.z); // facing the shelf (beginSession set p.f from the slot ry)
+    const raw = clampAngle(
+      Math.atan2(plate.x - p.h.position.x, plate.z - p.h.position.z) - fy, Math.PI);
+    const bodyYaw = clampAngle(raw, SCAN_BODY_YAW);
+    // arm/head local targets must be solved against the pose they'll blend
+    // over — the half-turned body — so turn it, solve, turn it back
+    p.h.rotation.y = fy + bodyYaw;
+    forceWorld(u.fist, p.h);
+    const pivot = upper.getAbsolutePosition().clone();
+    const yaw = fy + bodyYaw + clampAngle(raw - bodyYaw, SCAN_ARM_YAW);
+    const pitch = Scalar.Clamp(
+      Math.atan2(plate.y - pivot.y, Math.hypot(plate.x - pivot.x, plate.z - pivot.z)), -0.35, 0.45);
+    _aimD.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch));
+    _aimA.copyFrom(u.fist.getAbsolutePosition()).subtractInPlace(pivot).normalize();
+    const qUp = localizeRotation(upper, arcQuat(_aimA, _aimD), new Quaternion());
+    let qHead = null;
+    if (u.head) {
+      forceWorld(u.head, p.h);
+      const hy = fy + bodyYaw + clampAngle(raw - bodyYaw, SCAN_HEAD_YAW);
+      _aimA.set(Math.sin(fy + bodyYaw), 0, Math.cos(fy + bodyYaw));
+      _aimD.set(Math.sin(hy), 0, Math.cos(hy));
+      qHead = localizeRotation(u.head, arcQuat(_aimA, _aimD), new Quaternion());
+    }
+    p.h.rotation.y = fy;
+    p.h.computeWorldMatrix(true);
+    return { upper, head: qHead ? u.head : null, qUp, qHead, yaw, pitch, fy, bodyYaw };
+  }
+
   function startShelfScan(p) {
     const u = p.h.metadata;
-    p.shelfScan = { t: 0, done: false };
-    p.idling = false;
-    if (u.groups.Idle) u.groups.Idle.stop();
-    const g = u.groups.PickUp; // arm reach ≈ raising the phone to the reader
-    if (g) g.start(false, 0.6, g.from, g.to); // 1.25s clip stretched ≈ the 2.1s gesture
+    p.shelfScan = { t: 0, done: false, k: 0, aim: solveScanAim(p) };
+    p.idling = true; // the body stays on the Idle loop; only the arm/head get overridden
+    const gi = u.groups.Idle;
+    if (gi && !gi.isPlaying) gi.start(true, 1.0, gi.from, gi.to);
   }
+
+  // animation groups evaluate inside scene.render(), AFTER the per-frame
+  // update — the reach pose has to land post-animate or Idle would stomp it.
+  // Slerp from whatever pose Idle produced this frame toward the solved
+  // target, weighted by the gesture's blend factor.
+  scene.onAfterAnimationsObservable.add(() => {
+    for (const p of shoppers) {
+      const s = p.shelfScan;
+      if (!s?.aim || !s.k) continue;
+      const { upper, head, qUp, qHead } = s.aim;
+      if (upper.isDisposed()) continue; // rig respawned mid-scan — targets point at the old one
+      Quaternion.SlerpToRef(upper.rotationQuaternion, qUp, s.k, upper.rotationQuaternion);
+      if (head && !head.isDisposed())
+        Quaternion.SlerpToRef(head.rotationQuaternion, qHead, s.k, head.rotationQuaternion);
+    }
+  });
 
   function updateShelfScan(p, dt) {
     const s = p.shelfScan;
@@ -2721,23 +2828,21 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const u = p.h.metadata;
     const lk = shelfLockOf(p);
     const plate = SLOTS[p.slot]?.plate;
+    // one blend factor drives the phone travel, the phone turn and the
+    // arm/head reach (applied post-animation above): up, hold, down
+    const k = s.t < SCAN_RAISE ? easeInOutCubic(s.t / SCAN_RAISE)
+      : s.t < SCAN_RAISE + SCAN_BEAM ? 1
+        : 1 - easeInOutCubic(Math.min(1, (s.t - SCAN_RAISE - SCAN_BEAM) / SCAN_LOWER));
+    s.k = k;
+    if (s.aim) p.h.rotation.y = s.aim.fy + s.aim.bodyYaw * k; // half-turn toward the reader
     if (u.fist) {
       p.phone.setEnabled(true);
-      p.phone.rotation.y = p.h.rotation.y;
       hipAnchor(p, _hipPt);
       _fistPt.copyFrom(u.fist.getAbsolutePosition());
-      if (s.t < SCAN_RAISE) { // out of the pocket, up to the reader
-        const k = easeInOutCubic(s.t / SCAN_RAISE);
-        Vector3.LerpToRef(_hipPt, _fistPt, k, p.phone.position);
-        p.phone.rotation.x = 0.7 * (1 - k); // screen tips up as it rises
-      } else if (s.t < SCAN_RAISE + SCAN_BEAM) { // held to the reader
-        p.phone.position.copyFrom(_fistPt);
-        p.phone.rotation.x = 0;
-      } else { // back into the pocket
-        const k = easeInOutCubic((s.t - SCAN_RAISE - SCAN_BEAM) / SCAN_LOWER);
-        Vector3.LerpToRef(_fistPt, _hipPt, k, p.phone.position);
-        p.phone.rotation.x = 0.7 * k;
-      }
+      Vector3.LerpToRef(_hipPt, _fistPt, k, p.phone.position); // pocket ↔ the reaching hand
+      const fy = Math.atan2(p.f.x, p.f.z);
+      p.phone.rotation.y = shortestLerp(fy, s.aim?.yaw ?? fy, k); // screen swings to face the plate
+      p.phone.rotation.x = 0.7 * (1 - k) - (s.aim?.pitch ?? 0) * k; // pocket tilt → square to the plate
     }
     const beamOn = s.t >= SCAN_RAISE && s.t < SCAN_RAISE + SCAN_BEAM && plate && u.fist;
     p.beam.setEnabled(!!beamOn);
@@ -2766,13 +2871,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       }
     }
     if (s.t < SCAN_SECS) return;
-    // phone pocketed → settle into Idle and let the pick cycle take over
+    // phone pocketed → Idle is still looping; let the pick cycle take over
     p.shelfScan = null;
     p.phone.setEnabled(false);
-    if (u.groups.PickUp) u.groups.PickUp.stop();
     p.idling = true;
     const gi = u.groups.Idle;
-    if (gi) gi.start(true, 1.0, gi.from, gi.to);
+    if (gi && !gi.isPlaying) gi.start(true, 1.0, gi.from, gi.to);
     if (!p.shelfHold) // commanded picks arrive as inspectItem events instead
       p.pickT = PICK_PERIOD - 0.8 - Math.random() * 1.4; // first pick lands shortly after the door opens
   }
