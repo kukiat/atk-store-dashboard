@@ -16,5 +16,7 @@ export default defineConfig({
     host: '0.0.0.0',
     port: Number(process.env.PORT) || 4173,
     strictPort: true,
+    // Vite blocks unknown Host headers by default; Railway serves via *.up.railway.app
+    allowedHosts: true,
   },
 });
