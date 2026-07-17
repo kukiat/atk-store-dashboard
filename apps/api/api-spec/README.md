@@ -4,7 +4,7 @@
 
 - Base URL: `http://localhost:3004`
 - Swagger docs (interactive): `http://localhost:3004/swagger`
-- Health check: `curl http://localhost:3004/health`
+- Health check: `curl http://localhost:3004/health-check`
 
 ## Response envelope
 
@@ -13,7 +13,7 @@
 - สำเร็จ: `{ "data": <payload>, "error": null, "success": true }`
 - พลาด: `{ "data": null, "error": { "message": "..." }, "success": false }`
 
-HTTP status code ยังมีความหมายเหมือนเดิม (`success` แค่สะท้อน `res.ok`). **ยกเว้น** SSE (`/*/events`) กับ `/health` ที่ไม่ห่อ. รายละเอียด + ตัวอย่างดูใน [users.md](users.md#response-envelope). ฝั่ง server: `apps/api/src/envelope.ts` (`envelope()` / `ok()` / `envelopeError`). ฝั่ง web: `apps/web/src/api.js` (`apiFetch`).
+HTTP status code ยังมีความหมายเหมือนเดิม (`success` แค่สะท้อน `res.ok`). **ยกเว้น** SSE (`/*/events`) กับ `/health-check` ที่ไม่ห่อ. รายละเอียด + ตัวอย่างดูใน [users.md](users.md#response-envelope). ฝั่ง server: `apps/api/src/envelope.ts` (`envelope()` / `ok()` / `envelopeError`). ฝั่ง web: `apps/web/src/api.js` (`apiFetch`).
 
 ## วิธีรัน
 

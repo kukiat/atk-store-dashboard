@@ -35,7 +35,7 @@ export const ok = <T>(data: T) => ({
 
 // Shared onError for the four business plugins. Applied per-plugin via
 // .onError(envelopeError) so its scope is exactly those modules' routes —
-// /health and unmatched top-level routes on the root app are never touched.
+// /health-check and unmatched top-level routes on the root app are never touched.
 //
 // Error origins and how each surfaces here (all confirmed against Elysia 1.4):
 //   thrown status(n, msg) — code === n (number), error.response === msg

@@ -20,7 +20,7 @@ const app = new Elysia()
       },
     }),
   )
-  .get("/health", () => ({
+  .get("/health-check", () => ({
     status: "ok" as const,
     version: API_VERSION,
     timestamp: new Date().toISOString(),
