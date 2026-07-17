@@ -2000,8 +2000,20 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     idTagT: Infinity, paidTagT: Infinity, declinedTagT: Infinity,
   };
 
+  // walking temperament, rolled once per shopper: rusher barrels through and
+  // rarely stops, stroller ambles and window-shops, browser is the shelf
+  // magnet. Applies to API customers too — it's visual life only; commands
+  // cancel a pause on arrival and the junction dice still never rolls for them.
+  function rollPersona() {
+    const r = Math.random();
+    if (r < 0.25) return { speed: 0.042 + Math.random() * 0.013, pauseMul: 3.5, pauseDurMul: 0.6, diceMul: 0.4 }; // rusher
+    if (r < 0.6) return { speed: 0.026 + Math.random() * 0.010, pauseMul: 0.7, pauseDurMul: 1.0, diceMul: 1.0 }; // stroller
+    return { speed: 0.032 + Math.random() * 0.014, pauseMul: 1.0, pauseDurMul: 1.0, diceMul: 1.6 }; // browser
+  }
+
   function makeShopper(mode, t, identOverride, pc = frontPC) {
     const ident = identOverride ?? nextIdentity();
+    const persona = rollPersona();
     const h = makeHuman(nextCharFile(ident.female));
     // browse kit, disabled until a shelf visit: product box that rides the
     // hand, phone + beam for the QR scan, green access ring for the feet
@@ -2051,12 +2063,25 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       t: t ?? tMerge,
       wp: 0,
       exit: false,
-      speed: 0.03 + Math.random() * 0.018,
-      // personal walking line: a lane preference plus a slow weave, applied
-      // perpendicular to the spline so nobody treads the exact same rail
-      lat: (Math.random() * 2 - 1) * 0.22,
+      speed: persona.speed,
+      pauseMul: persona.pauseMul, pauseDurMul: persona.pauseDurMul, diceMul: persona.diceMul,
+      // pace breathes around the base over ~7–15s so the crowd never
+      // metronomes in lockstep (follow-the-leader still wins under braking)
+      driftAmp: 0.12 + Math.random() * 0.06,
+      driftFreq: (Math.PI * 2) / (7 + Math.random() * 8),
+      driftPhase: Math.random() * Math.PI * 2,
+      // personal walking line: a lane preference that itself wanders slowly,
+      // plus a two-octave weave, applied perpendicular to the spline so
+      // nobody treads the exact same rail twice
+      lat: (Math.random() * 2 - 1) * 0.2,
+      latDriftFreq: (Math.PI * 2) / (20 + Math.random() * 20),
+      latDriftPhase: Math.random() * Math.PI * 2,
       wobPhase: Math.random() * Math.PI * 2,
       wobFreq: 0.25 + Math.random() * 0.3,
+      // window-shopping: an occasional dead stop to eye a shelf or check the
+      // phone. nextPause gates the roll; pause holds the live stop
+      pause: null, pauseBlend: 0, pauseYaw: 0, pauseOff: null,
+      nextPause: elapsed + (10 + Math.random() * 15) * persona.pauseMul,
       latEase: mode === 'loop' ? 1 : 0, // door entries fade the offset in after the merge
       // shelf-visit state (slot >= 0 reserves the browse spot from the moment
       // the junction dice lands until the shopper merges back onto the loop)
@@ -2596,6 +2621,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
 
   // junction dice landed: reserve the slot and turn off the loop
   function startBrowse(p, slot) {
+    endPause(p); // a commanded walkToShelf can land mid window-shop
     const g = jitterSlot(slot);
     beginSession(p, slot, g.ry);
     p.mode = 'toshelf';
@@ -3355,11 +3381,71 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     applyGait(p);
   }
 
+  // ---------- window-shopping pauses ----------
+  // a loop walker occasionally just… stops: eyes the nearest shelf, or pulls
+  // the phone out. Gated so the stop never plugs the works: nobody close
+  // behind, clear of every door junction, never while flagged to exit or
+  // holding a browse reservation. Commands landing mid-pause cancel it —
+  // walk() on the next frame for exit flags, startBrowse() on the spot.
+  const PAUSE_JUNCTION_CLEAR = 1.5; // path units kept clear around door junctions
+  function tryStartPause(p) {
+    const retry = () => { p.nextPause = elapsed + 3 + Math.random() * 4; };
+    if (p.exit || p.slot >= 0) return retry();
+    for (const q of loopTraffic) { // someone close behind would pile up
+      if (q === p) continue;
+      const d = (((p.t - q.t) % 1) + 1) % 1 * walkPath.length;
+      if (d > 0.001 && d < FOLLOW_GAP) return retry();
+    }
+    for (const pcx of [frontPC, rightPC]) { // keep the door junctions flowing
+      for (const tj of [pcx.tMerge, pcx.tExit]) {
+        const d = (((p.t - tj) % 1) + 1) % 1;
+        if (Math.min(d, 1 - d) * walkPath.length < PAUSE_JUNCTION_CLEAR) return retry();
+      }
+    }
+    // something to look at? face the nearest shelf stand — otherwise (or 40%
+    // of the time regardless) it's a phone check
+    let best = Infinity, bx = 0, bz = 0;
+    for (const s of SLOTS) {
+      const d = Math.hypot(s.x - p.h.position.x, s.z - p.h.position.z);
+      if (d < best) { best = d; bx = s.x; bz = s.z; }
+    }
+    const phone = best > 4 || Math.random() < 0.4;
+    p.pauseYaw = phone
+      ? p.h.rotation.y + (Math.random() - 0.5) * 0.8
+      : Math.atan2(bx - p.h.position.x, bz - p.h.position.z);
+    p.pause = { until: elapsed + (1.5 + Math.random() * 2.5) * p.pauseDurMul, phone };
+  }
+  function endPause(p) {
+    if (!p.pause) return;
+    if (p.pause.phone) p.phone.setEnabled(false);
+    p.pause = null;
+    p.nextPause = elapsed + (10 + Math.random() * 15) * p.pauseMul;
+  }
+  // phone held at the chest, screen back toward the face — world-parented
+  // exactly like the shelf-scan pose, so nothing new touches the skeleton
+  function posePausePhone(p) {
+    p.phone.setEnabled(true);
+    const fy = p.h.rotation.y;
+    p.phone.position.set(
+      p.h.position.x + Math.sin(fy) * 0.26, 1.22,
+      p.h.position.z + Math.cos(fy) * 0.26);
+    p.phone.rotation.y = fy + Math.PI;
+    p.phone.rotation.x = 0.55;
+  }
+
   function walk(p, dt) {
     if (p.mode !== 'loop') { spurMove(p, dt); return; }
 
+    // window-shopping pause: run it down, or roll for a new one. An exit
+    // flag (API leave or the auto flagger) or a DELETE fade trumps the
+    // daydream immediately — a fading body must not re-enable the phone,
+    // which is world-parented and would float at full opacity
+    if (p.pause && (p.exit || p.fadeStart != null || elapsed > p.pause.until)) endPause(p);
+    else if (!p.pause && p.fadeStart == null && elapsed >= p.nextPause) tryStartPause(p);
+
     // pick a target speed, then ease the current speed toward it
-    let target = p.speed;
+    let target = p.pause ? 0
+      : p.speed * (1 + p.driftAmp * Math.sin(elapsed * p.driftFreq + p.driftPhase));
     let gap = Infinity, leader = null;
     for (const q of loopTraffic) {
       if (q === p) continue;
@@ -3380,7 +3466,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     // The four right-wall slots share one junction — one roll covers them all.
     // API-owned customers never roll: their shelf visits are commanded through
     // the users API (walkToShelf), keeping the roster `status` authoritative.
-    if (!p.exit && p.slot < 0 && isRandom(p) && elapsed > p.cooldown) {
+    if (!p.exit && !p.pause && p.slot < 0 && isRandom(p) && elapsed > p.cooldown) {
       const stepFrac = (((p.t - prevT) % 1) + 1) % 1;
       let cand = null, nc = 0;
       for (const i of freePickSlots()) {
@@ -3391,7 +3477,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       if (cand !== null) {
         const cap = Math.max(1, Math.floor(shoppers.length / 2));
         const busy = browsingCount();
-        if (busy < cap && Math.random() < 0.55 * (1 - busy / cap)) {
+        if (busy < cap && Math.random() < Math.min(0.85, 0.55 * p.diceMul) * (1 - busy / cap)) {
           startBrowse(p, cand);
           return; // shelfLegMove owns the gait from the next frame
         }
@@ -3401,14 +3487,27 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
 
     p.h.position.copyFrom(walkPath.pointAt(p.t));
     const tan = walkPath.tangentAt(p.t);
-    p.h.rotation.y = Math.atan2(tan.x, tan.z);
+    const tanYaw = Math.atan2(tan.x, tan.z);
+    // paused shoppers turn to whatever caught their eye and back again;
+    // pauseBlend eases the handoff so neither end of the stop snaps
+    p.pauseBlend = Math.max(0, Math.min(1, p.pauseBlend + (p.pause ? dt * 3 : -dt * 3)));
+    p.h.rotation.y = p.pauseBlend > 0 ? shortestLerp(tanYaw, p.pauseYaw, p.pauseBlend) : tanYaw;
     // the ±0.3 clamp keeps the worst case inside the spline's verified 0.68
     // obstacle clearance with a body half-width to spare
     p.latEase = Math.min(1, p.latEase + dt * 0.5);
-    const off = Math.max(-0.3, Math.min(0.3,
-      p.lat + Math.sin(elapsed * p.wobFreq + p.wobPhase) * 0.08)) * p.latEase;
+    const weave = p.lat
+      + Math.sin(elapsed * p.latDriftFreq + p.latDriftPhase) * 0.1
+      + Math.sin(elapsed * p.wobFreq + p.wobPhase) * 0.08
+      + Math.sin(elapsed * p.wobFreq * 2.7 + p.wobPhase * 1.7) * 0.05;
+    // freeze the weave mid-stance while stopped — a time-driven offset would
+    // skate an Idle body sideways at up to ~0.15 u/s
+    if (p.pause && p.pauseOff == null) p.pauseOff = weave;
+    else if (!p.pause && p.pauseBlend <= 0) p.pauseOff = null;
+    const mixed = p.pauseOff == null ? weave : weave + (p.pauseOff - weave) * p.pauseBlend;
+    const off = Math.max(-0.3, Math.min(0.3, mixed)) * p.latEase;
     p.h.position.x += tan.z * off;
     p.h.position.z -= tan.x * off;
+    if (p.pause?.phone) posePausePhone(p);
 
     // flagged to leave → turn onto its portal's exit spur at the junction
     if (p.exit) {
@@ -3517,9 +3616,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       if (pend.verdict) apiVerifyUser(id, pend.verdict);
     }
 
-    // auto sliding doors: glide open for anyone near the threshold
+    // auto sliding doors: only the entry queue head (walking to the scanner /
+    // mid-scan) opens the front door — same as the right doorway. Anyone else
+    // inside the 2.6 radius (verified shoppers merging into the loop, loop
+    // traffic passing the storefront) must not hold it open
     {
       const near = shoppers.some((w) =>
+        w.pc === frontPC && w.mode === 'enter' && w.wp === 0 && entryRank(w) === 0 &&
         Math.hypot(w.h.position.x - DOOR.x, w.h.position.z - DOOR.zDoor) < 2.6);
       doorOpenAmt += ((near ? 1 : 0) - doorOpenAmt) * Math.min(1, dt * 5);
       for (const pnl of doorPanels) {
