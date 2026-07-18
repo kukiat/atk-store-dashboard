@@ -606,6 +606,40 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   // action happened but not where the user's status landed, so those trigger
   // one debounced re-fetch instead of this code guessing the lifecycle.
   const [outsideUsers, setOutsideUsers] = useState([]);
+
+  // verify-pass image flash: an API `verify` (result pass) that carries an
+  // imageURL pops a bubble with the customer's face above their head in the 3D
+  // scene for ~3s, then fades out (`closing` drives the fade-out CSS). A newer
+  // pass replaces the current one and restarts the clock. Timers live in a ref
+  // so the SSE listener, the auto-dismiss, and the broken-image close all share
+  // and cancel the same handles. The scene owns the per-frame follow transform.
+  const [verifyFlash, setVerifyFlash] = useState(null); // { imageURL, name } | null
+  const [verifyFlashClosing, setVerifyFlashClosing] = useState(false);
+  const verifyFlashTimers = useRef([]);
+  const clearVerifyFlashTimers = useCallback(() => {
+    verifyFlashTimers.current.forEach(clearTimeout);
+    verifyFlashTimers.current = [];
+  }, []);
+  const closeVerifyFlash = useCallback(() => {
+    clearVerifyFlashTimers();
+    setVerifyFlash(null);
+    setVerifyFlashClosing(false);
+  }, [clearVerifyFlashTimers]);
+  const showVerifyFlash = useCallback((imageURL, name) => {
+    clearVerifyFlashTimers();
+    setVerifyFlashClosing(false);
+    setVerifyFlash({ imageURL, name });
+    // hold 3s, then flip to the fade-out; unmount once the 400ms fade finishes
+    verifyFlashTimers.current.push(setTimeout(() => setVerifyFlashClosing(true), 3000));
+    verifyFlashTimers.current.push(setTimeout(() => {
+      setVerifyFlash(null);
+      setVerifyFlashClosing(false);
+    }, 3400));
+  }, [clearVerifyFlashTimers]);
+  useEffect(() => clearVerifyFlashTimers, [clearVerifyFlashTimers]); // drop timers on unmount
+  // hand the bubble wrapper to the scene, which writes its follow transform
+  const bindVerifyFlash = useCallback((el) => { peopleRef.current?.bindFlash?.(el); }, []);
+
   useEffect(() => {
     const es = new EventSource(`${USERS_API_URL}/events`);
     const roster = new Map();
@@ -644,7 +678,16 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     es.addEventListener('removed', fwd((u) => peopleRef.current?.removeUser?.(u.id), true));
     es.addEventListener('leave', fwd((u) => peopleRef.current?.leaveUser?.(u.id)));
     es.addEventListener('enter', fwd((u) => peopleRef.current?.enterUser?.(u)));
-    es.addEventListener('verify', fwd((u) => peopleRef.current?.verifyUser?.(u.id, u.result)));
+    es.addEventListener('verify', fwd((u) => {
+      peopleRef.current?.verifyUser?.(u.id, u.result);
+      // a pass that carried a face photo pops a bubble above that shopper's
+      // head in the 3D scene; the name comes from the roster mirror (fwd
+      // merged this event in just above), the scene anchors it by apiId.
+      if (u.result === 'pass' && u.imageURL) {
+        showVerifyFlash(u.imageURL, roster.get(u.id)?.name);
+        peopleRef.current?.flashVerifyUser?.(u.id);
+      }
+    }));
     es.addEventListener('pay', fwd((u) => peopleRef.current?.payUser?.(u.id, u.result)));
     // shelf sub-machine: commanded walk-up, scan verdict, per-item picks, and
     // the API-side session end (walkAway command / 30s shelfClose timer)
@@ -921,6 +964,25 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
               shelfName={shelfName}
             />
           )}
+          {/* verify-pass image bubble — floats above the shopper's head (scene
+              writes the follow transform onto the track); auto-fades after ~3s */}
+          {verifyFlash && (
+            <div className={`verify-flash-track${verifyFlashClosing ? ' closing' : ''}`} ref={bindVerifyFlash}>
+              <div className="verify-flash-bubble">
+                <img
+                  className="verify-flash-img"
+                  src={verifyFlash.imageURL}
+                  alt=""
+                  referrerPolicy="no-referrer"
+                  onError={closeVerifyFlash}
+                />
+                <div className="verify-flash-cap">
+                  {verifyFlash.name && <b>{verifyFlash.name}</b>}
+                  <span className="verify-flash-ok">Verified ✓</span>
+                </div>
+              </div>
+            </div>
+          )}
           <div className="floor-ctrl">
             <span className="fc-label">FLOOR PLAN</span>
             <div className="seg">
@@ -1026,6 +1088,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
           </button>
         ))}
       </nav>
+
     </div>
   );
 }

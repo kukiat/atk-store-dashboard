@@ -665,6 +665,50 @@ canvas { display: block; }
   padding: 14px 18px; border-top: 1px solid #16294f;
 }
 
+/* verify-pass image bubble (Dashboard) — floats above the shopper's head on an
+   API `verify` pass; the Babylon render loop writes the track's transform every
+   frame (mirror of .person-card-track). Holds ~3s, then fades out via `.closing`.
+   The scene owns the track transform, so all entrance/exit motion animates the
+   inner .verify-flash-bubble to avoid fighting the per-frame transform write. */
+.verify-flash-track {
+  position: absolute; left: 0; top: 0; z-index: 24;
+  visibility: hidden;            /* revealed by the scene on the first tracked frame */
+  will-change: transform;
+  pointer-events: none;          /* never blocks orbit drags */
+}
+.verify-flash-bubble {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  width: 150px; padding: 10px;
+  border-radius: 14px; border: 1px solid rgba(120,200,255,.3);
+  background: linear-gradient(180deg, rgba(18,32,48,.96), rgba(10,20,32,.96));
+  box-shadow: 0 12px 34px rgba(0,0,0,.5), 0 0 0 1px rgba(120,200,255,.1);
+  animation: vf-bubble-in .3s cubic-bezier(.2,.9,.25,1.15) both;
+}
+.verify-flash-track.closing .verify-flash-bubble { animation: vf-bubble-out .4s ease both; }
+.verify-flash-track::after {     /* pointer nub down toward the shopper */
+  content: ''; position: absolute; left: 50%; bottom: -5px;
+  width: 10px; height: 10px; transform: translateX(-50%) rotate(45deg);
+  background: rgba(10,20,32,.96);
+  border-right: 1px solid rgba(120,200,255,.3); border-bottom: 1px solid rgba(120,200,255,.3);
+}
+.verify-flash-img {
+  width: 128px; height: 128px; object-fit: cover; border-radius: 10px;
+  background: rgba(255,255,255,.04); border: 1px solid rgba(120,200,255,.18);
+}
+.verify-flash-cap {
+  display: flex; flex-direction: column; align-items: center; gap: 3px; text-align: center;
+}
+.verify-flash-cap b {
+  font-size: 12px; letter-spacing: .02em; color: #eaf6ff;
+  max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.verify-flash-ok {
+  font-size: 10px; font-weight: 700; letter-spacing: .08em;
+  color: #7cf0b0; text-transform: uppercase;
+}
+@keyframes vf-bubble-in { from { opacity: 0; transform: translateY(6px) scale(.9); } to { opacity: 1; transform: none; } }
+@keyframes vf-bubble-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: scale(.95); } }
+
 .bd-empty { color: #6f86b8; font-size: 12px; padding: 14px 2px; text-align: center; }
 .bd-error { color: #ff9a92; background: rgba(226,87,76,.12); border-radius: 8px; padding: 10px 12px; font-size: 12px; }
 

@@ -33,6 +33,24 @@ const can = {
   inspectItem: (s) => s === 'browsing',
 };
 
+// Fallback face for the dashboard's verify-pass image flash: a verify Pass
+// sends the user's avatar_url as payload.imageURL, but many rosters have an
+// empty avatar — this stand-in keeps the flash testable straight from here.
+// Inline SVG data URI so it always loads (no network, no CSP surprises).
+const VERIFY_PLACEHOLDER_IMG =
+  'data:image/svg+xml,' +
+  encodeURIComponent(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='260' height='260'>" +
+      "<defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>" +
+      "<stop offset='0' stop-color='#1b3350'/><stop offset='1' stop-color='#0b1a2c'/>" +
+      "</linearGradient></defs>" +
+      "<rect width='260' height='260' fill='url(#g)'/>" +
+      "<circle cx='130' cy='108' r='46' fill='none' stroke='#7cf0b0' stroke-width='5'/>" +
+      "<path d='M108 108 l16 16 l30 -34' fill='none' stroke='#7cf0b0' stroke-width='7' stroke-linecap='round' stroke-linejoin='round'/>" +
+      "<text x='130' y='196' fill='#9fd0ff' font-family='sans-serif' font-size='20' font-weight='700' letter-spacing='3' text-anchor='middle'>VERIFIED</text>" +
+      "</svg>",
+  );
+
 const GENDERS = ['male', 'female'];
 const STATUS_LABEL = {
   outside: 'Outside', waiting: 'Waiting', inside: 'Inside',
@@ -415,7 +433,7 @@ export default function Backdoor() {
                     <button
                       className="bd-act ok"
                       disabled={!can.verify(u.status)}
-                      onClick={() => act(u, 'verify', `${u.name} verified`, { result: 'pass' })}
+                      onClick={() => act(u, 'verify', `${u.name} verified`, { result: 'pass', imageURL: u.avatar_url || VERIFY_PLACEHOLDER_IMG })}
                     >
                       Verify ✓
                     </button>

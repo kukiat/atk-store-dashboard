@@ -55,8 +55,14 @@ export type User = {
 export type UserEvent =
   | { type: "added" | "updated" | "enter"; user: User }
   | { type: "removed" | "leave" | "walkAway" | "shelfClose"; user: { id: number } }
+  // verify carries an optional, transient imageURL (the face photo to flash on
+  // a pass) — it rides the event only, never lands on the stored User.
   | {
-      type: "verify" | "pay" | "scanQR";
+      type: "verify";
+      user: { id: number; result: "pass" | "fail"; imageURL?: string };
+    }
+  | {
+      type: "pay" | "scanQR";
       user: { id: number; result: "pass" | "fail" };
     }
   | { type: "walkToShelf"; user: { id: number; shelfId: number } }
@@ -69,7 +75,7 @@ export type ActionInput =
   | { action: "enter" }
   | { action: "leave" }
   | { action: "walkAway" }
-  | { action: "verify"; payload: { result: "pass" | "fail" } }
+  | { action: "verify"; payload: { result: "pass" | "fail"; imageURL?: string } }
   | { action: "pay"; payload: { result: "pass" | "fail" } }
   | { action: "scanQR"; payload: { result: "pass" | "fail" } }
   | { action: "walkToShelf"; payload: { shelfId: number } }
@@ -293,7 +299,7 @@ class UsersService {
       case "enter":
         return this.enter(id);
       case "verify":
-        return this.verify(id, input.payload.result);
+        return this.verify(id, input.payload.result, input.payload.imageURL);
       case "leave":
         return this.leave(id);
       case "pay":
@@ -332,7 +338,7 @@ class UsersService {
   // events still fire in order (enter then verify): the feed stays per-step,
   // only the HTTP surface collapses. A `fail` from outside is a no-op round
   // trip (outside → waiting → outside) that reads as "rejected at the door".
-  private verify(id: number, result: "pass" | "fail") {
+  private verify(id: number, result: "pass" | "fail", imageURL?: string) {
     const user = this.mustFind(id);
     if (user.status !== "waiting" && user.status !== "outside")
       throw status(
@@ -341,7 +347,9 @@ class UsersService {
       );
     if (user.status === "outside") this.enter(id); // → waiting, emits `enter`
     user.status = result === "pass" ? "inside" : "outside";
-    this.emit({ type: "verify", user: { id, result } });
+    // imageURL rides the event untouched (undefined drops out of the JSON) —
+    // the dashboard flashes it only on a pass; the store never keeps it.
+    this.emit({ type: "verify", user: { id, result, imageURL } });
     return user;
   }
 

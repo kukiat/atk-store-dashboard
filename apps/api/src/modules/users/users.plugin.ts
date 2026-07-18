@@ -119,7 +119,8 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
   // single status-transition endpoint. The { action, payload? } body is a
   // discriminated union (users.action); the service switches on `action`:
   //   enter       — outside  → waiting   (queue at the entrance for a verdict)
-  //   verify      — waiting  → inside/outside  (payload.result pass/fail)
+  //   verify      — waiting  → inside/outside  (payload.result pass/fail; optional
+  //                 payload.imageURL rides the SSE event for the dash face-flash)
   //   walkToShelf — inside   → scanning  (hold at the shelf reader for a verdict)
   //   scanQR      — scanning → browsing (pass, arms the 30s timer) / stays (fail)
   //   inspectItem — browsing → browsing  (one pick: keep or return)

@@ -64,7 +64,10 @@ export const usersModel = new Elysia({ name: "users.model" }).model({
     t.Object({ action: t.Literal("walkAway") }),
     t.Object({
       action: t.Literal("verify"),
-      payload: t.Object({ result: Result }),
+      // imageURL is optional and transient — carried through the `verify` SSE
+      // event (not stored on the user) so the dashboard can flash the face
+      // photo on a pass. Any string (full URL, relative path, or data URI).
+      payload: t.Object({ result: Result, imageURL: t.Optional(t.String()) }),
     }),
     t.Object({
       action: t.Literal("pay"),

@@ -1344,6 +1344,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   let selectedPersonId = null;
   let hoverPersonId = null;
   let cardEl = null; // React-owned card wrapper — the scene only writes its transform
+  // verify-pass image bubble: a second React-owned wrapper the scene floats
+  // above one API customer's head for a few seconds after a verify pass.
+  let flashEl = null;     // the wrapper el (null = React removed it)
+  let flashApiId = null;  // which API customer it tracks (null = parked/hidden)
 
   // invisible pick proxy — rides along and is disposed with the person's body
   function makePickCap(personId, h) {
@@ -1432,6 +1436,16 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     cardEl = el;
     if (cardEl) cardEl.style.visibility = 'hidden'; // revealed on the first tracked frame
   }
+
+  // verify-pass image bubble: React hands over its wrapper el (bindFlash) and
+  // names the API customer to float above (flashVerifyUser). The frame loop
+  // writes the follow transform, mirroring the person-card track above.
+  function bindFlash(el) {
+    flashEl = el;
+    if (flashEl) flashEl.style.visibility = 'hidden'; // revealed on the first tracked frame
+    else flashApiId = null;                            // React unmounted it → stop tracking
+  }
+  function flashVerifyUser(id) { flashApiId = id; }
 
   // selection / hover rings under the feet (RTS style). Shared meshes that
   // chase the current target each frame — parenting them to the person would
@@ -4184,6 +4198,25 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       } else if (cardEl) {
         cardEl.style.visibility = 'hidden';
       }
+      // verify-pass image bubble — same head-projection as the card, anchored
+      // by apiId (re-looked-up each frame so it hides the moment they despawn)
+      const flashP = flashApiId != null ? shopperByApiId(flashApiId) : null;
+      if (flashEl && flashP && flashP.h && flashP.fadeStart == null && !flashP.done) {
+        _cardAnchor.set(flashP.h.position.x, flashP.h.position.y + 2.7, flashP.h.position.z);
+        Vector3.ProjectToRef(
+          _cardAnchor, Matrix.IdentityReadOnly, scene.getTransformMatrix(),
+          camera.viewport.toGlobal(engine.getRenderWidth(), engine.getRenderHeight()), _cardScreen,
+        );
+        const hw = engine.getHardwareScalingLevel();
+        const W = canvas.clientWidth || 1, H = canvas.clientHeight || 1;
+        const fw = flashEl.offsetWidth || 150, fh = flashEl.offsetHeight || 180;
+        const fx = Scalar.Clamp(_cardScreen.x * hw, fw / 2 + 8, Math.max(fw / 2 + 8, W - fw / 2 - 8));
+        const fy = Scalar.Clamp(_cardScreen.y * hw, fh + 18, Math.max(fh + 18, H - 10));
+        flashEl.style.transform = `translate(${fx}px, ${fy}px) translate(-50%, -100%) translateY(-10px)`;
+        flashEl.style.visibility = 'visible';
+      } else if (flashEl) {
+        flashEl.style.visibility = 'hidden';
+      }
     }
 
     // focus dimming tween
@@ -4292,6 +4325,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       get: getPersonData,
       list: () => [...persons.keys()].map(getPersonData),
       bindCard,
+      // verify-pass image bubble: hand over the wrapper el + anchor it by apiId
+      bindFlash, flashVerifyUser,
     },
 
     // shelf locks: the scene owns the state, React mirrors it. set() is the
