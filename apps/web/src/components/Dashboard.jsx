@@ -312,7 +312,7 @@ const custInitials = (name) => {
 // muted slate for the exited-row avatar chip fallback (no torso tint to borrow)
 const EXITED_CHIP = '#3d4a63';
 
-function CustomersCard({ peopleRef, crowd, selectedPerson, onSelect, shelfName }) {
+function CustomersCard({ peopleRef, crowd, outsideUsers, selectedPerson, onSelect, shelfName }) {
   const [list, setList] = useState([]);
   const ulRef = useRef(null);
   const flipState = useRef(null);
@@ -328,36 +328,21 @@ function CustomersCard({ peopleRef, crowd, selectedPerson, onSelect, shelfName }
   const hideTip = useCallback(() => setTip(null), []);
 
   // "exited" customers — the ones the API says are `outside`, so they have no
-  // 3D body and never appear in the scene's list(). Poll the users API for them
-  // (authoritative status source) and render them dimmed at the tail of the list.
-  const [outside, setOutside] = useState([]);
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const users = await apiFetch(USERS_API_URL);
-        if (!alive) return;
-        setOutside(
-          users
-            .filter((u) => u.status === 'outside')
-            .sort((a, b) => a.id - b.id)
-            .map((u) => ({
-              id: u.id,
-              name: u.name,
-              email: u.email,
-              avatarUrl: u.avatar_url ?? '',
-              initials: custInitials(u.name),
-              color: EXITED_CHIP,
-            })),
-        );
-      } catch {
-        /* transient fetch error → keep the last roster */
-      }
-    };
-    load();
-    const t = setInterval(load, 2000);
-    return () => { alive = false; clearInterval(t); };
-  }, []);
+  // 3D body and never appear in the scene's list(). The Dashboard mirrors the
+  // roster off the SSE feed (authoritative status source) and hands the
+  // outside slice down; render them dimmed at the tail of the list.
+  const outside = useMemo(
+    () =>
+      outsideUsers.map((u) => ({
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        avatarUrl: u.avatar_url ?? '',
+        initials: custInitials(u.name),
+        color: EXITED_CHIP,
+      })),
+    [outsideUsers],
+  );
 
   useEffect(() => {
     const read = () => {
@@ -565,7 +550,12 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   const [locksLive, setLocksLive] = useState(false);
   const [shelfLockMap, setShelfLockMap] = useState({});
   useEffect(() => { setShelfLockMap(lockInit); }, [lockInit]);
+  const sceneCtrlRef = useRef(null);
+  const floorRef = useRef(0);
+  floorRef.current = floor;
   const handleController = useCallback((ctrl) => {
+    sceneCtrlRef.current = ctrl ?? null;
+    ctrl?.setFloor?.(floorRef.current); // sync the current floor once the scene is live
     peopleRef.current = ctrl?.people ?? null;
     setCrowd(ctrl?.people ? { ...ctrl.people.counts(), maxTotal: ctrl.people.maxTotal } : null);
     // lock UI only renders when the scene actually simulates locks (V5)
@@ -574,6 +564,8 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
       ? Object.fromEntries(ctrl.locks.states().map((s) => [s.id, s.state]))
       : lockInitRef.current);
   }, []);
+  // FLOOR PLAN buttons: Floor 2 stacks a second storey in the scene, Floor 1/3 collapse it
+  useEffect(() => { sceneCtrlRef.current?.setFloor?.(floor); }, [floor]);
   // the random crowd is driven from the Backdoor now (→ /crowd → SSE below),
   // not from a dashboard stepper. This page just mirrors the live head-count.
   useEffect(() => {
@@ -607,16 +599,49 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   // a new customer in, PATCH renames/reshapes them, DELETE fades them out.
   // EventSource reconnects by itself; events for people the scene doesn't
   // know are ignored there, so a dropped event can't wedge anything.
+  // The same feed keeps a roster mirror so the CUSTOMERS card can show the
+  // `outside` slice (Exited rows) without polling. Lifecycle events (added/
+  // updated/enter/leave) carry the full User and merge straight in; verdict
+  // events (verify/pay/scanQR/…) carry only { id, result } — they say an
+  // action happened but not where the user's status landed, so those trigger
+  // one debounced re-fetch instead of this code guessing the lifecycle.
+  const [outsideUsers, setOutsideUsers] = useState([]);
   useEffect(() => {
     const es = new EventSource(`${USERS_API_URL}/events`);
-    const fwd = (fn) => (ev) => {
+    const roster = new Map();
+    const publish = () =>
+      setOutsideUsers(
+        [...roster.values()].filter((u) => u.status === 'outside').sort((a, b) => a.id - b.id),
+      );
+    // wholesale replace from GET /users; a failed fetch keeps the last map
+    const sync = () => {
+      apiFetch(USERS_API_URL)
+        .then((users) => {
+          if (!Array.isArray(users)) return;
+          roster.clear();
+          for (const u of users) roster.set(u.id, u);
+          publish();
+        })
+        .catch(() => {});
+    };
+    let syncT = 0;
+    const syncSoon = () => { clearTimeout(syncT); syncT = setTimeout(sync, 300); };
+    const fwd = (fn, gone = false) => (ev) => {
       let user;
       try { user = JSON.parse(ev.data); } catch { return; }
+      if (gone) roster.delete(user.id);
+      else roster.set(user.id, { ...roster.get(user.id), ...user });
+      publish();
+      if (!gone && user.status == null) syncSoon();
       fn(user);
     };
+    // seed + heal: `open` fires on first connect and on every auto-reconnect,
+    // so one sync here both boots the roster and repairs whatever events were
+    // missed while the connection was down.
+    es.addEventListener('open', sync);
     es.addEventListener('added', fwd((u) => peopleRef.current?.addUser?.(u)));
     es.addEventListener('updated', fwd((u) => peopleRef.current?.updateUser?.(u)));
-    es.addEventListener('removed', fwd((u) => peopleRef.current?.removeUser?.(u.id)));
+    es.addEventListener('removed', fwd((u) => peopleRef.current?.removeUser?.(u.id), true));
     es.addEventListener('leave', fwd((u) => peopleRef.current?.leaveUser?.(u.id)));
     es.addEventListener('enter', fwd((u) => peopleRef.current?.enterUser?.(u)));
     es.addEventListener('verify', fwd((u) => peopleRef.current?.verifyUser?.(u.id, u.result)));
@@ -628,7 +653,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     es.addEventListener('inspectItem', fwd((u) => peopleRef.current?.inspectItemUser?.(u.id, u.result)));
     es.addEventListener('walkAway', fwd((u) => peopleRef.current?.walkAwayUser?.(u.id)));
     es.addEventListener('shelfClose', fwd((u) => peopleRef.current?.shelfCloseUser?.(u.id)));
-    return () => es.close();
+    return () => { clearTimeout(syncT); es.close(); };
   }, []);
 
   // selected shelf (1–6) drives the stock filter; null = show all shelves.
@@ -845,6 +870,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
             <CustomersCard
               peopleRef={peopleRef}
               crowd={crowd.total}
+              outsideUsers={outsideUsers}
               selectedPerson={selectedPerson}
               onSelect={handleSelectPersonFromList}
               shelfName={shelfName}

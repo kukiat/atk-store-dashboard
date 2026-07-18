@@ -317,6 +317,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
 
   const world = group('world');
 
+  // static structural roots captured here so the stacked Floor-2 view can clone
+  // them one storey up (see buildFloor2). Doors, ceiling sensors, badges and the
+  // runtime shoppers are all deliberately left out — Floor 2 is decor only.
+  const l1Roots = [];
+
   // ---------- floor + glowing grid ----------
   const ROOM = 30;
   const floor = MeshBuilder.CreatePlane('floor', { width: ROOM, height: ROOM }, scene);
@@ -325,6 +330,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   floor.receiveShadows = true;
   floor.isPickable = false;
   floor.parent = world;
+  l1Roots.push(floor);
 
   // grid of faint glowing lines (≈ Three GridHelper)
   (function grid() {
@@ -340,6 +346,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     g.alpha = 0.45;
     g.isPickable = false;
     g.parent = world;
+    l1Roots.push(g);
   })();
 
   // soft glowing border strip on the floor edges
@@ -355,6 +362,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     ring.alpha = 0.4;
     ring.isPickable = false;
     ring.parent = world;
+    l1Roots.push(ring);
   })();
 
   // ---------- back walls ----------
@@ -367,8 +375,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     return w;
   }
   const half = ROOM / 2;
-  wall(ROOM, 0, 0, -half);
-  wall(ROOM, Math.PI / 2, -half, 0);
+  l1Roots.push(wall(ROOM, 0, 0, -half));
+  l1Roots.push(wall(ROOM, Math.PI / 2, -half, 0));
 
   const bandMat = pbr('band', { color: 0x0c1730, emissive: 0x35c3ff, emissiveIntensity: 1.4, roughness: 0.4 });
   function wallBand(len, rotY, x, z) {
@@ -376,9 +384,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     b.position.set(x, WALL_H - 1.4, z);
     b.rotation.y = rotY;
     b.parent = world;
+    return b;
   }
-  wallBand(ROOM - 2, 0, 0, -half + 0.3);
-  wallBand(ROOM - 2, Math.PI / 2, -half + 0.3, 0);
+  l1Roots.push(wallBand(ROOM - 2, 0, 0, -half + 0.3));
+  l1Roots.push(wallBand(ROOM - 2, Math.PI / 2, -half + 0.3, 0));
 
   // ---------- shelving units (built from the mock JSON) ----------
   const zones = []; // { id, type, rotY, data, pos, unit, face, dist, height, focusZoom }
@@ -474,6 +483,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     });
   }
   const zoneById = new Map(zones.map((zn) => [zn.id, zn]));
+  for (const zn of zones) l1Roots.push(zn.unit); // shelves ride up to Floor 2 too
 
   // ---------- floating numbered zone badges ----------
   function makeBadge(num) {
@@ -848,6 +858,148 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     // radius is locked for orbit; relax the lock so the tween can move it
     camera.lowerRadiusLimit = camera.upperRadiusLimit = null;
   }
+
+  // ============================================================
+  //  Stacked Floor-2 view + escalators  (FLOOR PLAN buttons)
+  // ============================================================
+  const FLOOR_RISE = WALL_H; // Floor 2 sits exactly one storey above Floor 1
+  // stairwell opening cut into the Floor-2 deck, over the escalators (hugs the left wall)
+  const WELL = { x0: -15, x1: -10.9, z0: -13.3, z1: -2.7 };
+
+  // ---- lazy clone of the static structure, lifted one storey up ----
+  let floor2 = null;            // TransformNode parenting all the clones
+  const floor2Meshes = [];      // solid clones we cross-fade via .visibility
+  function buildFloor2() {
+    if (floor2) return;
+    floor2 = new TransformNode('floor2', scene);
+    floor2.position.y = FLOOR_RISE;
+    for (const src of l1Roots) {
+      if (src.name === 'floor') continue; // Floor 2 gets a decked floor with a stairwell well instead
+      const c = src.clone(src.name + '_f2', floor2);
+      if (!c) continue;
+      for (const m of [c, ...c.getChildMeshes(false)]) {
+        m.isPickable = false;   // Floor 2 is decor — it never picks or dims as a target
+        m.metadata = null;
+        m.visibility = 0;
+        if (m.getTotalVertices && m.getTotalVertices() > 0) floor2Meshes.push(m);
+      }
+    }
+    buildFloor2Deck();
+    floor2.setEnabled(false);
+  }
+
+  // Floor-2 floor: the room minus a rectangular stairwell (tiled as strips so we
+  // dodge a CSG boolean on a fading clone), ringed on its open sides by an emissive lip.
+  function buildFloor2Deck() {
+    const R = ROOM / 2;
+    const panel = (cx, cz, w, d) => {
+      if (w <= 0.01 || d <= 0.01) return;
+      const p = MeshBuilder.CreatePlane('deckF2', { width: w, height: d }, scene);
+      p.rotation.x = Math.PI / 2;
+      p.position.set(cx, 0, cz);
+      p.material = mat.floor;
+      p.isPickable = false;
+      p.visibility = 0;
+      p.parent = floor2;
+      floor2Meshes.push(p);
+    };
+    panel(0, (WELL.z1 + R) / 2, ROOM, R - WELL.z1);                                   // in front of the well
+    panel(0, (-R + WELL.z0) / 2, ROOM, WELL.z0 + R);                                  // behind the well
+    panel((WELL.x1 + R) / 2, (WELL.z0 + WELL.z1) / 2, R - WELL.x1, WELL.z1 - WELL.z0); // right of the well
+    // emissive lip around the three open sides (the fourth hugs the wall)
+    const cx = (WELL.x0 + WELL.x1) / 2, cz = (WELL.z0 + WELL.z1) / 2;
+    const lip = (w, d, x, z) => {
+      const b = box(w, 0.35, d, bandMat, x, 0.02, z);
+      b.parent = floor2;
+      b.visibility = 0;
+      floor2Meshes.push(b);
+    };
+    lip(WELL.x1 - WELL.x0, 0.12, cx, WELL.z1); // front edge
+    lip(WELL.x1 - WELL.x0, 0.12, cx, WELL.z0); // back edge
+    lip(0.12, WELL.z1 - WELL.z0, WELL.x1, cz); // right edge
+  }
+
+  // ---- fade tween (advanced from the render loop) ----
+  const floor2Anim = { active: false, t: 0, from: 0, to: 0, value: 0 };
+  let floorHome = null;         // camera pose saved on the way up, restored on the way down
+  function setFloor2(show) {
+    if (show) buildFloor2();
+    if (!floor2) return;
+    if (show) floor2.setEnabled(true); // enable up-front so the fade-in is visible
+    floor2Anim.from = floor2Anim.value;
+    floor2Anim.to = show ? 1 : 0;
+    floor2Anim.t = 0;
+    floor2Anim.active = true;
+  }
+
+  // FLOOR PLAN buttons route here. Only Floor 2 (index 1) stacks a storey;
+  // Floor 1 and the not-yet-built Floor 3 both collapse back to a single storey.
+  function setFloor(i) {
+    const show = i === 1;
+    setFloor2(show);
+    if (show) {
+      if (!floorHome) floorHome = { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone(), zoom };
+      // keep the user's orbit, lift the aim to mid-building and zoom to frame both
+      // storeys. 0.95 crops the outermost wall-top corners slightly (~30px at the
+      // default orbit) — chosen deliberately for a tighter, closer look.
+      flyTo({ alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: new Vector3(0, FLOOR_RISE - 1, 0), zoom: 0.95 });
+    } else if (floorHome) {
+      flyTo(floorHome);
+      floorHome = null;
+    }
+  }
+
+  // ---- escalators: an up/down pair in the back-left corner, always visible ----
+  const escParts = []; // { treads, rail, L, speed, dir } — animated in the render loop
+  const escGlass = basic('escGlass', { color: 0x35c3ff, alpha: 0.16 });
+  const escTread = pbr('escTread', { color: 0x2a3a5c, emissive: 0x35c3ff, emissiveIntensity: 0.5, roughness: 0.5, metalness: 0.4 });
+  function escalator(x, z, rotY, dir) {
+    const g = group('escalator');
+    g.position.set(x, 0, z);
+    g.rotation.y = rotY;
+    g.parent = world;
+
+    const rise = FLOOR_RISE, run = 10;
+    const L = Math.hypot(run, rise), ang = Math.atan2(rise, run), w = 1.5;
+
+    // flat landings — bottom on Floor 1, top level with Floor 2
+    box(2, 0.3, w + 0.4, mat.metal, -0.6, 0, 0).parent = g;
+    box(2, 0.3, w + 0.4, mat.metal, run + 0.6, rise - 0.3, 0).parent = g;
+
+    // tilted spine everything rides on (local +x runs up the slope)
+    const inc = group('inc');
+    inc.parent = g;
+    inc.rotation.z = ang;
+    box(L, 0.5, w, mat.shelfDk, L / 2, -0.35, 0).parent = inc; // truss underside
+    for (const s of [-1, 1]) {
+      box(L, 1.1, 0.1, escGlass, L / 2, 0.55, (s * w) / 2).parent = inc;  // balustrade glass
+      box(L, 0.18, 0.34, mat.metal, L / 2, 1.15, (s * w) / 2).parent = inc; // handrail cap
+    }
+
+    // moving step treads
+    const nT = 16, gap = L / nT, treads = [], rail = [];
+    for (let i = 0; i < nT; i++) {
+      const t = box(gap * 0.62, 0.18, w * 0.86, escTread, 0, 0.02, 0);
+      t.parent = inc;
+      t.position.x = i * gap;
+      treads.push(t);
+    }
+    // moving handrail nubs, so the rail visibly travels with the steps
+    for (const s of [-1, 1]) {
+      for (let i = 0; i < nT; i++) {
+        const r = box(0.3, 0.1, 0.14, mat.metal, 0, 1.3, (s * w) / 2);
+        r.parent = inc;
+        r.position.x = i * gap;
+        rail.push(r);
+      }
+    }
+    escParts.push({ treads, rail, L, speed: 2.4, dir });
+  }
+  // back-left corner, two parallel lanes side-by-side in world X, both facing the
+  // same way: Floor-1 landings at the front (z -3), Floor-2 landings at the back —
+  // stand at the front and board up or step off down right next to each other.
+  escalator(-13.8, -3, Math.PI / 2, +1); // up
+  escalator(-12.0, -3, Math.PI / 2, -1); // down
 
   // ---------- focus dimming ----------
   // give each zone its own material instances so we can fade everything *except*
@@ -4062,6 +4214,21 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       zoom += (zoomTarget - zoom) * Math.min(1, dt * 9);
     }
 
+    // Floor-2 cross-fade
+    if (floor2Anim.active) {
+      floor2Anim.t += dt / FLY_DUR;
+      const e = easeInOutCubic(Math.min(1, floor2Anim.t));
+      floor2Anim.value = floor2Anim.from + (floor2Anim.to - floor2Anim.from) * e;
+      for (const m of floor2Meshes) m.visibility = floor2Anim.value;
+      if (floor2Anim.t >= 1) { floor2Anim.active = false; if (floor2Anim.to === 0) floor2.setEnabled(false); }
+    }
+    // escalator steps + handrail scroll along the slope, wrapping at the ends
+    for (const es of escParts) {
+      const d = es.dir * es.speed * dt;
+      for (const t of es.treads) { t.position.x += d; if (t.position.x > es.L) t.position.x -= es.L; else if (t.position.x < 0) t.position.x += es.L; }
+      for (const r of es.rail)   { r.position.x += d; if (r.position.x > es.L) r.position.x -= es.L; else if (r.position.x < 0) r.position.x += es.L; }
+    }
+
     applyOrtho();
     if (forcedDt === undefined) scene.render();
   };
@@ -4092,7 +4259,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   }
 
   const controller = {
-    dispose, selectShelf, scene,
+    dispose, selectShelf, setFloor, scene,
     _step: (dt = 0.05, n = 1) => { for (let i = 0; i < n; i++) frame(dt); }, // debug fast-forward
 
     // crowd stepper in the dashboard; counts() feeds the UI (walking/browsing
