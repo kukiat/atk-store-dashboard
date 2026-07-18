@@ -609,11 +609,15 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
 
   // verify/pay-pass image flash: an API `verify` or `pay` (result pass) that
   // carries an imageURL pops a bubble with the customer's face above their head
-  // in the 3D scene for ~3s, then fades out (`closing` drives the fade-out CSS).
-  // One shared slot (latest pass wins, whichever action) — `label` is the only
-  // difference ("Verified ✓" vs "Paid ✓"). Timers live in a ref so the SSE
-  // listeners, the auto-dismiss, and the broken-image close all share and
-  // cancel the same handles. The scene owns the per-frame follow transform.
+  // in the 3D scene for ~2s, then fades out (`closing` drives the fade-out CSS).
+  // The reveal is deferred to the scene: armVerifyFlash arms it, and the bubble
+  // only shows (and the 2s clock only starts) once the in-scene scan beam sweeps
+  // that customer through — the scene calls back via armFlash's onReveal. If no
+  // sweep ever comes (no body / despawns first) it's dropped, never shown.
+  // One shared slot (latest revealed pass wins) — `label` is the only difference
+  // ("Verified ✓" vs "Paid ✓"). Timers live in a ref so the reveal, the
+  // auto-dismiss, and the broken-image close all share and cancel the same
+  // handles. The scene owns the per-frame follow transform.
   const [verifyFlash, setVerifyFlash] = useState(null); // { imageURL, name, label } | null
   const [verifyFlashClosing, setVerifyFlashClosing] = useState(false);
   const verifyFlashTimers = useRef([]);
@@ -630,13 +634,20 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     clearVerifyFlashTimers();
     setVerifyFlashClosing(false);
     setVerifyFlash({ imageURL, name, label });
-    // hold 3s, then flip to the fade-out; unmount once the 400ms fade finishes
-    verifyFlashTimers.current.push(setTimeout(() => setVerifyFlashClosing(true), 3000));
+    // hold 2s, then flip to the fade-out; unmount once the 400ms fade finishes
+    verifyFlashTimers.current.push(setTimeout(() => setVerifyFlashClosing(true), 2000));
     verifyFlashTimers.current.push(setTimeout(() => {
       setVerifyFlash(null);
       setVerifyFlashClosing(false);
-    }, 3400));
+    }, 2400));
   }, [clearVerifyFlashTimers]);
+  // arm on the SSE pass; the scene reveals it (→ showVerifyFlash) only when the
+  // scan beam clears this customer, and drops it silently otherwise.
+  const armVerifyFlash = useCallback((imageURL, name, label, apiId) => {
+    peopleRef.current?.armFlash?.(apiId, (revealed) => {
+      if (revealed) showVerifyFlash(imageURL, name, label);
+    });
+  }, [showVerifyFlash]);
   useEffect(() => clearVerifyFlashTimers, [clearVerifyFlashTimers]); // drop timers on unmount
   // hand the bubble wrapper to the scene, which writes its follow transform
   const bindVerifyFlash = useCallback((el) => { peopleRef.current?.bindFlash?.(el); }, []);
@@ -681,21 +692,19 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     es.addEventListener('enter', fwd((u) => peopleRef.current?.enterUser?.(u)));
     es.addEventListener('verify', fwd((u) => {
       peopleRef.current?.verifyUser?.(u.id, u.result);
-      // a pass that carried a face photo pops a bubble above that shopper's
-      // head in the 3D scene; the name comes from the roster mirror (fwd
-      // merged this event in just above), the scene anchors it by apiId.
+      // a pass that carried a face photo arms a bubble above that shopper's
+      // head; it only reveals when the entrance scan beam clears them. The name
+      // comes from the roster mirror (fwd merged this event in just above).
       if (u.result === 'pass' && u.imageURL) {
-        showVerifyFlash(u.imageURL, roster.get(u.id)?.name, 'Verified ✓');
-        peopleRef.current?.flashVerifyUser?.(u.id);
+        armVerifyFlash(u.imageURL, roster.get(u.id)?.name, 'Verified ✓', u.id);
       }
     }));
     es.addEventListener('pay', fwd((u) => {
       peopleRef.current?.payUser?.(u.id, u.result);
-      // same head bubble as verify, on a pay pass (label "Paid ✓") — they walk
-      // out fast, so it follows until they fade through the exit door
+      // same head bubble as verify, on a pay pass (label "Paid ✓") — armed now,
+      // revealed when the exit scan beam clears them at the fare-gate.
       if (u.result === 'pass' && u.imageURL) {
-        showVerifyFlash(u.imageURL, roster.get(u.id)?.name, 'Paid ✓');
-        peopleRef.current?.flashVerifyUser?.(u.id);
+        armVerifyFlash(u.imageURL, roster.get(u.id)?.name, 'Paid ✓', u.id);
       }
     }));
     // shelf sub-machine: commanded walk-up, scan verdict, per-item picks, and

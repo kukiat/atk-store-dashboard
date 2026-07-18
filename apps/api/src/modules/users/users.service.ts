@@ -1,9 +1,11 @@
 import { Elysia, status } from "elysia";
+import type { ActionInput, AuthMethod, User, UserEvent } from "../../models";
+import { fetchBootRoster } from "../../utils";
 
 // In-memory stand-in for the future external users API — no DB on purpose.
 // State lives and dies with the process; the boot roster is fetched once at
-// startup from the external animation-api (see fetchBootRoster below), then
-// this store owns every mutation from there on.
+// startup from the external animation-api (see fetchBootRoster in ../../utils/
+// users), then this store owns every mutation from there on.
 // The API owns each customer's lifecycle: the 3D sim never walks a roster
 // customer out on its own, so `status` here is authoritative.
 //   outside --enter--> waiting --verify pass--> inside --leave--> paying
@@ -33,130 +35,11 @@ import { Elysia, status } from "elysia";
 // the same place an `enter` action lands them — not walking straight in.
 // The boot roster is the exception: those users start at the status mapped
 // from the external feed's `visit_status` (inside/outside), the start crowd.
-export type UserStatus =
-  | "outside"
-  | "waiting"
-  | "inside"
-  | "scanning"
-  | "browsing"
-  | "paying";
-export type AuthMethod = "google" | "outlook" | "facebook";
-export type User = {
-  id: number;
-  name: string;
-  gender: "male" | "female";
-  status: UserStatus;
-  // shelf session (scanning/browsing only): which shelf they hold at; null
-  // otherwise. Ends on an explicit shelfClose (or leave) — no auto-close.
-  shelf_id: number | null;
-  // display-only profile fields (see users.model.ts)
-  email: string;
-  avatar_url: string;
-  auth_method: AuthMethod;
-};
-export type UserEvent =
-  | { type: "added" | "updated" | "enter"; user: User }
-  | { type: "removed" | "leave" | "walkAway" | "shelfClose"; user: { id: number } }
-  // verify carries an optional, transient imageURL (the face photo to flash on
-  // a pass) — it rides the event only, never lands on the stored User.
-  | {
-    type: "verify" | "pay";
-    user: { id: number; result: "pass" | "fail"; imageURL?: string };
-  }
-  // scanQR carries the scanned sku too, so the feed reflects what was scanned
-  | { type: "scanQR"; user: { id: number; result: "pass" | "fail"; sku: string } }
-  | { type: "walkToShelf"; user: { id: number; shelfId: number } }
-  | { type: "inspectItem"; user: { id: number; result: "keep" | "return" } };
-
-// body of POST /:id/status — mirror of the "users.action" model union.
-// enter/leave/walkAway/shelfClose carry no data; verify/pay nest a pass/fail
-// result, scanQR a result + sku, walkToShelf a shelfId, inspectItem a
-// keep/return result.
-export type ActionInput =
-  | { action: "enter" }
-  | { action: "leave" }
-  | { action: "walkAway" }
-  | { action: "shelfClose" }
-  | { action: "verify"; payload: { result: "pass" | "fail"; imageURL?: string } }
-  | { action: "pay"; payload: { result: "pass" | "fail"; imageURL?: string } }
-  | { action: "scanQR"; payload: { result: "pass" | "fail"; sku: string } }
-  | { action: "walkToShelf"; payload: { shelfId: number } }
-  | { action: "inspectItem"; payload: { result: "keep" | "return" } };
-
-// ── external boot roster ──────────────────────────────────────────────
-// One row from GET {ATK_STORE_API_URL}/animation-api/users. Only a subset
-// maps onto our User; disabled_*/entered_at/exited_at have no home here.
-type ExternalUser = {
-  id: number;
-  name: string;
-  email: string;
-  avatar_url: string | null;
-  visit_status: string | null;
-};
-
-// external `visit_status` → our UserStatus, or null to drop the row.
-// exited → outside; a value already a UserStatus passes through as-is;
-// null and every unrecognized value are filtered out of the boot roster.
-function mapVisitStatus(v: string | null): UserStatus | null {
-  switch (v) {
-    case "inside":
-    case "outside":
-    case "waiting":
-    case "paying":
-      return v;
-    case "exited":
-      return "outside";
-    default:
-      return null;
-  }
-}
-
-// The external feed carries no gender, but the 3D sim needs one to pick a body
-// model. Best-effort: match the first name token against a small dictionary;
-// when the name gives no signal, fall back to id parity so it's stable per boot.
-const FEMALE_NAMES = new Set([
-  "mali", "pimchanok", "siriporn", "emma", "olivia",
-  "ploy", "fah", "napat", "kanya", "waan",
-]);
-const MALE_NAMES = new Set([
-  "narin", "tanawat", "buncha", "kukiat", "keemmer",
-  "james", "liam", "noah", "somchai", "anan",
-]);
-function guessGender(name: string, id: number): User["gender"] {
-  const first = name.trim().toLowerCase().split(/\s+/)[0] ?? "";
-  if (FEMALE_NAMES.has(first)) return "female";
-  if (MALE_NAMES.has(first)) return "male";
-  return id % 2 === 0 ? "female" : "male";
-}
-
-// Fetch the crowd from external. At module load a failure here rejects the
-// top-level await below, which aborts server startup — external must be up.
-// Also called at runtime by refreshRoster (Backdoor's reload button), where a
-// failure is caught and turned into a 502 instead of killing the process.
-async function fetchBootRoster(): Promise<User[]> {
-  const url = `${process.env.ATK_STORE_API_URL}/animation-api/users`;
-  const res = await fetch(url);
-  if (!res.ok)
-    throw new Error(
-      `users boot roster fetch failed: ${res.status} ${res.statusText}`,
-    );
-  const rows = (await res.json()) as ExternalUser[];
-  return rows.flatMap((u) => {
-    const status = mapVisitStatus(u.visit_status);
-    if (status === null) return []; // drop visit_status null / unrecognized
-    const user: User = {
-      id: u.id,
-      name: u.name,
-      gender: guessGender(u.name, u.id),
-      status,
-      shelf_id: null,
-      email: u.email,
-      avatar_url: u.avatar_url ?? "", // null → "" (UI falls back to initials)
-      auth_method: "google", // external only ever shows Google logins
-    };
-    return [user];
-  });
-}
+//
+// The domain types (User, UserStatus, AuthMethod, UserEvent, ActionInput,
+// ExternalUser) live in ../../models; the boot-roster helpers (mapVisitStatus,
+// guessGender, fetchBootRoster) and name dictionaries live in ../../utils and
+// ../../constants — imported above.
 
 class UsersService {
   private store = new Map<number, User>();
@@ -473,7 +356,7 @@ class UsersService {
 }
 
 // top-level await: block module load (and thus server startup) until the
-// external roster is in hand — see fetchBootRoster's failure note above.
+// external roster is in hand — see fetchBootRoster's failure note in ../../utils/users.
 const bootRoster = await fetchBootRoster();
 
 export const usersService = new Elysia({ name: "users.service" }).decorate(

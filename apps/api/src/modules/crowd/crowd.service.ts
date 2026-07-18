@@ -1,11 +1,7 @@
 import { Elysia } from "elysia";
-
-export const CROWD_MAX = 5; // hard cap on random shoppers (API users are uncapped)
-export const CROWD_START = 1; // opening random crowd (independent of the API roster)
-
-export type CrowdEvent = { type: "crowd"; target: number };
-
-const clamp = (n: number) => Math.max(0, Math.min(CROWD_MAX, Math.round(n)));
+import type { CrowdEvent } from "../../models";
+import { CROWD_MAX, CROWD_START } from "../../constants";
+import { clamp } from "../../utils";
 
 // In-memory ambient-crowd target: how many *random* (non-roster) shoppers the
 // 3D store should keep on the floor. A single scalar, NOT a roster — random

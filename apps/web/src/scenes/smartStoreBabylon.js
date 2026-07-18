@@ -1346,8 +1346,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   let cardEl = null; // React-owned card wrapper — the scene only writes its transform
   // verify-pass image bubble: a second React-owned wrapper the scene floats
   // above one API customer's head for a few seconds after a verify pass.
-  let flashEl = null;     // the wrapper el (null = React removed it)
-  let flashApiId = null;  // which API customer it tracks (null = parked/hidden)
+  let flashEl = null;       // the wrapper el (null = React removed it)
+  let flashApiId = null;    // API customer the revealed bubble tracks (null = none)
+  // armed-but-not-yet-revealed flash: { apiId, onReveal } — held from the SSE
+  // pass until the in-scene scan beam sweeps that customer through (or their
+  // body despawns first). onReveal(true) reveals it, onReveal(false) drops it.
+  let flashPending = null;
 
   // invisible pick proxy — rides along and is disposed with the person's body
   function makePickCap(personId, h) {
@@ -1438,15 +1442,31 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   }
 
   // verify/pay-pass image bubble: React hands over its wrapper el (bindFlash)
-  // and names the API customer to float above (flashVerifyUser — shared by both
-  // the verify and pay passes). The frame loop writes the follow transform,
-  // mirroring the person-card track above.
+  // and arms a pending flash (armFlash) on the SSE pass. The bubble only
+  // reveals once the in-scene scan beam sweeps that customer through — see
+  // notifyScanPass, fired from the entry/exit gate sweep-complete. Shared by
+  // both verify and pay. The frame loop writes the follow transform, mirroring
+  // the person-card track above.
   function bindFlash(el) {
     flashEl = el;
     if (flashEl) flashEl.style.visibility = 'hidden'; // revealed on the first tracked frame
     else flashApiId = null;                            // React unmounted it → stop tracking
   }
-  function flashVerifyUser(id) { flashApiId = id; }
+  // arm on the SSE pass; hold until the scan beam clears this customer. No body
+  // in the scene means no sweep will ever come, so drop it right away.
+  function armFlash(apiId, onReveal) {
+    if (!shopperByApiId(apiId)) { onReveal?.(false); return; }
+    flashPending = { apiId, onReveal };
+  }
+  // the gate sweep just cleared this shopper (green flash / ID or paid tag) — if
+  // a flash was armed for them, reveal it now and start React's 3s clock.
+  function notifyScanPass(p) {
+    const id = p?.person?.apiId;
+    if (id == null || !flashPending || flashPending.apiId !== id) return;
+    flashApiId = id;
+    const cb = flashPending.onReveal; flashPending = null;
+    cb?.(true);
+  }
 
   // selection / hover rings under the feet (RTS style). Shared meshes that
   // chase the current target each frame — parenting them to the person would
@@ -3825,6 +3845,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
           gate.flash = 1.4;
           showPaidTag();
           exitReticle.succeed();
+          notifyScanPass(u); // reveal an armed pay-pass bubble now
         }
       } else {
         gateBeam.isVisible = false;
@@ -3879,6 +3900,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
             entryGate.flash = 1.4;
             showIdTag();
             entryReticle.succeed();
+            notifyScanPass(u); // reveal an armed verify-pass bubble now
           }
         }
       } else {
@@ -4199,6 +4221,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       } else if (cardEl) {
         cardEl.style.visibility = 'hidden';
       }
+      // armed flash whose body vanished before the sweep → drop it (never shown)
+      if (flashPending && !shopperByApiId(flashPending.apiId)) {
+        const cb = flashPending.onReveal; flashPending = null; cb?.(false);
+      }
       // verify/pay-pass image bubble — same head-projection as the card,
       // anchored by apiId (re-looked-up each frame so it hides the moment they
       // despawn). Kept visible through the fade-out too, so a pay pass (they
@@ -4328,8 +4354,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       get: getPersonData,
       list: () => [...persons.keys()].map(getPersonData),
       bindCard,
-      // verify-pass image bubble: hand over the wrapper el + anchor it by apiId
-      bindFlash, flashVerifyUser,
+      // verify/pay-pass image bubble: bind the wrapper el + arm on SSE pass
+      // (revealed later, when the scan beam clears them — see notifyScanPass)
+      bindFlash, armFlash,
     },
 
     // shelf locks: the scene owns the state, React mirrors it. set() is the

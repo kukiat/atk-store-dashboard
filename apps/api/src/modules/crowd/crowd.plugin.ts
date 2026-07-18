@@ -1,6 +1,7 @@
 import { Elysia, sse } from "elysia";
 import { crowdModel } from "./crowd.model";
-import { crowdService, type CrowdEvent } from "./crowd.service";
+import { crowdService } from "./crowd.service";
+import type { CrowdEvent } from "../../models";
 import { ok, envelopeError } from "../../envelope";
 
 export const crowdPlugin = new Elysia({ prefix: "/crowd", tags: ["crowd"] })

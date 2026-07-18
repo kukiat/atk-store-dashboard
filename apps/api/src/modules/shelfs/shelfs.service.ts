@@ -1,32 +1,12 @@
 import { Elysia, status } from "elysia";
 import seed from "./seed.json";
+import type { Shelf } from "../../models";
 
 // In-memory stand-in for the future external shelfs API — no DB on purpose.
 // This module serves the mock store layout read-only; seed.json is the whole
 // truth (a copy of the web app's public/mock/shelves.json). Nothing mutates
 // here, so there is no store Map / SSE / event hub like the users module.
-export type ShelfItem = {
-  id: string;
-  name: string;
-  color: string;
-  capacity: number;
-  qty: number;
-  reorder: number;
-};
-export type Shelf = {
-  id: number;
-  name: string;
-  // unique zone code (BEV/SNK/…) — the users API resolves a scanQR sku to its
-  // shelf 1:1 via findBySku; one sku per shelf
-  sku: string;
-  type: "wall" | "gondola" | "checkout";
-  x: number;
-  z: number;
-  rotation: number;
-  length: number;
-  online: boolean;
-  items: ShelfItem[];
-};
+// The Shelf/ShelfItem domain types live in ../../models.
 
 class ShelfsService {
   private readonly shelves = seed.shelves as Shelf[];

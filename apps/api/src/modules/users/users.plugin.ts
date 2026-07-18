@@ -1,6 +1,7 @@
 import { Elysia, sse, status } from "elysia";
 import { usersModel } from "./users.model";
-import { usersService, type UserEvent } from "./users.service";
+import { usersService } from "./users.service";
+import type { UserEvent } from "../../models";
 import { shelfsService } from "../shelfs";
 import { ok, envelopeError } from "../../envelope";
 
