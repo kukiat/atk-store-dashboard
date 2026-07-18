@@ -16,6 +16,9 @@ export type ShelfItem = {
 export type Shelf = {
   id: number;
   name: string;
+  // unique zone code (BEV/SNK/…) — the users API resolves a scanQR sku to its
+  // shelf 1:1 via findBySku; one sku per shelf
+  sku: string;
   type: "wall" | "gondola" | "checkout";
   x: number;
   z: number;
@@ -35,6 +38,15 @@ class ShelfsService {
   findById(id: number) {
     const shelf = this.shelves.find((s) => s.id === id);
     if (!shelf) throw status(404, "Shelf not found");
+    return shelf;
+  }
+
+  // resolve a scanned sku to its shelf (1:1 — one sku per shelf). The users
+  // route uses this to turn a scanQR sku into a walk target; an unknown sku is
+  // a 404 like findById. Online/checkout gating stays with the caller.
+  findBySku(sku: string) {
+    const shelf = this.shelves.find((s) => s.sku === sku);
+    if (!shelf) throw status(404, `SKU ${sku} not found`);
     return shelf;
   }
 }

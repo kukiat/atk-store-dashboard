@@ -615,10 +615,6 @@ canvas { display: block; }
   max-width: 220px;
 }
 .bd-shelfsel:focus { outline: none; border-color: var(--accent); }
-.bd-countdown {
-  margin-left: auto; color: #b07cdb; font-size: 11px; font-weight: 700;
-  font-variant-numeric: tabular-nums; white-space: nowrap;
-}
 
 /* per-row action buttons */
 .bd-actions { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }

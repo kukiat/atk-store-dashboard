@@ -23,10 +23,10 @@ const UserEntity = t.Object({
   name: t.String(),
   gender: Gender,
   status: Status,
-  // shelf session (scanning/browsing only) — which shelf, and when the API's
-  // own 30s browse timer will auto-close the session (epoch ms); null otherwise
+  // shelf session (scanning/browsing only) — which shelf they hold at; null
+  // otherwise. The session ends on an explicit shelfClose (or leave), so there
+  // is no auto-close deadline to expose.
   shelf_id: t.Nullable(t.Integer()),
-  browse_until: t.Nullable(t.Number()),
   // display-only profile fields — required on the entity, defaulted on create
   email: t.String({ format: "email" }),
   avatar_url: t.String(), // may be "" → UI falls back to initials chip
@@ -54,14 +54,16 @@ export const usersModel = new Elysia({ name: "users.model" }).model({
     auth_method: t.Optional(AuthMethod),
   }),
   // single body for POST /:id/status — a discriminated union on `action`.
-  // enter/leave/walkAway carry no data; verify/pay/scanQR require a pass/fail
-  // result, walkToShelf a shelfId, inspectItem a keep/return result — all
-  // nested under `payload`. A wrong combo (verify without a result, etc.) is
-  // rejected here at validation (422) before the service switch ever runs.
+  // enter/leave/walkAway/shelfClose carry no data; verify/pay require a result,
+  // scanQR a result + sku (the target shelf, resolved 1:1 in the route),
+  // walkToShelf a shelfId, inspectItem a keep/return result — all nested under
+  // `payload`. A wrong combo (verify without a result, etc.) is rejected here
+  // at validation (422) before the service switch ever runs.
   "users.action": t.Union([
     t.Object({ action: t.Literal("enter") }),
     t.Object({ action: t.Literal("leave") }),
     t.Object({ action: t.Literal("walkAway") }),
+    t.Object({ action: t.Literal("shelfClose") }),
     t.Object({
       action: t.Literal("verify"),
       // imageURL is optional and transient — carried through the `verify` SSE
@@ -75,7 +77,10 @@ export const usersModel = new Elysia({ name: "users.model" }).model({
     }),
     t.Object({
       action: t.Literal("scanQR"),
-      payload: t.Object({ result: Result }),
+      // sku resolves the target shelf 1:1 (the route calls shelfsService
+      // .findBySku): from `inside` scanQR walks there first; from `scanning`
+      // the sku's shelf must match where they already stand
+      payload: t.Object({ result: Result, sku: t.String({ minLength: 1 }) }),
     }),
     t.Object({
       action: t.Literal("walkToShelf"),

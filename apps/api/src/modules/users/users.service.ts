@@ -25,6 +25,9 @@ import { Elysia, status } from "elysia";
 // leave step (emitting `leave`) before the verdict (emitting `pay`), so one
 // call takes a shopper from the floor to out (pass) or stuck at the gate
 // (fail). `leave` stays standalone for parking someone at the fare-gate first.
+// `scanQR` does the same on the shelf sub-machine: from `inside` it runs the
+// walkToShelf step (to the shelf its `sku` resolves to, emitting `walkToShelf`)
+// before the scan verdict (emitting `scanQR`). `walkToShelf` stays standalone.
 // POST /users is "roster entry + auto-enter" in one call: a freshly created
 // user starts `waiting` (holding at the entrance scanner for a verify verdict),
 // the same place an `enter` action lands them — not walking straight in.
@@ -43,10 +46,9 @@ export type User = {
   name: string;
   gender: "male" | "female";
   status: UserStatus;
-  // shelf session (scanning/browsing only): which shelf, and when the API's
-  // own 30s browse timer auto-closes the session (epoch ms); null otherwise
+  // shelf session (scanning/browsing only): which shelf they hold at; null
+  // otherwise. Ends on an explicit shelfClose (or leave) — no auto-close.
   shelf_id: number | null;
-  browse_until: number | null;
   // display-only profile fields (see users.model.ts)
   email: string;
   avatar_url: string;
@@ -58,33 +60,28 @@ export type UserEvent =
   // verify carries an optional, transient imageURL (the face photo to flash on
   // a pass) — it rides the event only, never lands on the stored User.
   | {
-      type: "verify";
-      user: { id: number; result: "pass" | "fail"; imageURL?: string };
-    }
-  | {
-      type: "pay" | "scanQR";
-      user: { id: number; result: "pass" | "fail" };
-    }
+    type: "verify" | "pay";
+    user: { id: number; result: "pass" | "fail"; imageURL?: string };
+  }
+  // scanQR carries the scanned sku too, so the feed reflects what was scanned
+  | { type: "scanQR"; user: { id: number; result: "pass" | "fail"; sku: string } }
   | { type: "walkToShelf"; user: { id: number; shelfId: number } }
   | { type: "inspectItem"; user: { id: number; result: "keep" | "return" } };
 
 // body of POST /:id/status — mirror of the "users.action" model union.
-// enter/leave/walkAway carry no data; verify/pay/scanQR nest a pass/fail
-// result, walkToShelf a shelfId, inspectItem a keep/return result.
+// enter/leave/walkAway/shelfClose carry no data; verify/pay nest a pass/fail
+// result, scanQR a result + sku, walkToShelf a shelfId, inspectItem a
+// keep/return result.
 export type ActionInput =
   | { action: "enter" }
   | { action: "leave" }
   | { action: "walkAway" }
+  | { action: "shelfClose" }
   | { action: "verify"; payload: { result: "pass" | "fail"; imageURL?: string } }
   | { action: "pay"; payload: { result: "pass" | "fail" } }
-  | { action: "scanQR"; payload: { result: "pass" | "fail" } }
+  | { action: "scanQR"; payload: { result: "pass" | "fail"; sku: string } }
   | { action: "walkToShelf"; payload: { shelfId: number } }
   | { action: "inspectItem"; payload: { result: "keep" | "return" } };
-
-// browse sessions are time-boxed by the API (not the 3D scene): the door
-// opens on scanQR pass and the server closes it this long after, whatever
-// the shopper is doing (an item still in hand counts as taken)
-export const BROWSE_MS = 30_000;
 
 // ── external boot roster ──────────────────────────────────────────────
 // One row from GET {ATK_STORE_API_URL}/animation-api/users. Only a subset
@@ -153,7 +150,6 @@ async function fetchBootRoster(): Promise<User[]> {
       gender: guessGender(u.name, u.id),
       status,
       shelf_id: null,
-      browse_until: null,
       email: u.email,
       avatar_url: u.avatar_url ?? "", // null → "" (UI falls back to initials)
       auth_method: "google", // external only ever shows Google logins
@@ -166,22 +162,13 @@ class UsersService {
   private store = new Map<number, User>();
   private nextId = 1;
   private listeners = new Set<(e: UserEvent) => void>();
-  // one live browse timer per user id — armed on scanQR pass, disarmed by
-  // whatever ends the session first (timer itself, leave, delete)
-  private browseTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
   constructor(roster: User[]) {
     this.resetRoster(roster);
   }
 
   // Swap the whole store for a fresh roster — boot and refreshRoster share this.
-  // Disarming the browse timers is hygiene rather than a guard: shelfClose
-  // no-ops once its user is gone or has moved off browsing, and scanQR clears
-  // any stale handle before arming a new one. But a wiped roster shouldn't
-  // leave timers pending for departed users, and it keeps the postcondition
-  // simple — after this returns, no browse session is live.
   private resetRoster(roster: User[]) {
-    for (const id of [...this.browseTimers.keys()]) this.clearBrowseTimer(id);
     this.store = new Map(roster.map((u) => [u.id, u]));
     this.nextId = Math.max(0, ...this.store.keys()) + 1;
   }
@@ -244,7 +231,6 @@ class UsersService {
       gender: input.gender,
       status: "waiting",
       shelf_id: null,
-      browse_until: null,
       // defaults filled here (after id) so a bare {name,gender} POST works
       email: input.email ?? `user${id}@demo.local`,
       avatar_url: input.avatar_url ?? "",
@@ -269,24 +255,13 @@ class UsersService {
 
   remove(id: number) {
     if (!this.store.delete(id)) throw status(404, "User not found");
-    this.clearBrowseTimer(id); // a deleted browser must not shelfClose later
     this.emit({ type: "removed", user: { id } });
     return { id };
   }
 
-  private clearBrowseTimer(id: number) {
-    const t = this.browseTimers.get(id);
-    if (t !== undefined) {
-      clearTimeout(t);
-      this.browseTimers.delete(id);
-    }
-  }
-
   // wipe a shelf session off the entity (does NOT emit — callers own that)
   private endShelfSession(user: User) {
-    this.clearBrowseTimer(user.id);
     user.shelf_id = null;
-    user.browse_until = null;
   }
 
   // The four status transitions all enter through one door now: POST
@@ -294,7 +269,10 @@ class UsersService {
   // matching step below. The steps stay private (guard + emit each own their
   // slice) so the switch is the only public entry and the SSE contract — one
   // distinct event per transition — is untouched.
-  applyAction(id: number, input: ActionInput): User {
+  // scanQR needs the shelf its sku resolves to; the route owns the shelfs
+  // service, so it does the findBySku (+ online/checkout gating) and hands the
+  // resolved shelf id in here. Every other action ignores it.
+  applyAction(id: number, input: ActionInput, skuShelfId?: number): User {
     switch (input.action) {
       case "enter":
         return this.enter(id);
@@ -307,11 +285,13 @@ class UsersService {
       case "walkToShelf":
         return this.walkToShelf(id, input.payload.shelfId);
       case "scanQR":
-        return this.scanQR(id, input.payload.result);
+        return this.scanQR(id, input.payload.result, input.payload.sku, skuShelfId!);
       case "inspectItem":
         return this.inspectItem(id, input.payload.result);
       case "walkAway":
         return this.walkAway(id);
+      case "shelfClose":
+        return this.shelfClose(id);
       default: {
         // the model union already rejects unknown actions at validation;
         // this is a defensive backstop that also gives TS exhaustiveness
@@ -392,22 +372,37 @@ class UsersService {
     return user;
   }
 
-  // verdict for someone holding at the shelf reader: pass opens the glass and
-  // arms the 30s browse timer, fail keeps them at the reader to rescan
-  private scanQR(id: number, result: "pass" | "fail") {
+  // verdict for someone at the shelf reader: pass opens the glass and arms the
+  // 30s browse timer, fail keeps them at the reader to rescan. Accepts `inside`
+  // too — there it first runs the walkToShelf step to the sku's shelf (emits
+  // `walkToShelf`), then the verdict, so one call takes a shopper from the
+  // floor to browsing (pass) or holding at the reader (fail; net inside →
+  // scanning, not a round trip). `targetShelfId` is the sku's shelf, resolved
+  // by the route. From `scanning` the sku must name the shelf they already
+  // stand at — a mismatch is rejected rather than silently walking them off.
+  // `walkToShelf` stays standalone for parking someone at a reader first.
+  private scanQR(
+    id: number,
+    result: "pass" | "fail",
+    sku: string,
+    targetShelfId: number,
+  ) {
     const user = this.mustFind(id);
-    if (user.status !== "scanning")
-      throw status(409, `User is ${user.status}, scanQR needs "scanning"`);
-    if (result === "pass") {
-      user.status = "browsing";
-      user.browse_until = Date.now() + BROWSE_MS;
-      this.clearBrowseTimer(id); // paranoia — no session should be live here
-      this.browseTimers.set(
-        id,
-        setTimeout(() => this.shelfClose(id), BROWSE_MS),
+    if (user.status !== "scanning" && user.status !== "inside")
+      throw status(
+        409,
+        `User is ${user.status}, scanQR needs "inside" or "scanning"`,
+      );
+    if (user.status === "inside") {
+      this.walkToShelf(id, targetShelfId); // → scanning, emits `walkToShelf`
+    } else if (user.shelf_id !== targetShelfId) {
+      throw status(
+        409,
+        `User is at shelf ${user.shelf_id}, but sku ${sku} belongs to shelf ${targetShelfId}`,
       );
     }
-    this.emit({ type: "scanQR", user: { id, result } });
+    if (result === "pass") user.status = "browsing"; // held open until shelfClose/leave
+    this.emit({ type: "scanQR", user: { id, result, sku } });
     return user;
   }
 
@@ -422,7 +417,7 @@ class UsersService {
   }
 
   // give up waiting for a verdict and rejoin the loop. Only valid while
-  // scanning — an open session (browsing) ends via the timer or leave.
+  // scanning — an open session (browsing) ends via shelfClose or leave.
   private walkAway(id: number) {
     const user = this.mustFind(id);
     if (user.status !== "scanning")
@@ -433,17 +428,18 @@ class UsersService {
     return user;
   }
 
-  // the browse timer fired: the API (not the scene) closes the door — the
-  // shopper drops back to inside and the scene mirrors it via SSE. No HTTP
-  // action maps here; leave/delete disarm the timer before it can fire.
+  // done browsing: close the door and drop back to inside (the scene mirrors it
+  // via SSE). The browse session has no auto-close timer — it holds open until
+  // this action (or leave) fires. Only valid while browsing; scanning bails via
+  // walkAway instead.
   private shelfClose(id: number) {
-    this.browseTimers.delete(id);
-    const user = this.store.get(id);
-    if (!user || user.status !== "browsing") return; // session already ended
-    user.shelf_id = null;
-    user.browse_until = null;
+    const user = this.mustFind(id);
+    if (user.status !== "browsing")
+      throw status(409, `User is ${user.status}, shelfClose needs "browsing"`);
+    this.endShelfSession(user);
     user.status = "inside";
     this.emit({ type: "shelfClose", user: { id } });
+    return user;
   }
 
   // face-scan at the exit fare-gate for someone holding there (paying):
