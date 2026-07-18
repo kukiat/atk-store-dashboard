@@ -18,6 +18,8 @@ const ShelfItem = t.Object({
 const ShelfEntity = t.Object({
   id: t.Number(),
   name: t.String(),
+  // unique zone code (BEV/SNK/…) — users API resolves a scanQR sku to its shelf
+  sku: t.String(),
   type: t.Union([t.Literal("wall"), t.Literal("gondola"), t.Literal("checkout")]),
   x: t.Number(),
   z: t.Number(),

@@ -121,27 +121,39 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
   //   enter       — outside  → waiting   (queue at the entrance for a verdict)
   //   verify      — waiting  → inside/outside  (payload.result pass/fail)
   //   walkToShelf — inside   → scanning  (hold at the shelf reader for a verdict)
-  //   scanQR      — scanning → browsing (pass, arms the 30s timer) / stays (fail)
+  //   scanQR      — inside/scanning → browsing (pass) / scanning (fail); from
+  //                 inside it walks to the sku's shelf first
   //   inspectItem — browsing → browsing  (one pick: keep or return)
   //   walkAway    — scanning → inside    (give up waiting, rejoin the loop)
+  //   shelfClose  — browsing → inside    (done browsing, close the door)
   //   leave       — inside/scanning/browsing → paying (drops any shelf session)
   //   pay         — paying   → outside   (payload.result pass leaves, fail retries)
   // Always responds with the full user entity. A wrong-state move 409s; a bad
-  // action/payload combo 422s at validation before the switch runs.
-  // shelfClose has no HTTP action — the service's own browse timer fires it.
+  // action/payload combo 422s at validation before the switch runs. The browse
+  // session has no auto-close timer — it holds open until shelfClose (or leave).
   .post(
     "/:id/status",
     ({ usersService, shelfsService, params, body }) => {
-      // the shelf must exist (404) and be powered (409) before the user-status
-      // side runs — the shelfs service owns the layout, users only the people
-      if (body.action === "walkToShelf") {
-        const shelf = shelfsService.findById(body.payload.shelfId);
+      // a shelf command must target a shelf with doors: exists (404), powered
+      // (409), and not a checkout counter (409) — the shelfs service owns the
+      // layout, users only the people. walkToShelf names the shelf by id;
+      // scanQR names it by sku (resolved 1:1), and the resolved id is handed to
+      // the service so it knows where to walk the shopper.
+      const assertHasDoors = (shelf: { id: number; online: boolean; type: string }) => {
         if (!shelf.online)
           throw status(409, `Shelf ${shelf.id} is offline, doors never unlock`);
         if (shelf.type === "checkout")
           throw status(409, `Shelf ${shelf.id} is a checkout counter — no doors`);
+      };
+      let skuShelfId: number | undefined;
+      if (body.action === "walkToShelf") {
+        assertHasDoors(shelfsService.findById(body.payload.shelfId));
+      } else if (body.action === "scanQR") {
+        const shelf = shelfsService.findBySku(body.payload.sku); // 404 if unknown
+        assertHasDoors(shelf);
+        skuShelfId = shelf.id;
       }
-      return ok(usersService.applyAction(params.id, body));
+      return ok(usersService.applyAction(params.id, body, skuShelfId));
     },
     {
       params: "users.params",

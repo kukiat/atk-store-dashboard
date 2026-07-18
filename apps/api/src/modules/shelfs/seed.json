@@ -1,9 +1,10 @@
 {
-  "_readme": "Mock store layout for the in-memory shelfs store — a copy of apps/web/public/mock/shelves.json. This module mocks a future external shelfs API, so it serves this static layout read-only; edit this file to change the shelf list the API returns. Each shelf: id (unique int, shown as the zone badge), type (wall | gondola | checkout), x/z world position, rotation in degrees, length in meters, online (false = amber LED, doors never unlock, stock frozen), items (qty/reorder are the live-stock starting values).",
+  "_readme": "Mock store layout for the in-memory shelfs store — a copy of apps/web/public/mock/shelves.json. This module mocks a future external shelfs API, so it serves this static layout read-only; edit this file to change the shelf list the API returns. Each shelf: id (unique int, shown as the zone badge), sku (unique zone code, e.g. BEV/SNK — the users API resolves a scanQR sku to its shelf 1:1), type (wall | gondola | checkout), x/z world position, rotation in degrees, length in meters, online (false = amber LED, doors never unlock, stock frozen), items (qty/reorder are the live-stock starting values).",
   "shelves": [
     {
       "id": 1,
       "name": "Beverage Zone",
+      "sku": "BEV",
       "type": "wall",
       "x": -3,
       "z": -13.4,
@@ -19,6 +20,7 @@
     {
       "id": 2,
       "name": "Center Shelf A",
+      "sku": "CTA",
       "type": "gondola",
       "x": 1.5,
       "z": 0,
@@ -33,6 +35,7 @@
     {
       "id": 3,
       "name": "Snacks Zone",
+      "sku": "SNK",
       "type": "gondola",
       "x": 13,
       "z": -5,
@@ -47,6 +50,7 @@
     {
       "id": 4,
       "name": "Dairy & Juice",
+      "sku": "DRY",
       "type": "gondola",
       "x": -8.5,
       "z": 4,
@@ -62,6 +66,7 @@
     {
       "id": 5,
       "name": "Fresh & Ready",
+      "sku": "FSH",
       "type": "gondola",
       "x": -6,
       "z": 10,
@@ -76,6 +81,7 @@
     {
       "id": 6,
       "name": "Checkout Shelf",
+      "sku": "CHK",
       "type": "checkout",
       "x": 7,
       "z": 9,
