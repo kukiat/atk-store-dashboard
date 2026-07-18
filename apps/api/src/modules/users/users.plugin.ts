@@ -128,7 +128,8 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
   //   walkAway    — scanning → inside    (give up waiting, rejoin the loop)
   //   shelfClose  — browsing → inside    (done browsing, close the door)
   //   leave       — inside/scanning/browsing → paying (drops any shelf session)
-  //   pay         — paying   → outside   (payload.result pass leaves, fail retries)
+  //   pay         — paying   → outside   (payload.result pass leaves, fail retries;
+  //                 optional payload.imageURL rides the SSE event, like verify)
   // Always responds with the full user entity. A wrong-state move 409s; a bad
   // action/payload combo 422s at validation before the switch runs. The browse
   // session has no auto-close timer — it holds open until shelfClose (or leave).

@@ -73,7 +73,9 @@ export const usersModel = new Elysia({ name: "users.model" }).model({
     }),
     t.Object({
       action: t.Literal("pay"),
-      payload: t.Object({ result: Result }),
+      // optional/transient imageURL, same as verify — carried through the `pay`
+      // SSE event so the dashboard can flash the face photo above their head.
+      payload: t.Object({ result: Result, imageURL: t.Optional(t.String()) }),
     }),
     t.Object({
       action: t.Literal("scanQR"),

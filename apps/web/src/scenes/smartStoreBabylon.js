@@ -1437,9 +1437,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     if (cardEl) cardEl.style.visibility = 'hidden'; // revealed on the first tracked frame
   }
 
-  // verify-pass image bubble: React hands over its wrapper el (bindFlash) and
-  // names the API customer to float above (flashVerifyUser). The frame loop
-  // writes the follow transform, mirroring the person-card track above.
+  // verify/pay-pass image bubble: React hands over its wrapper el (bindFlash)
+  // and names the API customer to float above (flashVerifyUser — shared by both
+  // the verify and pay passes). The frame loop writes the follow transform,
+  // mirroring the person-card track above.
   function bindFlash(el) {
     flashEl = el;
     if (flashEl) flashEl.style.visibility = 'hidden'; // revealed on the first tracked frame
@@ -4198,10 +4199,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       } else if (cardEl) {
         cardEl.style.visibility = 'hidden';
       }
-      // verify-pass image bubble — same head-projection as the card, anchored
-      // by apiId (re-looked-up each frame so it hides the moment they despawn)
+      // verify/pay-pass image bubble — same head-projection as the card,
+      // anchored by apiId (re-looked-up each frame so it hides the moment they
+      // despawn). Kept visible through the fade-out too, so a pay pass (they
+      // walk out fast) still gets its moment before the body is fully gone.
       const flashP = flashApiId != null ? shopperByApiId(flashApiId) : null;
-      if (flashEl && flashP && flashP.h && flashP.fadeStart == null && !flashP.done) {
+      if (flashEl && flashP && flashP.h && !flashP.done) {
         _cardAnchor.set(flashP.h.position.x, flashP.h.position.y + 2.7, flashP.h.position.z);
         Vector3.ProjectToRef(
           _cardAnchor, Matrix.IdentityReadOnly, scene.getTransformMatrix(),

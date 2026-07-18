@@ -78,7 +78,7 @@ export type ActionInput =
   | { action: "walkAway" }
   | { action: "shelfClose" }
   | { action: "verify"; payload: { result: "pass" | "fail"; imageURL?: string } }
-  | { action: "pay"; payload: { result: "pass" | "fail" } }
+  | { action: "pay"; payload: { result: "pass" | "fail"; imageURL?: string } }
   | { action: "scanQR"; payload: { result: "pass" | "fail"; sku: string } }
   | { action: "walkToShelf"; payload: { shelfId: number } }
   | { action: "inspectItem"; payload: { result: "keep" | "return" } };
@@ -281,7 +281,7 @@ class UsersService {
       case "leave":
         return this.leave(id);
       case "pay":
-        return this.pay(id, input.payload.result);
+        return this.pay(id, input.payload.result, input.payload.imageURL);
       case "walkToShelf":
         return this.walkToShelf(id, input.payload.shelfId);
       case "scanQR":
@@ -451,7 +451,7 @@ class UsersService {
   // surface collapses — the exit-side mirror of verify rolling in enter.
   // Unlike verify's fail (a no-op round trip), a `fail` here still moved the
   // shopper to the gate: net inside → paying, holding to retry.
-  private pay(id: number, result: "pass" | "fail") {
+  private pay(id: number, result: "pass" | "fail", imageURL?: string) {
     const user = this.mustFind(id);
     if (
       user.status !== "paying" &&
@@ -465,7 +465,9 @@ class UsersService {
       );
     if (user.status !== "paying") this.leave(id); // → paying, emits `leave`
     if (result === "pass") user.status = "outside";
-    this.emit({ type: "pay", user: { id, result } });
+    // imageURL rides the event untouched (undefined drops out of the JSON) —
+    // the dashboard flashes it only on a pass; the store never keeps it.
+    this.emit({ type: "pay", user: { id, result, imageURL } });
     return user;
   }
 }

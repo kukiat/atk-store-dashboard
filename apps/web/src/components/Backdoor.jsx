@@ -447,7 +447,7 @@ export default function Backdoor() {
                     <button
                       className="bd-act ok"
                       disabled={!can.pay(u.status)}
-                      onClick={() => act(u, 'pay', `${u.name} paid`, { result: 'pass' })}
+                      onClick={() => act(u, 'pay', `${u.name} paid`, { result: 'pass', imageURL: u.avatar_url || VERIFY_PLACEHOLDER_IMG })}
                     >
                       Pay ✓
                     </button>

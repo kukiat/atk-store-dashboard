@@ -607,13 +607,14 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   // one debounced re-fetch instead of this code guessing the lifecycle.
   const [outsideUsers, setOutsideUsers] = useState([]);
 
-  // verify-pass image flash: an API `verify` (result pass) that carries an
-  // imageURL pops a bubble with the customer's face above their head in the 3D
-  // scene for ~3s, then fades out (`closing` drives the fade-out CSS). A newer
-  // pass replaces the current one and restarts the clock. Timers live in a ref
-  // so the SSE listener, the auto-dismiss, and the broken-image close all share
-  // and cancel the same handles. The scene owns the per-frame follow transform.
-  const [verifyFlash, setVerifyFlash] = useState(null); // { imageURL, name } | null
+  // verify/pay-pass image flash: an API `verify` or `pay` (result pass) that
+  // carries an imageURL pops a bubble with the customer's face above their head
+  // in the 3D scene for ~3s, then fades out (`closing` drives the fade-out CSS).
+  // One shared slot (latest pass wins, whichever action) — `label` is the only
+  // difference ("Verified ✓" vs "Paid ✓"). Timers live in a ref so the SSE
+  // listeners, the auto-dismiss, and the broken-image close all share and
+  // cancel the same handles. The scene owns the per-frame follow transform.
+  const [verifyFlash, setVerifyFlash] = useState(null); // { imageURL, name, label } | null
   const [verifyFlashClosing, setVerifyFlashClosing] = useState(false);
   const verifyFlashTimers = useRef([]);
   const clearVerifyFlashTimers = useCallback(() => {
@@ -625,10 +626,10 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     setVerifyFlash(null);
     setVerifyFlashClosing(false);
   }, [clearVerifyFlashTimers]);
-  const showVerifyFlash = useCallback((imageURL, name) => {
+  const showVerifyFlash = useCallback((imageURL, name, label) => {
     clearVerifyFlashTimers();
     setVerifyFlashClosing(false);
-    setVerifyFlash({ imageURL, name });
+    setVerifyFlash({ imageURL, name, label });
     // hold 3s, then flip to the fade-out; unmount once the 400ms fade finishes
     verifyFlashTimers.current.push(setTimeout(() => setVerifyFlashClosing(true), 3000));
     verifyFlashTimers.current.push(setTimeout(() => {
@@ -684,11 +685,19 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
       // head in the 3D scene; the name comes from the roster mirror (fwd
       // merged this event in just above), the scene anchors it by apiId.
       if (u.result === 'pass' && u.imageURL) {
-        showVerifyFlash(u.imageURL, roster.get(u.id)?.name);
+        showVerifyFlash(u.imageURL, roster.get(u.id)?.name, 'Verified ✓');
         peopleRef.current?.flashVerifyUser?.(u.id);
       }
     }));
-    es.addEventListener('pay', fwd((u) => peopleRef.current?.payUser?.(u.id, u.result)));
+    es.addEventListener('pay', fwd((u) => {
+      peopleRef.current?.payUser?.(u.id, u.result);
+      // same head bubble as verify, on a pay pass (label "Paid ✓") — they walk
+      // out fast, so it follows until they fade through the exit door
+      if (u.result === 'pass' && u.imageURL) {
+        showVerifyFlash(u.imageURL, roster.get(u.id)?.name, 'Paid ✓');
+        peopleRef.current?.flashVerifyUser?.(u.id);
+      }
+    }));
     // shelf sub-machine: commanded walk-up, scan verdict, per-item picks, and
     // the API-side session end (walkAway command / 30s shelfClose timer)
     es.addEventListener('walkToShelf', fwd((u) => peopleRef.current?.walkToShelfUser?.(u.id, u.shelfId)));
@@ -978,7 +987,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
                 />
                 <div className="verify-flash-cap">
                   {verifyFlash.name && <b>{verifyFlash.name}</b>}
-                  <span className="verify-flash-ok">Verified ✓</span>
+                  <span className="verify-flash-ok">{verifyFlash.label}</span>
                 </div>
               </div>
             </div>
