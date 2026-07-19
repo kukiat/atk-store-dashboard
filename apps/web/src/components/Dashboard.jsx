@@ -459,6 +459,11 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   const [tab, setTab] = useState(0);
   const [floor, setFloor] = useState(0);
   const [view3d, setView3d] = useState(true);
+  // sidebar collapse — independent, visual-only (CSS hide, no unmount) so
+  // polling underneath keeps running and a re-open shows live data. Not
+  // persisted: every load starts with both panels open.
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const [rightCollapsed, setRightCollapsed] = useState(false);
 
   // ---- mock data (shelf catalogue + customer roster): fetched, validated,
   // then everything derives ----
@@ -912,7 +917,25 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
         </div>
       </header>
 
-      <div className="dash-body">
+      <div className={`dash-body${leftCollapsed ? ' left-collapsed' : ''}${rightCollapsed ? ' right-collapsed' : ''}`}>
+        {!booting && (
+          <>
+            <button
+              className="sb-toggle sb-toggle-left"
+              onClick={() => setLeftCollapsed((v) => !v)}
+              title={leftCollapsed ? 'Show panel' : 'Hide panel'}
+            >
+              {leftCollapsed ? '›' : '‹'}
+            </button>
+            <button
+              className="sb-toggle sb-toggle-right"
+              onClick={() => setRightCollapsed((v) => !v)}
+              title={rightCollapsed ? 'Show panel' : 'Hide panel'}
+            >
+              {rightCollapsed ? '‹' : '›'}
+            </button>
+          </>
+        )}
         {/* ===== left column ===== */}
         <aside className="col col-left">
           <section className="card">

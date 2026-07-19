@@ -59,12 +59,12 @@ const SHELF_TYPE = {
   wall: {
     badgeH: 8, dist: 15, height: 4, focusZoom: 2.0,
     lock: { zFront: 0.76, faces: [1], hBase: 0.25, hTop: 5.85 },
-    seamSpan: 3.2, stand: 1.05, reach: 0.95, halfDepth: 0.83,
+    seamSpan: 3.2, stand: 1.30, reach: 1.20, halfDepth: 0.83,
   },
   gondola: {
     badgeH: 5.5, dist: 14, height: 4, focusZoom: 2.2,
     lock: { zFront: 0.86, faces: [1, -1], hBase: 0.12, hTop: 3.95 },
-    seamSpan: 4, stand: 1.25, reach: 0.8, halfDepth: 0.93,
+    seamSpan: 4, stand: 1.50, reach: 1.05, halfDepth: 0.93,
   },
   checkout: {
     badgeH: 3.2, dist: 13, height: 4, focusZoom: 2.3,
@@ -869,6 +869,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // ---- lazy clone of the static structure, lifted one storey up ----
   let floor2 = null;            // TransformNode parenting all the clones
   const floor2Meshes = [];      // solid clones we cross-fade via .visibility
+  const floor2Lines = [];       // { m, base } — LinesMesh ignores .visibility, fade its .alpha instead
   function buildFloor2() {
     if (floor2) return;
     floor2 = new TransformNode('floor2', scene);
@@ -881,6 +882,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
         m.isPickable = false;   // Floor 2 is decor — it never picks or dims as a target
         m.metadata = null;
         m.visibility = 0;
+        if (m.getClassName?.() === 'LinesMesh') { floor2Lines.push({ m, base: m.alpha }); m.alpha = 0; }
         if (m.getTotalVertices && m.getTotalVertices() > 0) floor2Meshes.push(m);
       }
     }
@@ -900,6 +902,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       p.material = mat.floor;
       p.isPickable = false;
       p.visibility = 0;
+      // mid-fade the deck joins the alpha-blend queue (visibility<1); draw it
+      // before the always-alpha grid/edge lines so it can't paint over them
+      p.alphaIndex = 0;
       p.parent = floor2;
       floor2Meshes.push(p);
     };
@@ -920,7 +925,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   }
 
   // ---- fade tween (advanced from the render loop) ----
-  const floor2Anim = { active: false, t: 0, from: 0, to: 0, value: 0 };
+  // Fade-in outruns the 0.9s camera fly so Floor 2 is fully solid before the
+  // camera settles — a fade as slow as the fly reads as "still loading".
+  // Fade-out keeps the fly's pace; there's no "loading" to misread on the way down.
+  const FLOOR2_FADE_IN = 0.35;
+  const floor2Anim = { active: false, t: 0, from: 0, to: 0, value: 0, dur: FLY_DUR };
   let floorHome = null;         // camera pose saved on the way up, restored on the way down
   function setFloor2(show) {
     if (show) buildFloor2();
@@ -928,6 +937,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     if (show) floor2.setEnabled(true); // enable up-front so the fade-in is visible
     floor2Anim.from = floor2Anim.value;
     floor2Anim.to = show ? 1 : 0;
+    floor2Anim.dur = show ? FLOOR2_FADE_IN : FLY_DUR;
     floor2Anim.t = 0;
     floor2Anim.active = true;
   }
@@ -1679,8 +1689,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   paidTag.parent = world;
   let paidTagT = Infinity;
   function showPaidTag() {
-    // shoppers carry no real basket (picked items fly back to the shelf), so
-    // the charged amount is decorative
+    // shoppers carry no real basket (picked items vanish into an imaginary
+    // bag at the shelf), so the charged amount is decorative
     const amt = 60 + Math.floor(Math.random() * 560);
     drawVerdictTag(paidTex.getContext(), `฿${amt} ✓`, '#4caf72');
     paidTex.update();
@@ -2202,15 +2212,33 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const ident = identOverride ?? nextIdentity();
     const persona = rollPersona();
     const h = makeHuman(nextCharFile(ident.female));
-    // browse kit, disabled until a shelf visit: product box that rides the
-    // hand, phone + beam for the QR scan, green access ring for the feet
+    // browse kit, disabled until a shelf visit: a hand-sized item (one of
+    // four small-goods shapes — can / bottle / snack bag / packet — re-rolled
+    // per gesture by armItem), phone + beam for the QR scan, green access
+    // ring for the feet
     const itemMat = pbr('pickItemM', { color: productColors[0], roughness: 0.7 });
-    const item = MeshBuilder.CreateBox('pickItem', { width: 0.4, height: 0.45, depth: 0.36 }, scene);
-    item.material = itemMat;
-    item.isPickable = false;
-    item.setEnabled(false);
-    shadowGen.addShadowCaster(item);
+    const item = new TransformNode('pickItem', scene);
     item.parent = world;
+    const shape = (mesh) => {
+      mesh.material = itemMat;
+      mesh.isPickable = false;
+      shadowGen.addShadowCaster(mesh);
+      mesh.parent = item;
+      return mesh;
+    };
+    const itemShapes = [
+      shape(MeshBuilder.CreateCylinder('itCan', { diameter: 0.09, height: 0.13, tessellation: 12 }, scene)),
+      shape(MeshBuilder.CreateCylinder('itBottle', { diameter: 0.075, height: 0.19, tessellation: 12 }, scene)),
+      shape(MeshBuilder.CreateBox('itBag', { width: 0.16, height: 0.2, depth: 0.055 }, scene)),
+      shape(MeshBuilder.CreateBox('itPacket', { width: 0.13, height: 0.09, depth: 0.035 }, scene)),
+    ];
+    // bottle neck rides the bottle body so a shape swap stays one setEnabled
+    const neck = MeshBuilder.CreateCylinder('itNeck', { diameter: 0.035, height: 0.05, tessellation: 8 }, scene);
+    neck.material = itemMat;
+    neck.isPickable = false;
+    neck.position.y = 0.12;
+    neck.parent = itemShapes[1];
+    item.setEnabled(false);
     const phone = MeshBuilder.CreateBox('phone', { width: 0.1, height: 0.18, depth: 0.026 }, scene);
     phone.material = phoneBodyMat;
     const scr = MeshBuilder.CreateBox('phoneScr', { width: 0.084, height: 0.15, depth: 0.006 }, scene);
@@ -2274,13 +2302,14 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       // the junction dice lands until the shopper merges back onto the loop)
       slot: -1, mv: null,
       cooldown: elapsed + 3 + Math.random() * 9, // no diving at a shelf right away
-      item, itemMat, phone, beam, ring, ringMat, ringT: Infinity,
+      item, itemShapes, itemMat, phone, beam, ring, ringMat, ringT: Infinity,
       vtag, vtagMat, vtagT: Infinity,
       shelfScan: null, access: null, accessSeam: null, idling: false, started: false,
-      picksLeft: 0, pickT: 0, pickLat: 0, reach: 1,
+      picksLeft: 0, pickT: 0, nextPick: 0, pickLat: 0, reach: 1,
       // commanded shelf session (API shelf sub-machine): shelfHold suppresses
       // the self-scan/auto-pick loop; the verdict and picks arrive as events
       shelfHold: false, scanVerdict: null, inspect: null, inspectQueue: [],
+      pendingWalk: null, // a walkToShelf that arrived mid walk-out — replayed on merge
       f: new Vector3(0, 0, 1), s: new Vector3(1, 0, 0),
     };
     if (mode === 'enter') p.enterSeq = ++enterSeq;
@@ -2433,6 +2462,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     p.slot = -1; p.mv = null; p.idling = false; p.shelfScan = null;
     p.picksLeft = 0; p.ringT = Infinity;
     p.shelfHold = false; p.scanVerdict = null; p.inspect = null; p.inspectQueue = [];
+    p.pendingWalk = null; // any queued re-target dies with the shelf session
     p.item.setEnabled(false); p.item.scaling.setAll(1); p.phone.setEnabled(false);
     p.beam.setEnabled(false); p.ring.setEnabled(false);
     let best = Infinity, bt = 0;
@@ -2546,8 +2576,17 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // walk to a free reader slot on the shelf and hold there (no self-scan)
   function apiWalkToShelfUser(id, shelfId) {
     const p = shopperByApiId(id);
-    if (!p || p.fadeStart != null || p.done || p.slot >= 0) return;
-    if (p.mode !== 'loop') return; // still entering/exiting — not walkable
+    if (!p || p.fadeStart != null || p.done) return;
+    if (p.mode === 'fromshelf') {
+      // still walking out from a just-closed visit — shelfClose is instant on
+      // the API side but the walk-out is a real animation here. Same shelf:
+      // the slot is still reserved to them, so just turn back in. Different
+      // shelf: queue it for the moment they actually merge onto the loop.
+      if (SLOTS[p.slot]?.shelfId === shelfId) redirectToShelf(p);
+      else p.pendingWalk = { shelfId };
+      return;
+    }
+    if (p.slot >= 0 || p.mode !== 'loop') return; // still elsewhere — not walkable
     const free = [];
     for (let i = 0; i < SLOTS.length; i++) {
       if (SLOTS[i].shelfId === shelfId && !shoppers.some((q) => q.slot === i)) free.push(i);
@@ -2555,6 +2594,20 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     if (free.length === 0) return; // every seam taken — the mock drops the event
     startBrowse(p, free[Math.floor(Math.random() * free.length)]);
     p.shelfHold = true; // commanded session: heldShelfCycle owns them at the shelf
+  }
+  // cancel an in-flight walk-out and turn straight back into the still-
+  // reserved slot — the retraced leg reuses whatever waypoints were already
+  // walked, reversed, so there's no detour back through the loop
+  function redirectToShelf(p) {
+    const m = p.mv;
+    const g = jitterSlot(p.slot);
+    beginSession(p, p.slot, g.ry);
+    p.mode = 'toshelf';
+    p.mv = {
+      wps: [...m.wps.slice(0, m.wi).reverse(), new Vector3(g.x, 0, g.z)],
+      wi: 0, targetRy: g.ry, settleT: -1,
+    };
+    p.shelfHold = true;
   }
   // scanQR verdict — queued if they're still walking up; the phone gesture
   // plays on arrival and pass/fail lands mid-beam (see updateShelfScan)
@@ -2638,7 +2691,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // one record per slot — everything the browse machinery needs: stand point,
   // facing, arm reach, the seam whose glass parts for this shopper, the QR
   // plate the phone beam aims at, and (filled below) the walk route
-  const SLOTS = []; // { x, z, ry, reach, shelfId, seam, plate, itemColor, route }
+  const SLOTS = []; // { x, z, ry, reach, shelfId, seam, plate, palette, route }
   for (const zn of zones) {
     const td = SHELF_TYPE[zn.type];
     if (!td.lock || !zn.data.online) continue;
@@ -2661,7 +2714,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
           x: stand.x, z: stand.z,
           ry: Math.atan2(-nx, -nz), // stand facing the shelf
           reach: td.reach, shelfId: zn.id, seam: sm, plate,
-          itemColor: colors[SLOTS.length % colors.length],
+          palette: colors, // picked items tint from this shelf's own products
           route: null,
         });
       }
@@ -2790,12 +2843,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const freePickSlots = () => SLOTS.map((_, i) => i)
     .filter((i) => !shoppers.some((p) => p.slot === i));
 
-  // shared session setup: reserve the slot, size the basket, tint the item,
-  // aim the facing/sideways vectors the pick cycle animates along
+  // shared session setup: reserve the slot, size the basket, aim the
+  // facing/sideways vectors the pick cycle animates along (the item itself is
+  // re-rolled per gesture by armItem)
   function beginSession(p, slot, ry) {
     p.slot = slot;
     p.picksLeft = 1 + Math.floor(Math.random() * 3); // 1–3 items this visit
-    p.itemMat.albedoColor = C3(SLOTS[slot].itemColor); // picked item = one of this shelf's own products
     p.f.set(Math.sin(ry), 0, Math.cos(ry));
     p.s.set(Math.cos(ry), 0, -Math.sin(ry));
     p.item.rotation.y = ry;
@@ -2804,6 +2857,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     p.started = false;
     p.idling = false;
     p.pickT = 0;
+    p.nextPick = 0.6; // first gesture lands a beat after the door opens
   }
 
   // junction dice landed: reserve the slot and turn off the loop
@@ -2884,6 +2938,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
           p.slot = -1;
           p.mv = null;
           p.cooldown = elapsed + 12 + Math.random() * 14;
+          if (p.pendingWalk) { // a different-shelf scan queued while walking out
+            const { shelfId } = p.pendingWalk;
+            const apiId = p.person?.apiId;
+            p.pendingWalk = null;
+            if (apiId != null) apiWalkToShelfUser(apiId, shelfId);
+          }
         }
       }
     }
@@ -2894,21 +2954,21 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // their ~2MB character files would otherwise sit on the boot overlay's
   // critical path — the store reveals first, people stream in right after
 
-  const PICK_PERIOD = 9;
-  const PICK_CLIP = 1.79; // PickUp is 1.25s, played at 0.7 speed
+  const PICK_PERIOD = 5.5;
 
   // ---------- phone-scan unlock flow ----------
   // a shopper arriving at a slot scans in before anything else: Idle keeps
   // looping while the right arm is procedurally reached out toward the QR
-  // pedestal (no PickUp bend — that clip is for actually grabbing items), a
-  // beam links the phone to the pedestal, then access is granted — the glass
+  // pedestal — same reach-out treatment pick/return uses for the shelf point,
+  // no PickUp bend anywhere in this flow — a beam links the phone to the
+  // pedestal, then access is granted — the glass
   // parts only at this shopper's own seam and glides shut again when they
   // walk off (see releaseShelfAccess). Fx run world-space; the arm/head
   // override rides onAfterAnimationsObservable so Idle can't stomp it.
   // gesture timeline: pull the phone out of the hip pocket, extend it to the
   // reader while the beam runs, then pocket it again — access lands mid-beam
   // so the door is already gliding open while the phone goes away
-  const SCAN_RAISE = 0.5, SCAN_BEAM = 1.1, SCAN_LOWER = 0.5;
+  const SCAN_RAISE = 0.35, SCAN_BEAM = 0.7, SCAN_LOWER = 0.35;
   const SCAN_SECS = SCAN_RAISE + SCAN_BEAM + SCAN_LOWER;
   const SCAN_UNLOCK_AT = SCAN_RAISE + SCAN_BEAM * 0.5;
   // the pedestal sits well off the stand point's facing (slots hug the glass,
@@ -2971,33 +3031,111 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       .decompose(_decS, out, _decT);
     return out;
   }
-  // aim solve, once per scan start: rigid-rotate the whole right-arm subtree
-  // about its shoulder pivot so the fist ray points at the slot's QR plate
-  // (elbow bend preserved from whatever pose Idle is in right now), and yaw
-  // the head after it. Returns node-local target quaternions for the
-  // post-animation blend; null → gesture degrades to the phone travel alone.
+  // ---- two-bone arm IK (shared by scan + pick/return) ----
+  // Bend UpperArm.R (shoulder) and LowerArm.R (elbow) so Fist.R reaches
+  // `target`, the elbow riding a "down + slightly outward" pole so the pose
+  // reads like a real reach instead of a stiff shoulder swing. Mutates the two
+  // bones' rotationQuaternion in place; must run AFTER Idle has posed the arm
+  // (i.e. inside onAfterAnimationsObservable). Fist.R keeps its Idle rotation —
+  // the phone / held item ride the wrist and only care about its position.
+  const _ikS = new Vector3(), _ikDir = new Vector3(), _ikPole = new Vector3();
+  const _ikPerp = new Vector3(), _ikElbow = new Vector3();
+  const _ikA = new Vector3(), _ikB = new Vector3(), _ikTmp = new Vector3();
+  // shelf pick points sit ~0.3m past a full-stretch arm, so a hand aimed
+  // straight at them just locks the elbow. Cap the reach at 80% of arm length
+  // instead: the elbow keeps a clear ~120° bend and the held item bridges the
+  // last stretch onto the shelf (it already animates hand↔shelfPt). The torso
+  // lean below advances the shoulder, so the item's gap stays modest.
+  const ARM_REACH_FACTOR = 0.8;
+  function solveArmIK(p, target) {
+    const u = p.h.metadata;
+    const fist = u.fist;
+    const lower = fist?.parent, upper = lower?.parent;
+    if (!upper?.rotationQuaternion || !lower?.rotationQuaternion) return false;
+    forceWorld(fist, p.h);
+    _ikS.copyFrom(upper.getAbsolutePosition());
+    // bone lengths are rigid (pose-independent) — measure once and cache
+    if (u.armL1 === undefined) {
+      u.armL1 = Vector3.Distance(_ikS, lower.getAbsolutePosition());
+      u.armL2 = Vector3.Distance(lower.getAbsolutePosition(), fist.getAbsolutePosition());
+    }
+    const L1 = u.armL1, L2 = u.armL2, eps = 1e-3;
+    _ikDir.copyFrom(target).subtractInPlace(_ikS);
+    const D = Scalar.Clamp(_ikDir.length(), Math.abs(L1 - L2) + eps, (L1 + L2) * ARM_REACH_FACTOR);
+    _ikDir.normalize();
+    // elbow: cosine-rule projection along the reach line, then offset toward
+    // the pole by the triangle height (folds the arm the natural way)
+    const x = (L1 * L1 - L2 * L2 + D * D) / (2 * D);
+    const h = Math.sqrt(Math.max(0, L1 * L1 - x * x));
+    _ikPole.set(p.s.x * 0.4, -1, p.s.z * 0.4); // down, a touch outward along the seam
+    _ikPerp.copyFrom(_ikPole).subtractInPlace(
+      _ikTmp.copyFrom(_ikDir).scaleInPlace(Vector3.Dot(_ikPole, _ikDir)));
+    if (_ikPerp.lengthSquared() < 1e-6) { // pole parallel to reach — any perpendicular
+      _ikPerp.copyFrom(Math.abs(_ikDir.y) < 0.9 ? Vector3.Up() : Vector3.Right());
+      _ikPerp.subtractInPlace(_ikTmp.copyFrom(_ikDir).scaleInPlace(Vector3.Dot(_ikPerp, _ikDir)));
+    }
+    _ikPerp.normalize();
+    _ikElbow.copyFrom(_ikS)
+      .addInPlace(_ikTmp.copyFrom(_ikDir).scaleInPlace(x))
+      .addInPlace(_ikTmp.copyFrom(_ikPerp).scaleInPlace(h));
+    // 1) swing + bend the shoulder so the elbow lands at _ikElbow
+    _ikA.copyFrom(lower.getAbsolutePosition()).subtractInPlace(_ikS).normalize();
+    _ikB.copyFrom(_ikElbow).subtractInPlace(_ikS).normalize();
+    localizeRotation(upper, arcQuat(_ikA, _ikB), upper.rotationQuaternion);
+    forceWorld(fist, p.h); // elbow now at ~_ikElbow, hand swung rigidly with it
+    // 2) bend the elbow so the hand lands on the target
+    _ikS.copyFrom(lower.getAbsolutePosition()); // reuse _ikS as the elbow pivot
+    _ikA.copyFrom(fist.getAbsolutePosition()).subtractInPlace(_ikS).normalize();
+    _ikB.copyFrom(target).subtractInPlace(_ikS).normalize();
+    localizeRotation(lower, arcQuat(_ikA, _ikB), lower.rotationQuaternion);
+    return true;
+  }
+
+  // torso lean, solved once per gesture: tip the upper body forward from the
+  // waist (Abdomen) toward the shelf and add a small twist that brings the
+  // reaching (right) shoulder around — so the reach is a whole-body motion, not
+  // a lone arm swing. Returned as a node-local target; the blend loop slerps
+  // Idle→lean by k BEFORE the arm IK, so the arm re-solves off the leaned
+  // shoulder (which also advances the hand and shrinks the item's bridge gap).
+  const TORSO_LEAN = 0.21;  // ~12° forward pitch from the waist
+  const TORSO_TWIST = 0.14; // ~8° twist bringing the right shoulder forward
+  const _leanAxis = new Vector3();
+  function solveTorsoLean(p) {
+    const u = p.h.metadata;
+    if (u.spine === undefined) // Shoulder.R → Torso → Abdomen (waist) → Hips
+      u.spine = p.h.getDescendants(false).find((n) => n.name === 'Abdomen' && n.rotationQuaternion) ?? null;
+    if (!u.spine) return { spine: null, qSpine: null };
+    forceWorld(u.spine, p.h);
+    Vector3.CrossToRef(Vector3.Up(), p.f, _leanAxis); // horizontal axis ⟂ facing; +angle tips forward
+    _leanAxis.normalize();
+    const qDelta = Quaternion.RotationAxis(Vector3.Up(), TORSO_TWIST)
+      .multiply(Quaternion.RotationAxis(_leanAxis, TORSO_LEAN));
+    return { spine: u.spine, qSpine: localizeRotation(u.spine, qDelta, new Quaternion()) };
+  }
+
+  // aim solve, once per scan start: fixes the body half-turn toward the reader,
+  // the phone yaw/pitch and the head glance. The arm itself is driven every
+  // frame by solveArmIK toward `target` (the QR plate) in the blend loop below.
+  // Returns null → gesture degrades to the phone travel alone.
   function solveScanAim(p) {
     const u = p.h.metadata;
-    const upper = u.fist?.parent?.parent ?? null; // Fist.R → LowerArm.R → UpperArm.R
+    const lower = u.fist?.parent ?? null, upper = lower?.parent ?? null; // Fist.R → LowerArm.R → UpperArm.R
     const plate = SLOTS[p.slot]?.plate;
-    if (!upper?.rotationQuaternion || !plate) return null;
+    if (!upper?.rotationQuaternion || !lower?.rotationQuaternion || !plate) return null;
     if (u.head === undefined)
       u.head = p.h.getDescendants(false).find((n) => /head/i.test(n.name) && n.rotationQuaternion) ?? null;
     const fy = Math.atan2(p.f.x, p.f.z); // facing the shelf (beginSession set p.f from the slot ry)
     const raw = clampAngle(
       Math.atan2(plate.x - p.h.position.x, plate.z - p.h.position.z) - fy, Math.PI);
     const bodyYaw = clampAngle(raw, SCAN_BODY_YAW);
-    // arm/head local targets must be solved against the pose they'll blend
-    // over — the half-turned body — so turn it, solve, turn it back
+    // head target solved against the pose it'll blend over — the half-turned
+    // body — so turn it, solve, turn it back
     p.h.rotation.y = fy + bodyYaw;
     forceWorld(u.fist, p.h);
     const pivot = upper.getAbsolutePosition().clone();
-    const yaw = fy + bodyYaw + clampAngle(raw - bodyYaw, SCAN_ARM_YAW);
+    const yaw = fy + bodyYaw + clampAngle(raw - bodyYaw, SCAN_ARM_YAW); // phone screen yaw toward the plate
     const pitch = Scalar.Clamp(
       Math.atan2(plate.y - pivot.y, Math.hypot(plate.x - pivot.x, plate.z - pivot.z)), -0.35, 0.45);
-    _aimD.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch));
-    _aimA.copyFrom(u.fist.getAbsolutePosition()).subtractInPlace(pivot).normalize();
-    const qUp = localizeRotation(upper, arcQuat(_aimA, _aimD), new Quaternion());
     let qHead = null;
     if (u.head) {
       forceWorld(u.head, p.h);
@@ -3008,7 +3146,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     }
     p.h.rotation.y = fy;
     p.h.computeWorldMatrix(true);
-    return { upper, head: qHead ? u.head : null, qUp, qHead, yaw, pitch, fy, bodyYaw };
+    const { spine, qSpine } = solveTorsoLean(p);
+    return { upper, lower, head: qHead ? u.head : null, qHead, yaw, pitch, fy, bodyYaw, target: plate.clone(), spine, qSpine };
   }
 
   function startShelfScan(p) {
@@ -3021,16 +3160,32 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
 
   // animation groups evaluate inside scene.render(), AFTER the per-frame
   // update — the reach pose has to land post-animate or Idle would stomp it.
-  // Slerp from whatever pose Idle produced this frame toward the solved
-  // target, weighted by the gesture's blend factor.
+  // Each frame: snapshot the pose Idle just produced, solve the full-reach IK,
+  // then slerp Idle→reach by the gesture's blend factor (so the arm bends out
+  // and folds back). Re-solving every frame keeps the hand locked on the
+  // world-space target through the Idle bob.
+  const _qIdleUp = new Quaternion(), _qIdleLow = new Quaternion();
   scene.onAfterAnimationsObservable.add(() => {
     for (const p of shoppers) {
-      const s = p.shelfScan;
+      const s = p.shelfScan ?? p.inspect; // same reach-and-blend treatment for scan and pick/return
       if (!s?.aim || !s.k) continue;
-      const { upper, head, qUp, qHead } = s.aim;
-      if (upper.isDisposed()) continue; // rig respawned mid-scan — targets point at the old one
-      Quaternion.SlerpToRef(upper.rotationQuaternion, qUp, s.k, upper.rotationQuaternion);
-      if (head && !head.isDisposed())
+      const { upper, lower, head, qHead, target, spine, qSpine } = s.aim;
+      if (!upper || upper.isDisposed() || (lower && lower.isDisposed())) continue; // rig respawned mid-gesture
+      // torso lean first — the arm IK below re-reads the leaned shoulder
+      if (spine && qSpine && !spine.isDisposed())
+        Quaternion.SlerpToRef(spine.rotationQuaternion, qSpine, s.k, spine.rotationQuaternion);
+      if (target && lower) {
+        _qIdleUp.copyFrom(upper.rotationQuaternion);
+        _qIdleLow.copyFrom(lower.rotationQuaternion);
+        if (solveArmIK(p, target)) { // upper/lower now hold the full-reach pose
+          Quaternion.SlerpToRef(_qIdleUp, upper.rotationQuaternion, s.k, upper.rotationQuaternion);
+          Quaternion.SlerpToRef(_qIdleLow, lower.rotationQuaternion, s.k, lower.rotationQuaternion);
+        } else {
+          upper.rotationQuaternion.copyFrom(_qIdleUp);
+          lower.rotationQuaternion.copyFrom(_qIdleLow);
+        }
+      }
+      if (head && qHead && !head.isDisposed()) // head glance: solved once, simple blend
         Quaternion.SlerpToRef(head.rotationQuaternion, qHead, s.k, head.rotationQuaternion);
     }
   });
@@ -3143,47 +3298,98 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // shelfHold shoppers never drive themselves: they idle at the reader until
   // a scanQR verdict, then play exactly one pick per inspectItem command.
   // Only the API side ends the session (shelfClose timer / walkAway / leave).
-  const INSPECT_SECS = 4.4; // reach (0.55–1.15) → look it over → keep/return
-  function startInspect(p, result) {
+  // two short gestures replace the old pick→hold→keep/return cycle:
+  // `keep` grabs the item off the shelf and it vanishes in the hand right
+  // away ("bagged", paid at the exit); `return` pops a fresh item into the
+  // hand and sets it back on the shelf. No PickUp bend — same reach-out
+  // treatment as the scan gesture: Idle keeps looping while solveArmIK bends
+  // the arm out toward the shelf point each frame (blended post-animation),
+  // plus a small head glance.
+  const INSPECT_REACH = 0.3, INSPECT_HOLD = 0.8, INSPECT_RETRACT = 0.3;
+  const INSPECT_SECS = INSPECT_REACH + INSPECT_HOLD + INSPECT_RETRACT;
+  const INSPECT_HEAD_YAW = 0.3; // just a glance toward the reach — no body turn, item is nearly straight ahead
+  // aim solve, once per gesture start: fix the head glance and hand back an
+  // aim record. `target` is refreshed every frame by updateInspect and fed to
+  // solveArmIK in the blend loop — no body half-turn (the pick point sits
+  // close to dead-ahead, unlike the scan pedestal).
+  function solveInspectAim(p) {
     const u = p.h.metadata;
-    p.inspect = { t: 0, result, counted: false };
-    p.idling = false;
-    if (u.groups.Idle) u.groups.Idle.stop();
-    const g = u.groups.PickUp;
-    if (g) g.start(false, 0.7, g.from, g.to);
-    p.pickLat = (Math.random() - 0.5) * 0.8; // stay inside the shopper's own seam gap
-  }
-  function updateInspect(p, dt) {
-    const u = p.h.metadata;
-    const it = p.inspect;
-    it.t += dt;
-    if (!p.idling && it.t >= PICK_CLIP) { // pick clip done → back to Idle
-      p.idling = true;
-      const gi = u.groups.Idle;
-      if (gi) gi.start(true, 1.0, gi.from, gi.to);
-    }
-    // item flight: shelf → hand, held while looked over, then kept or returned
+    const lower = u.fist?.parent ?? null, upper = lower?.parent ?? null; // Fist.R → LowerArm.R → UpperArm.R
+    if (!upper?.rotationQuaternion || !lower?.rotationQuaternion) return null;
+    if (u.head === undefined)
+      u.head = p.h.getDescendants(false).find((n) => /head/i.test(n.name) && n.rotationQuaternion) ?? null;
     _shelfPt.copyFrom(p.f).scaleInPlace(p.reach).addInPlace(p.h.position)
       .addInPlace(_handPt.copyFrom(p.s).scaleInPlace(p.pickLat));
     _shelfPt.y = 1.3;
+    let qHead = null;
+    if (u.head) {
+      forceWorld(u.head, p.h);
+      const fy = Math.atan2(p.f.x, p.f.z);
+      const raw = clampAngle(Math.atan2(_shelfPt.x - p.h.position.x, _shelfPt.z - p.h.position.z) - fy, Math.PI);
+      const hy = fy + clampAngle(raw, INSPECT_HEAD_YAW);
+      _aimA.set(Math.sin(fy), 0, Math.cos(fy));
+      _aimD.set(Math.sin(hy), 0, Math.cos(hy));
+      qHead = localizeRotation(u.head, arcQuat(_aimA, _aimD), new Quaternion());
+    }
+    const { spine, qSpine } = solveTorsoLean(p);
+    return { upper, lower, head: qHead ? u.head : null, qHead, target: _shelfPt.clone(), spine, qSpine };
+  }
+  // re-roll the held prop for one gesture: one of the four small-goods
+  // shapes, tinted from the host shelf's own catalogue colors
+  function armItem(p) {
+    const pick = p.itemShapes[Math.floor(Math.random() * p.itemShapes.length)];
+    for (const s of p.itemShapes) s.setEnabled(s === pick);
+    const pal = SLOTS[p.slot]?.palette ?? productColors;
+    p.itemMat.albedoColor = C3(pal[Math.floor(Math.random() * pal.length)]);
+  }
+  function startInspect(p, result) {
+    const u = p.h.metadata;
+    p.pickLat = (Math.random() - 0.5) * 0.8; // stay inside the shopper's own seam gap — set before the aim solve, which reaches for this offset
+    armItem(p);
+    p.inspect = { t: 0, k: 0, result, counted: false, aim: solveInspectAim(p) };
+    p.idling = true; // body stays on the Idle loop; only the arm/head get overridden
+    const gi = u.groups.Idle;
+    if (gi && !gi.isPlaying) gi.start(true, 1.0, gi.from, gi.to);
+  }
+  function updateInspect(p, dt) {
+    const it = p.inspect;
+    it.t += dt;
     const t = it.t;
-    if (t >= 0.55 && u.fist) {
+    // one blend factor drives the arm/head reach (applied post-animation,
+    // shared with the scan gesture's loop): out, hold, back
+    it.k = t < INSPECT_REACH ? easeInOutCubic(t / INSPECT_REACH)
+      : t < INSPECT_REACH + INSPECT_HOLD ? 1
+        : 1 - easeInOutCubic(Math.min(1, (t - INSPECT_REACH - INSPECT_HOLD) / INSPECT_RETRACT));
+    _shelfPt.copyFrom(p.f).scaleInPlace(p.reach).addInPlace(p.h.position)
+      .addInPlace(_handPt.copyFrom(p.s).scaleInPlace(p.pickLat));
+    _shelfPt.y = 1.3;
+    if (it.aim) it.aim.target.copyFrom(_shelfPt); // solveArmIK reaches the hand here each frame
+    const u = p.h.metadata;
+    if (u.fist) {
       _handPt.copyFrom(u.fist.getAbsolutePosition());
-      if (t < 1.15) {
-        p.item.setEnabled(true);
-        p.item.scaling.setAll(1);
-        Vector3.LerpToRef(_shelfPt, _handPt, easeInOutCubic((t - 0.55) / 0.6), p.item.position);
-      } else if (t < 3.1) {
-        p.item.position.copyFrom(_handPt);
-      } else if (it.result === 'return') { // looked it over → back on the shelf
-        if (t < 3.8) Vector3.LerpToRef(_handPt, _shelfPt, easeInOutCubic((t - 3.1) / 0.7), p.item.position);
-        else p.item.setEnabled(false);
-      } else { // keep — the item shrinks away in the hand ("bagged", paid at the exit)
-        if (!it.counted) { it.counted = true; if (p.person) p.person.picks++; } // feeds "Items picked"
-        const k = Math.min(1, (t - 3.1) / 0.5);
-        p.item.position.copyFrom(_handPt);
-        p.item.scaling.setAll(1 - k);
-        if (k >= 1) p.item.setEnabled(false);
+      if (it.result === 'return') { // pop into the hand → set back on the shelf
+        if (t < 0.3) {
+          p.item.setEnabled(true);
+          p.item.scaling.setAll(easeInOutCubic(t / 0.3));
+          p.item.position.copyFrom(_handPt);
+        } else if (t < 1.1) {
+          p.item.scaling.setAll(1);
+          Vector3.LerpToRef(_handPt, _shelfPt, easeInOutCubic((t - 0.3) / 0.8), p.item.position);
+        } else {
+          p.item.setEnabled(false);
+        }
+      } else if (t >= 0.3) { // keep: empty-hand reach, then shelf → hand, then it vanishes at once
+        if (t < 0.7) {
+          p.item.setEnabled(true);
+          p.item.scaling.setAll(1);
+          Vector3.LerpToRef(_shelfPt, _handPt, easeInOutCubic((t - 0.3) / 0.4), p.item.position);
+        } else {
+          if (!it.counted) { it.counted = true; if (p.person) p.person.picks++; } // feeds "Items picked"
+          const k = Math.min(1, (t - 0.7) / 0.4);
+          p.item.position.copyFrom(_handPt);
+          p.item.scaling.setAll(1 - k);
+          if (k >= 1) p.item.setEnabled(false);
+        }
       }
     }
     if (t >= INSPECT_SECS) { // cycle over — ready for the next command
@@ -3225,35 +3431,14 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     // access granted but their own door still gliding open → hold Idle, no picking
     if (Math.max(shelfLockOf(p).masterAmt, p.accessSeam?.openAmt ?? 0) < 0.7) return;
     p.pickT += dt;
-    const t = p.pickT % PICK_PERIOD;
-    if (t < dt) { // new cycle → new spot on the shelf, play the pick clip
+    if (p.inspect) { updateInspect(p, dt); return; }
+    // basket done and the last gesture settled → walk off
+    if (p.picksLeft <= 0) { leaveSlot(p); return; }
+    if (p.pickT >= p.nextPick) { // roll the next gesture: grab-and-bag or put one back
       p.picksLeft--;
-      p.pickLat = (Math.random() - 0.5) * 0.8; // stay inside the shopper's own seam gap
-      if (p.person) p.person.picks++; // feeds "Items picked" on the detail card
-      const g = u.groups.PickUp;
-      if (g) { if (u.groups.Idle) u.groups.Idle.stop(); p.idling = false; g.start(false, 0.7, g.from, g.to); }
-    }
-    if (!p.idling && t >= PICK_CLIP) { // pick clip done → back to Idle
-      p.idling = true;
-      const gi = u.groups.Idle;
-      if (gi) gi.start(true, 1.0, gi.from, gi.to);
-    }
-    // basket done and the last item is back on the shelf → walk off
-    if (p.picksLeft <= 0 && t >= 5.2) { leaveSlot(p); return; }
-
-    // product spawn point on the bottom shelf in front of the shopper
-    _shelfPt.copyFrom(p.f).scaleInPlace(p.reach).addInPlace(p.h.position)
-      .addInPlace(_handPt.copyFrom(p.s).scaleInPlace(p.pickLat));
-    _shelfPt.y = 1.3;
-
-    if (t >= 0.55 && t < 4.9 && u.fist) {
-      p.item.setEnabled(true);
-      _handPt.copyFrom(u.fist.getAbsolutePosition());
-      if (t < 1.15) Vector3.LerpToRef(_shelfPt, _handPt, easeInOutCubic((t - 0.55) / 0.6), p.item.position);
-      else if (t < 4.2) p.item.position.copyFrom(_handPt);
-      else Vector3.LerpToRef(_handPt, _shelfPt, easeInOutCubic((t - 4.2) / 0.7), p.item.position);
-    } else {
-      p.item.setEnabled(false);
+      p.nextPick = p.pickT + PICK_PERIOD;
+      startInspect(p, Math.random() < 0.5 ? 'keep' : 'return');
+      updateInspect(p, dt);
     }
   }
 
@@ -4278,10 +4463,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
 
     // Floor-2 cross-fade
     if (floor2Anim.active) {
-      floor2Anim.t += dt / FLY_DUR;
+      floor2Anim.t += dt / floor2Anim.dur;
       const e = easeInOutCubic(Math.min(1, floor2Anim.t));
       floor2Anim.value = floor2Anim.from + (floor2Anim.to - floor2Anim.from) * e;
       for (const m of floor2Meshes) m.visibility = floor2Anim.value;
+      for (const l of floor2Lines) l.m.alpha = l.base * floor2Anim.value;
       if (floor2Anim.t >= 1) { floor2Anim.active = false; if (floor2Anim.to === 0) floor2.setEnabled(false); }
     }
     // escalator steps + handrail scroll along the slope, wrapping at the ends
@@ -4295,6 +4481,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     if (forcedDt === undefined) scene.render();
   };
   engine.runRenderLoop(frame);
+
+  // Warm up the lazy Floor-2 clone once the scene is live so the first Floor 2
+  // click just runs the fade instead of stalling the frame on a big clone pass
+  // (the storey used to pop in late). buildFloor2 leaves it disabled + invisible.
+  const warmIdle = window.requestIdleCallback
+    ? window.requestIdleCallback(() => buildFloor2(), { timeout: 2000 })
+    : setTimeout(() => buildFloor2(), 300);
 
   // ---------- resize ----------
   const onResize = () => {
@@ -4310,6 +4503,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // ---------- cleanup ----------
   function dispose() {
     engine.stopRenderLoop();
+    if (window.cancelIdleCallback) window.cancelIdleCallback(warmIdle);
+    clearTimeout(warmIdle); // harmless if warmIdle was an idle handle
     ro.disconnect();
     window.removeEventListener('resize', onResize);
     canvas.removeEventListener('wheel', onWheel);

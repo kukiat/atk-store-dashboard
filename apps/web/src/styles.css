@@ -177,7 +177,10 @@ canvas { display: block; }
 
 /* floating shelf inspector (V4) — anchored to the 3D stage, bottom-left */
 .store-detail-card {
-  position: absolute; left: 16px; bottom: 16px; z-index: 20; width: 208px;
+  /* full-bleed stage: keep the card clear of the left floating panel (right
+     edge at 312px). When the left panel is hidden it hugs the corner instead. */
+  position: absolute; left: 330px; bottom: 16px; z-index: 20; width: 208px;
+  transition: left .25s ease;
   padding: 12px 14px 13px; border-radius: 12px;
   border: 1px solid #2a4c86; background: rgba(11,20,40,.94);
   box-shadow: 0 12px 32px rgba(0,0,0,.45), 0 0 0 1px rgba(53,195,255,.12);
@@ -277,15 +280,68 @@ canvas { display: block; }
   border: 2px solid #2a4c86;
 }
 
-/* body grid */
+/* body grid — the three tracks are FIXED and never change, so toggling a
+   sidebar never reflows/resizes the center stage (nor the Babylon canvas).
+   The side panels float over their reserved gutters as absolute overlays;
+   only the center stays in flow (pinned to column 2). */
 .dash-body {
-  flex: 1; min-height: 0;
+  flex: 1; min-height: 0; position: relative;
   display: grid; grid-template-columns: 290px 1fr 320px;
   gap: 18px; padding: 18px 22px;
 }
 .col { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
-.col-left, .col-right { overflow-y: auto; padding-right: 2px; }
-.col-center { position: relative; }
+/* the 3D stage is full-bleed — it spans all three tracks so the scene fills the
+   whole width; the side panels float ON TOP of it (absolute, z-index 15) rather
+   than carving space out of it. Hiding a panel reveals more of the live scene
+   underneath instead of dead background. */
+.col-center { grid-column: 1 / -1; position: relative; }
+
+/* floating side panels — absolute overlays that float ON TOP of the full-bleed
+   3D stage in the left/right gutters. Elevated look: drop shadow + brighter
+   edge. Content stays mounted while hidden (polling keeps running); a re-open
+   shows live data instantly, not a stale snapshot. */
+.col-left, .col-right {
+  position: absolute; top: 18px; bottom: 18px;
+  overflow-y: auto; padding-right: 2px; z-index: 15;
+  transition: transform .25s ease, opacity .25s ease;
+}
+.col-left  { left: 22px;  width: 290px; }
+.col-right { right: 22px; width: 320px; }
+/* elevate the cards inside a floating panel */
+.col-left .card, .col-right .card {
+  border-color: #22406f;
+  box-shadow: 0 12px 32px rgba(2, 8, 20, .55);
+}
+/* hidden: slide fully off its edge (+ the 22px padding) and fade out */
+.dash-body.left-collapsed  .col-left  { transform: translateX(calc(-100% - 22px)); opacity: 0; pointer-events: none; }
+.dash-body.right-collapsed .col-right { transform: translateX(calc(100% + 22px));  opacity: 0; pointer-events: none; }
+
+/* keep the stage's own HUD clear of whichever floating panel is open, since the
+   stage is now full-bleed underneath them. When a panel is hidden the HUD
+   reclaims that edge (shelf card hugs the corner, floor controls re-center). */
+.dash-body.left-collapsed .store-detail-card { left: 16px; }
+.dash-body:not(.left-collapsed)  .floor-ctrl { left: 312px; }
+.dash-body:not(.right-collapsed) .floor-ctrl { right: 342px; }
+
+/* floating edge tabs — reopen/collapse each sidebar independently. When shown
+   they hug the panel's inner edge; when hidden they park at the screen edge. */
+.sb-toggle {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 18px; height: 52px; z-index: 20;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(14,24,48,.85); border: 1px solid #16294f;
+  color: #9fb6e6; cursor: pointer; font-size: 13px; padding: 0;
+  transition: left .25s ease, right .25s ease, background .18s ease, color .18s ease;
+}
+.sb-toggle:hover { color: #eaf6ff; background: rgba(20,40,80,.9); }
+.sb-toggle-left { left: 312px; border-radius: 0 8px 8px 0; }
+.dash-body.left-collapsed .sb-toggle-left { left: 0; }
+.sb-toggle-right { right: 342px; border-radius: 8px 0 0 8px; }
+.dash-body.right-collapsed .sb-toggle-right { right: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .col-left, .col-right, .sb-toggle, .store-detail-card, .floor-ctrl { transition: none; }
+}
 
 /* cards */
 .card {
@@ -370,6 +426,7 @@ canvas { display: block; }
   position: absolute; left: 0; right: 0; bottom: 14px; z-index: 6;
   display: flex; align-items: center; justify-content: center; gap: 16px;
   flex-wrap: wrap; row-gap: 8px; /* crowd steppers wrap to a second row when tight */
+  transition: left .25s ease, right .25s ease;
   pointer-events: none;
 }
 .floor-ctrl > * { pointer-events: auto; }
