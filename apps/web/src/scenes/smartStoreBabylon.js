@@ -104,7 +104,8 @@ export function validateShelfLayout(shelves) {
   const seen = new Set();
   for (const sh of shelves) {
     const tag = `shelf ${sh?.id ?? '?'}`;
-    if (!Number.isInteger(sh?.id) || sh.id < 1) { errors.push(`${tag}: id must be a positive integer`); continue; }
+    // ids are device_id strings from the IoT feed (e.g. "10005" / "BF67EC")
+    if (typeof sh?.id !== 'string' || !sh.id) { errors.push(`${tag}: id must be a non-empty string`); continue; }
     if (seen.has(sh.id)) errors.push(`${tag}: duplicate id`);
     seen.add(sh.id);
     if (!SHELF_TYPE[sh.type]) { errors.push(`${tag}: unknown type "${sh.type}"`); continue; }
@@ -549,7 +550,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
 
   const badges = [];
   zones.forEach((zn, i) => {
-    const b = makeBadge(String(zn.id).padStart(2, '0'));
+    // badge shows a 1-based shelf index (01, 02, …) for readability; the real
+    // device_id lives on metadata.shelfId for picking/selection
+    const b = makeBadge(String(i + 1).padStart(2, '0'));
     b.position.copyFrom(zn.pos);
     b.metadata = { shelfId: zn.id, base: zn.pos.y, t: i * 0.9 };
     b.parent = world;

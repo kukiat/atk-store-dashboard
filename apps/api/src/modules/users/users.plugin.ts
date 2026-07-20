@@ -136,23 +136,24 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
   // session has no auto-close timer — it holds open until shelfClose (or leave).
   .post(
     "/:id/status",
-    ({ usersService, shelfsService, params, body }) => {
+    async ({ usersService, shelfsService, params, body }) => {
       // a shelf command must target a shelf with doors: exists (404), powered
       // (409), and not a checkout counter (409) — the shelfs service owns the
       // layout, users only the people. walkToShelf names the shelf by id;
       // scanQR names it by sku (resolved 1:1), and the resolved id is handed to
-      // the service so it knows where to walk the shopper.
-      const assertHasDoors = (shelf: { id: number; online: boolean; type: string }) => {
+      // the service so it knows where to walk the shopper. The shelfs service
+      // fetches the live IoT layout, so these lookups are async now.
+      const assertHasDoors = (shelf: { id: string; online: boolean; type: string }) => {
         if (!shelf.online)
           throw status(409, `Shelf ${shelf.id} is offline, doors never unlock`);
         if (shelf.type === "checkout")
           throw status(409, `Shelf ${shelf.id} is a checkout counter — no doors`);
       };
-      let skuShelfId: number | undefined;
+      let skuShelfId: string | undefined;
       if (body.action === "walkToShelf") {
-        assertHasDoors(shelfsService.findById(body.payload.shelfId));
+        assertHasDoors(await shelfsService.findById(body.payload.shelfId));
       } else if (body.action === "scanQR") {
-        const shelf = shelfsService.findBySku(body.payload.sku); // 404 if unknown
+        const shelf = await shelfsService.findBySku(body.payload.sku); // 404 if unknown
         assertHasDoors(shelf);
         skuShelfId = shelf.id;
       }

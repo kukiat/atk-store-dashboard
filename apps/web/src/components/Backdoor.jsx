@@ -475,7 +475,7 @@ export default function Backdoor() {
                       <select
                         className="bd-shelfsel"
                         value={pick ?? ''}
-                        onChange={(e) => setShelfPick((s) => ({ ...s, [u.id]: Number(e.target.value) }))}
+                        onChange={(e) => setShelfPick((s) => ({ ...s, [u.id]: e.target.value }))}
                       >
                         {shelves.map((s) => (
                           <option key={s.id} value={s.id} disabled={!shelfUsable(s)}>

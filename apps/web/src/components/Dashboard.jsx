@@ -75,23 +75,31 @@ const STAT_CARDS = [
   { k: 'Average Dwell Time', v: '6m 24', u: 's', d: '+8.1%', spark: [4, 5, 5, 6, 6, 7, 6, 8, 7, 8], color: '#4caf72' },
 ];
 
-// ---------- mock data source ----------
-// The whole shelf catalogue — names, layout, online flags AND the live-stock
-// starting quantities — comes from one mock JSON file, fetched at runtime so
-// it can be edited without a rebuild. The 3D scene builds its shelves from
-// the very same parsed data (single source of truth); validateShelfLayout
-// (from the scene module) rejects layouts the fixed store architecture
-// can't support before anything renders. The customer roster comes from the
+// ---------- data source ----------
+// The whole shelf catalogue — ids, names, layout, online flags AND the item
+// stock — comes from the shelfs API (GET /shelfs), which fetches the live
+// layout from the external IoT devices feed and maps it onto the Shelf shape.
+// The 3D scene builds its shelves from that same parsed data (single source of
+// truth); validateShelfLayout (from the scene module) rejects layouts the fixed
+// store architecture can't support before anything renders. The customer roster comes from the
 // users API (apps/api — an in-memory stand-in for the future external users
 // service): GET seeds the shoppers already in the store at open, and its SSE
 // feed drives live walk-ins (POST), card updates / body swaps (PATCH) and
 // fade-outs (DELETE) while the demo runs.
-const MOCK_SHELVES_URL = '/mock/shelves.json';
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3004';
 const USERS_API_URL = `${API_URL}/users`;
 const CROWD_API_URL = `${API_URL}/crowd`;
+// shelves come from the API too now — it fetches the live layout from the
+// external IoT devices feed and maps it onto the Shelf shape (see apps/api).
+const SHELFS_API_URL = `${API_URL}/shelfs`;
 
-const shelfIdStr = (id) => String(id).padStart(2, '0');
+// Shelf ids are device_id strings (e.g. "10005" / "BF67EC"), but everywhere we
+// show a shelf to the user we display its 1-based position instead (01, 02, …)
+// so it matches the 3D badge. This module-level map is kept in sync with the
+// loaded shelf order by the Dashboard render (see shelfIndexById below); the
+// resolver falls back to the raw id if a shelf isn't in the current layout.
+let shelfIndexMap = {};
+const shelfIdStr = (id) => shelfIndexMap[id] ?? String(id);
 
 // shelf lock mirror (V5): the scene owns the state and streams transitions up
 // via onShelfEvent; this map only drives the UI chips. Offline shelves can't
@@ -472,16 +480,14 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   const loadCatalog = useCallback(() => {
     setLoadError(null);
     setCatalog(null);
-    // shelves is a static mock file (plain JSON, never enveloped); users comes
-    // from the API (enveloped) — so they unwrap differently and can't share one
-    // grab() any more. apiFetch returns the users array already unwrapped.
-    const grabStatic = (url) =>
-      fetch(url).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status} loading ${url}`); return r.json(); });
-    Promise.all([grabStatic(MOCK_SHELVES_URL), apiFetch(USERS_API_URL)])
+    // both shelves and users come from the API now (both enveloped); apiFetch
+    // returns each array already unwrapped. The shelfs endpoint fetches the live
+    // IoT device layout on every call, so a failure here surfaces as a load error.
+    Promise.all([apiFetch(SHELFS_API_URL), apiFetch(USERS_API_URL)])
       .then(([shelfData, userData]) => {
-        const errors = [...validateShelfLayout(shelfData?.shelves), ...validateUsers(userData)];
+        const errors = [...validateShelfLayout(shelfData), ...validateUsers(userData)];
         if (errors.length) throw new Error(errors.join(' · '));
-        setCatalog({ shelves: shelfData.shelves, users: userData });
+        setCatalog({ shelves: shelfData, users: userData });
       })
       .catch((e) => setLoadError(String(e?.message || e)));
   }, []);
@@ -490,6 +496,13 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   // stable identity — `?? []` inline would mint a new array every render and
   // cascade through the memos below into an effect loop while catalog is null
   const shelvesDef = useMemo(() => catalog?.shelves ?? [], [catalog]);
+  // device_id → 1-based padded index (01, 02, …), matching the 3D badge order.
+  // Assigned to the module-level shelfIndexMap so shelfIdStr() resolves ids to
+  // indices everywhere — including child cards and ref-based scene callbacks —
+  // without threading a prop. Idempotent, so a render-time assignment is safe.
+  const shelfIndexById = useMemo(
+    () => Object.fromEntries(shelvesDef.map((s, i) => [s.id, String(i + 1).padStart(2, '0')])), [shelvesDef]);
+  shelfIndexMap = shelfIndexById;
   const shelfName = useMemo(
     () => Object.fromEntries(shelvesDef.map((s) => [s.id, s.name])), [shelvesDef]);
   const offlineShelves = useMemo(
@@ -1101,7 +1114,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
             )}
             <ul className="stock-list">
               {shownStock.length
-                ? shownStock.map((it) => <StockRow key={it.id} item={it} />)
+                ? shownStock.map((it) => <StockRow key={`${it.shelf}-${it.id}`} item={it} />)
                 : <li className="stk-empty">No items on this shelf</li>}
             </ul>
           </section>

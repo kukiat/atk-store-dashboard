@@ -16,7 +16,8 @@ export type User = {
   status: UserStatus;
   // shelf session (scanning/browsing only): which shelf they hold at; null
   // otherwise. Ends on an explicit shelfClose (or leave) — no auto-close.
-  shelf_id: number | null;
+  // A shelf id is the device_id string from the IoT feed (see Shelf in ./shelfs).
+  shelf_id: string | null;
   // display-only profile fields (see ../modules/users/users.model.ts)
   email: string;
   avatar_url: string;
@@ -33,7 +34,7 @@ export type UserEvent =
   }
   // scanQR carries the scanned sku too, so the feed reflects what was scanned
   | { type: "scanQR"; user: { id: number; result: "pass" | "fail"; sku: string } }
-  | { type: "walkToShelf"; user: { id: number; shelfId: number } }
+  | { type: "walkToShelf"; user: { id: number; shelfId: string } }
   | { type: "inspectItem"; user: { id: number; result: "keep" | "return" } };
 
 // body of POST /:id/status — mirror of the "users.action" model union.
@@ -48,7 +49,7 @@ export type ActionInput =
   | { action: "verify"; payload: { result: "pass" | "fail"; imageURL?: string } }
   | { action: "pay"; payload: { result: "pass" | "fail"; imageURL?: string } }
   | { action: "scanQR"; payload: { result: "pass" | "fail"; sku: string } }
-  | { action: "walkToShelf"; payload: { shelfId: number } }
+  | { action: "walkToShelf"; payload: { shelfId: string } }
   | { action: "inspectItem"; payload: { result: "keep" | "return" } };
 
 // ── external boot roster ──────────────────────────────────────────────

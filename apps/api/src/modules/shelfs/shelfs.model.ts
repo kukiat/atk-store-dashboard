@@ -9,6 +9,8 @@ const ShelfItem = t.Object({
   capacity: t.Number(),
   qty: t.Number(),
   reorder: t.Number(),
+  // per-unit product weight in kg (from the loadcell device's product record)
+  weight: t.Number(),
 });
 
 /**
@@ -16,9 +18,11 @@ const ShelfItem = t.Object({
  * (geometry + stock), served read-only from seed.json.
  */
 const ShelfEntity = t.Object({
-  id: t.Number(),
+  // device_id string from the IoT feed (e.g. "10005" / "BF67EC")
+  id: t.String(),
   name: t.String(),
-  // unique zone code (BEV/SNK/…) — users API resolves a scanQR sku to its shelf
+  // scanQR sku — users API resolves it to a shelf via findBySku (not unique in
+  // the IoT feed, so it resolves to the first match)
   sku: t.String(),
   type: t.Union([t.Literal("wall"), t.Literal("gondola"), t.Literal("checkout")]),
   x: t.Number(),
@@ -30,7 +34,7 @@ const ShelfEntity = t.Object({
 });
 
 export const shelfsModel = new Elysia({ name: "shelfs.model" }).model({
-  "shelfs.params": t.Object({ id: t.Number() }),
+  "shelfs.params": t.Object({ id: t.String() }),
   "shelfs.entity": ShelfEntity,
   "shelfs.list": t.Array(ShelfEntity),
   // success-response envelopes (see ../../envelope)

@@ -1,31 +1,30 @@
 import { Elysia, status } from "elysia";
-import seed from "./seed.json";
-import type { Shelf } from "../../models";
+import { fetchDevices } from "../../utils";
 
-// In-memory stand-in for the future external shelfs API — no DB on purpose.
-// This module serves the mock store layout read-only; seed.json is the whole
-// truth (a copy of the web app's public/mock/shelves.json). Nothing mutates
-// here, so there is no store Map / SSE / event hub like the users module.
-// The Shelf/ShelfItem domain types live in ../../models.
+// Read-only view over the external IoT devices API. The service holds no state:
+// every call refetches the live device list and maps it onto Shelf shape (see
+// fetchDevices in ../../utils/shelfs). No cache on purpose — the web app fetches
+// the layout once on load, so a fresh call per request is cheap. A fetch failure
+// rejects; the plugin's onError turns it into a 502. seed.json is no longer read
+// (kept only as a shape reference for the mapping).
 
 class ShelfsService {
-  private readonly shelves = seed.shelves as Shelf[];
-
-  list() {
-    return this.shelves;
+  async list() {
+    return fetchDevices();
   }
 
-  findById(id: number) {
-    const shelf = this.shelves.find((s) => s.id === id);
+  async findById(id: string) {
+    const shelf = (await fetchDevices()).find((s) => s.id === id);
     if (!shelf) throw status(404, "Shelf not found");
     return shelf;
   }
 
-  // resolve a scanned sku to its shelf (1:1 — one sku per shelf). The users
-  // route uses this to turn a scanQR sku into a walk target; an unknown sku is
-  // a 404 like findById. Online/checkout gating stays with the caller.
-  findBySku(sku: string) {
-    const shelf = this.shelves.find((s) => s.sku === sku);
+  // resolve a scanned sku to its shelf. The users route uses this to turn a
+  // scanQR sku into a walk target. The IoT feed currently returns the same
+  // product sku for every device, so this resolves to the first match (the 1:1
+  // guarantee no longer holds); an unknown sku is a 404 like findById.
+  async findBySku(sku: string) {
+    const shelf = (await fetchDevices()).find((s) => s.sku === sku);
     if (!shelf) throw status(404, `SKU ${sku} not found`);
     return shelf;
   }

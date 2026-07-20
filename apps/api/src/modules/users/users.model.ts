@@ -26,7 +26,7 @@ const UserEntity = t.Object({
   // shelf session (scanning/browsing only) — which shelf they hold at; null
   // otherwise. The session ends on an explicit shelfClose (or leave), so there
   // is no auto-close deadline to expose.
-  shelf_id: t.Nullable(t.Integer()),
+  shelf_id: t.Nullable(t.String()),
   // display-only profile fields — required on the entity, defaulted on create
   email: t.String({ format: "email" }),
   avatar_url: t.String(), // may be "" → UI falls back to initials chip
@@ -86,7 +86,7 @@ export const usersModel = new Elysia({ name: "users.model" }).model({
     }),
     t.Object({
       action: t.Literal("walkToShelf"),
-      payload: t.Object({ shelfId: t.Integer() }),
+      payload: t.Object({ shelfId: t.String({ minLength: 1 }) }),
     }),
     t.Object({
       action: t.Literal("inspectItem"),

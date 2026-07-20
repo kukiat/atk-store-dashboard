@@ -155,7 +155,7 @@ class UsersService {
   // scanQR needs the shelf its sku resolves to; the route owns the shelfs
   // service, so it does the findBySku (+ online/checkout gating) and hands the
   // resolved shelf id in here. Every other action ignores it.
-  applyAction(id: number, input: ActionInput, skuShelfId?: number): User {
+  applyAction(id: number, input: ActionInput, skuShelfId?: string): User {
     switch (input.action) {
       case "enter":
         return this.enter(id);
@@ -245,7 +245,7 @@ class UsersService {
 
   // walk up to the shelf and hold there for a scanQR verdict — no self-scan,
   // the shelf-side mirror of enter/waiting
-  private walkToShelf(id: number, shelfId: number) {
+  private walkToShelf(id: number, shelfId: string) {
     const user = this.mustFind(id);
     if (user.status !== "inside")
       throw status(409, `User is ${user.status}, walkToShelf needs "inside"`);
@@ -268,7 +268,7 @@ class UsersService {
     id: number,
     result: "pass" | "fail",
     sku: string,
-    targetShelfId: number,
+    targetShelfId: string,
   ) {
     const user = this.mustFind(id);
     if (user.status !== "scanning" && user.status !== "inside")

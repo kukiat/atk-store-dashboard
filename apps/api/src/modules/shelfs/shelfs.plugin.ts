@@ -8,13 +8,13 @@ export const shelfsPlugin = new Elysia({ prefix: "/shelfs", tags: ["shelfs"] })
   .use(shelfsService)
   .onError(envelopeError)
 
-  .get("/", ({ shelfsService }) => ok(shelfsService.list()), {
+  .get("/", async ({ shelfsService }) => ok(await shelfsService.list()), {
     response: "shelfs.res.list",
   })
 
   .get(
     "/:id",
-    ({ shelfsService, params }) => ok(shelfsService.findById(params.id)),
+    async ({ shelfsService, params }) => ok(await shelfsService.findById(params.id)),
     {
       params: "shelfs.params",
       response: "shelfs.res.entity",
