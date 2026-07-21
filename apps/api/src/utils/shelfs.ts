@@ -31,6 +31,11 @@ function colorFor(deviceId: string): string {
 // device's whole position block. Drop an entry once the device is fixed upstream.
 const POSITION_OVERRIDES: Record<string, ExternalDevice["position"]> = {
   "BF6600": { x: -3, z: -13.4, rotation: 0, length: 16 },
+  "10005": { x: 7, z: 9, rotation: 0, length: 5.5 },
+  "10003": { x: 1.5, z: 0, rotation: 0, length: 8 },
+  "10002": { x: 13, z: -5, rotation: 270, length: 12 },
+  "10001": { x: -8.5, z: 4, rotation: 0, length: 9 },
+  "BF67EC": { x: -6, z: 10, rotation: 90, length: 7 },
 };
 
 // The IoT feed carries no shelf type (every row is device_type "loadcell"), so
