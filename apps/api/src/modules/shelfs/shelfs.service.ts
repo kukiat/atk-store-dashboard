@@ -51,6 +51,7 @@ class ShelfsService {
           this.loading = null;
         });
     }
+
     return this.loading;
   }
 
