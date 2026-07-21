@@ -89,6 +89,9 @@ const STAT_CARDS = [
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3004';
 const USERS_API_URL = `${API_URL}/users`;
 const CROWD_API_URL = `${API_URL}/crowd`;
+// shelf-scan sessions feed — loadcell pick/return events arrive here and drive
+// the shopper's pick/return gesture (the row's userId maps to the 3D body).
+const SESSIONS_API_URL = `${API_URL}/sessions`;
 // shelves come from the API too now — it fetches the live layout from the
 // external IoT devices feed and maps it onto the Shelf shape (see apps/api).
 const SHELFS_API_URL = `${API_URL}/shelfs`;
@@ -103,7 +106,7 @@ const shelfIdStr = (id) => shelfIndexMap[id] ?? String(id);
 
 // shelf lock mirror (V5): the scene owns the state and streams transitions up
 // via onShelfEvent; this map only drives the UI chips. Offline shelves can't
-// unlock — mirrors the scene's amber-LED rule.
+// unlock — mirrors the scene's red-LED rule.
 const LOCK_LABEL = { locked: 'Locked', open: 'Open', offline: 'Offline' };
 const LOCK_EVENT_META = {
   unlocked: { lvl: 'ok', title: 'Shelf Unlocked', ico: '🔓' },
@@ -513,8 +516,6 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   // identity, or StoreStage tears the scene down) can read the loaded data
   const shelfNameRef = useRef({});
   shelfNameRef.current = shelfName;
-  const offlineRef = useRef(offlineShelves);
-  offlineRef.current = offlineShelves;
   const lockInitRef = useRef(lockInit);
   lockInitRef.current = lockInit;
 
@@ -593,6 +594,21 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
       try { target = JSON.parse(ev.data)?.target; } catch { return; }
       if (typeof target === 'number') peopleRef.current?.setCrowdTarget?.(target);
     });
+    return () => es.close();
+  }, []);
+  // shelf-scan sessions feed: a real loadcell pick/return off a shelf plays the
+  // matching gesture on the shopper the session belongs to (userId → 3D body).
+  // Reuses the same inspectItemUser the users `inspectItem` event drives; a
+  // pick maps to 'keep' (into the basket), a return to 'return' (back on shelf).
+  useEffect(() => {
+    const es = new EventSource(`${SESSIONS_API_URL}/events`);
+    const gesture = (result) => (ev) => {
+      let s;
+      try { s = JSON.parse(ev.data); } catch { return; }
+      if (s && typeof s.userId === 'number') peopleRef.current?.inspectItemUser?.(s.userId, result);
+    };
+    es.addEventListener('picked', gesture('keep'));
+    es.addEventListener('returned', gesture('return'));
     return () => es.close();
   }, []);
   // pull the current target once the scene is ready so it matches the API
@@ -773,9 +789,10 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   }, [selectedPerson]);
   const bindPersonCard = useCallback((el) => { peopleRef.current?.bindCard?.(el); }, []);
 
-  // ---- live stock (seeded from the mock JSON, then simulated ~5s tick) ----
-  // qty/reorder are real fields in the file, so every page load starts from
-  // the exact numbers the mock author wrote — the sim drifts from there.
+  // ---- live stock (seeded from GET /shelfs, then driven live by MQTT) ----
+  // qty seeds from each device's real product.current_qty (0 when the feed omits
+  // it); loadcell pick/return events then push the on-shelf currentQty through
+  // /shelfs/events → the effect below. No simulation — the numbers are real.
   const [stock, setStock] = useState([]);
   const [alerts, setAlerts] = useState([]);
   const stockRef = useRef(stock);
@@ -811,34 +828,38 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     }, ...a].slice(0, 6));
   }, []);
 
+  // shelf state feed (/shelfs/events, both MQTT-driven):
+  //   online — flip the shelf live in the 3D scene (amber LED + locked doors ⇄
+  //            scannable); deviceId is the shelf id (Shelf.id === device_id).
+  //   stock  — a real pick/return changed the on-shelf qty: update that item and,
+  //            when the status worsens (ok→low→out), drop one alert into the feed.
   useEffect(() => {
-    const id = setInterval(() => {
-      const newAlerts = [];
-      const next = stockRef.current.map((it) => {
-        if (offlineRef.current.has(it.shelf)) return it; // offline shelf → frozen, no tick
-        const before = statusOf(it.qty, it.reorder);
-        let qty = Math.max(0, it.qty - (1 + Math.floor(Math.random() * 8))); // sales drain
-        if (qty <= it.reorder && Math.random() < 0.3) {
-          qty = it.capacity;                                                 // urgent restock
-        } else if (Math.random() < 0.05) {
-          qty = Math.min(it.capacity, qty + Math.round(it.capacity * 0.3));  // routine delivery
-        }
-        const after = statusOf(qty, it.reorder);
-        if (statusRank[after] > statusRank[before]) {                        // only when it gets worse
-          newAlerts.push({
-            id: `a${alertSeq++}`,
-            lvl: after === 'out' ? 'warn' : 'caution',
-            title: after === 'out' ? 'Out of Stock' : 'Low Stock',
-            sub: it.name,
-            time: fmtTime(new Date()),
-          });
-        }
-        return { ...it, qty };
-      });
-      setStock(next);
-      if (newAlerts.length) setAlerts((a) => [...newAlerts, ...a].slice(0, 6));
-    }, 5000);
-    return () => clearInterval(id);
+    const es = new EventSource(`${SHELFS_API_URL}/events`);
+    es.addEventListener('online', (ev) => {
+      let d;
+      try { d = JSON.parse(ev.data); } catch { return; }
+      if (d && d.deviceId != null) sceneCtrlRef.current?.setShelfOnline?.(d.deviceId, !!d.online);
+    });
+    es.addEventListener('stock', (ev) => {
+      let s;
+      try { s = JSON.parse(ev.data); } catch { return; }
+      if (!s || s.deviceId == null) return;
+      const it = stockRef.current.find((x) => x.shelf === s.deviceId && x.id === s.sku);
+      if (!it) return;
+      if (statusRank[statusOf(s.qty, it.reorder)] > statusRank[statusOf(it.qty, it.reorder)]) {
+        const after = statusOf(s.qty, it.reorder);
+        setAlerts((a) => [{
+          id: `a${alertSeq++}`,
+          lvl: after === 'out' ? 'warn' : 'caution',
+          title: after === 'out' ? 'Out of Stock' : 'Low Stock',
+          sub: it.name,
+          time: fmtTime(new Date()),
+        }, ...a].slice(0, 6));
+      }
+      setStock((prev) => prev.map((x) =>
+        (x.shelf === s.deviceId && x.id === s.sku ? { ...x, qty: s.qty } : x)));
+    });
+    return () => es.close();
   }, []);
 
   // Esc closes the inspector (mirrors the ✕ / click-empty / click-again paths).

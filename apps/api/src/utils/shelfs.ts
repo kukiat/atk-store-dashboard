@@ -43,11 +43,14 @@ const TYPE_OVERRIDES: Record<string, Shelf["type"]> = {
   "10005": "checkout",
 };
 
-// map one loadcell device onto a Shelf. Fields the IoT feed doesn't carry
-// (capacity/qty/reorder, and colour) are mocked; unit_weight_kg lands on the
-// item as `weight`. Shelf type comes from TYPE_OVERRIDES (default "gondola");
-// other device types are filtered out before we get here.
-function toShelf(d: ExternalDevice): Shelf {
+// map one loadcell device onto a Shelf. Stock comes from the real product now:
+// qty = current_qty (0 when the feed omits it — an unconfigured placeholder
+// device), capacity = max_qty. reorder isn't in the feed, so it's derived as
+// 10% of capacity. `colour` is still a deterministic mock; unit_weight_kg lands
+// on the item as `weight`. Shelf type comes from TYPE_OVERRIDES (default
+// "gondola"); other device types are filtered out before we get here.
+export function toShelf(d: ExternalDevice): Shelf {
+  const capacity = d.product.max_qty;
   return {
     id: d.device_id,
     name: d.device_name,
@@ -63,21 +66,29 @@ function toShelf(d: ExternalDevice): Shelf {
         id: d.product.sku,
         name: d.product.item_name,
         color: colorFor(d.device_id),
-        capacity: 10,
-        qty: 7,
-        reorder: 3,
+        capacity,
+        qty: d.product.current_qty ?? 0,
+        reorder: Math.max(1, Math.round(capacity * 0.1)),
         weight: d.product.unit_weight_kg,
       }
     ],
   };
 }
 
-// Fetch the shelf layout from the external IoT devices API and map it onto our
-// Shelf shape. Called per request by the shelfs service (no cache — the web app
-// fetches once on load, so freshness is cheap). A non-2xx or network failure
-// rejects; the caller turns that into a 502. Only loadcell devices become
-// shelves — that is the only device_type we have a shelf mapping for.
-export async function fetchDevices(): Promise<Shelf[]> {
+// Apply the per-device position fixup (if any) so callers never see the
+// half-configured raw block. Shared by both the Shelf mapping and the raw
+// device lookup so a shelf and its ExternalDevice stay in lockstep.
+function withOverrides(d: ExternalDevice): ExternalDevice {
+  const position = POSITION_OVERRIDES[d.device_id];
+  return position ? { ...d, position } : d;
+}
+
+// Fetch the raw loadcell devices from the external IoT API (overrides applied,
+// non-loadcell rows dropped). The shelfs service calls this once to seed its
+// ExternalDevice cache, then owns the list from there on (MQTT status flips
+// online in place — see ShelfsService). A non-2xx or network failure rejects;
+// the caller turns that into a 502.
+export async function fetchLoadcellDevices(): Promise<ExternalDevice[]> {
   const url = `${process.env.IOT_API_URL}/devices`;
   const res = await fetch(url, {
     headers: { "x-iot-api-key": process.env.IOT_API_KEY ?? "" },
@@ -87,8 +98,5 @@ export async function fetchDevices(): Promise<Shelf[]> {
   const body = (await res.json()) as { data: ExternalDevice[] };
   return (body.data ?? [])
     .filter((d) => d.device_type === "loadcell")
-    .map((d) => {
-      const position = POSITION_OVERRIDES[d.device_id];
-      return toShelf(position ? { ...d, position } : d);
-    });
+    .map(withOverrides);
 }
