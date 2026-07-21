@@ -50,11 +50,16 @@ const TYPE_OVERRIDES: Record<string, Shelf["type"]> = {
 // on the item as `weight`. Shelf type comes from TYPE_OVERRIDES (default
 // "gondola"); other device types are filtered out before we get here.
 export function toShelf(d: ExternalDevice): Shelf {
-  const capacity = d.product.max_qty;
+  // product is null on unconfigured devices — fall back to device-level fields
+  // and an empty stock line so the shelf still renders. capacity falls back to a
+  // nonzero default (the scene validator requires capacity > 0), since a null
+  // product carries no max_qty.
+  const p = d.product;
+  const capacity = p?.max_qty || 10;
   return {
     id: d.device_id,
     name: d.device_name,
-    sku: d.product.sku,
+    sku: p?.sku ?? "",
     type: TYPE_OVERRIDES[d.device_id] ?? "gondola",
     x: d.position.x,
     z: d.position.z,
@@ -63,13 +68,13 @@ export function toShelf(d: ExternalDevice): Shelf {
     online: d.status === "online",
     items: [
       {
-        id: d.product.sku,
-        name: d.product.item_name,
+        id: p?.sku ?? d.device_id, // no product → key the row off the device id
+        name: p?.item_name ?? d.device_name,
         color: colorFor(d.device_id),
         capacity,
-        qty: d.product.current_qty ?? 0,
+        qty: p?.current_qty ?? 0,
         reorder: Math.max(1, Math.round(capacity * 0.1)),
-        weight: d.product.unit_weight_kg,
+        weight: p?.unit_weight_kg ?? 0,
       }
     ],
   };
