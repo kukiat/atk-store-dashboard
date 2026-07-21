@@ -1,4 +1,4 @@
-# atk-store-dashboard
+## atk-store-dashboard
 
 A 3D smart-store dashboard that visualises a live retail floor in real time. A
 Babylon.js scene renders the store — shoppers walking in through the gates,
