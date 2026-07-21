@@ -3,12 +3,14 @@ import { usersModel } from "./users.model";
 import { usersService } from "./users.service";
 import type { UserEvent } from "../../models";
 import { shelfsService } from "../shelfs";
+import { sessionsService } from "../sessions/sessions.service";
 import { ok, envelopeError } from "../../envelope";
 
 export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
   .use(usersModel)
   .use(usersService)
   .use(shelfsService)
+  .use(sessionsService)
   // wrap this module's errors (thrown status / validation) in the { data,
   // error, success } envelope. Scoped to /users routes only — the SSE feed is
   // skipped inside envelopeError. Successes are wrapped by ok() in each handler.
@@ -136,27 +138,44 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
   // session has no auto-close timer — it holds open until shelfClose (or leave).
   .post(
     "/:id/status",
-    ({ usersService, shelfsService, params, body }) => {
+    async ({ usersService, shelfsService, sessionsService, params, body }) => {
       // a shelf command must target a shelf with doors: exists (404), powered
       // (409), and not a checkout counter (409) — the shelfs service owns the
       // layout, users only the people. walkToShelf names the shelf by id;
       // scanQR names it by sku (resolved 1:1), and the resolved id is handed to
-      // the service so it knows where to walk the shopper.
-      const assertHasDoors = (shelf: { id: number; online: boolean; type: string }) => {
+      // the service so it knows where to walk the shopper. The shelfs service
+      // fetches the live IoT layout, so these lookups are async now.
+      const assertHasDoors = (shelf: { id: string; online: boolean; type: string }) => {
         if (!shelf.online)
           throw status(409, `Shelf ${shelf.id} is offline, doors never unlock`);
         if (shelf.type === "checkout")
           throw status(409, `Shelf ${shelf.id} is a checkout counter — no doors`);
       };
-      let skuShelfId: number | undefined;
+      let skuShelfId: string | undefined;
+      // scanQR resolves the shelf AND its raw device in one fetch — the device
+      // (its device_id) is stashed on the shelf session opened below so the
+      // loadcell MQTT feed can be matched back to this shopper.
+      let resolved: Awaited<ReturnType<typeof shelfsService.resolveSku>> | undefined;
       if (body.action === "walkToShelf") {
-        assertHasDoors(shelfsService.findById(body.payload.shelfId));
+        assertHasDoors(await shelfsService.findById(body.payload.shelfId));
       } else if (body.action === "scanQR") {
-        const shelf = shelfsService.findBySku(body.payload.sku); // 404 if unknown
-        assertHasDoors(shelf);
-        skuShelfId = shelf.id;
+        resolved = await shelfsService.resolveSku(body.payload.sku); // 404 if unknown
+        assertHasDoors(resolved.shelf);
+        skuShelfId = resolved.shelf.id;
       }
-      return ok(usersService.applyAction(params.id, body, skuShelfId));
+      const user = usersService.applyAction(params.id, body, skuShelfId);
+      // open the shelf session only on a scanQR *pass*, and only after
+      // applyAction succeeds — a wrong-state 409 throws above and never leaves a
+      // dangling row. open() replaces any stale row for this shopper.
+      if (body.action === "scanQR" && body.payload.result === "pass" && resolved) {
+        sessionsService.open({
+          userId: params.id,
+          sku: body.payload.sku,
+          shelf: resolved.shelf,
+          device: resolved.device,
+        });
+      }
+      return ok(user);
     },
     {
       params: "users.params",

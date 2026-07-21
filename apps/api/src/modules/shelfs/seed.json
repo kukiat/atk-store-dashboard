@@ -1,5 +1,5 @@
 {
-  "_readme": "Mock store layout for the in-memory shelfs store — a copy of apps/web/public/mock/shelves.json. This module mocks a future external shelfs API, so it serves this static layout read-only; edit this file to change the shelf list the API returns. Each shelf: id (unique int, shown as the zone badge), sku (unique zone code, e.g. BEV/SNK — the users API resolves a scanQR sku to its shelf 1:1), type (wall | gondola | checkout), x/z world position, rotation in degrees, length in meters, online (false = amber LED, doors never unlock, stock frozen), items (qty/reorder are the live-stock starting values).",
+  "_readme": "SHAPE REFERENCE ONLY — no longer served. The shelfs API now fetches the live layout from the external IoT devices API and maps it onto this Shelf shape (see src/utils/shelfs.ts fetchDevices). This file is kept as an example of the mapped output. Each shelf: id (device_id string, shown as the badge), sku (scanQR code — not unique in the IoT feed), type (wall | gondola | checkout — assigned per device_id via TYPE_OVERRIDES in src/utils/shelfs.ts, default gondola), x/z world position, rotation in degrees, length in meters, online (false = amber LED, doors never unlock, stock frozen), items (each with a weight in kg; qty/reorder/capacity are mocked).",
   "shelves": [
     {
       "id": 1,

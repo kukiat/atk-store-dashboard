@@ -1,6 +1,9 @@
 import { Elysia, status } from "elysia";
 import type { ActionInput, AuthMethod, User, UserEvent } from "../../models";
 import { fetchBootRoster } from "../../utils";
+// imported from the service file (not the ../sessions barrel) to avoid a cycle:
+// the barrel re-exports sessions.plugin, which imports the users service back.
+import { sessionsServiceInstance } from "../sessions/sessions.service";
 
 // In-memory stand-in for the future external users API — no DB on purpose.
 // State lives and dies with the process; the boot roster is fetched once at
@@ -46,7 +49,14 @@ class UsersService {
   private nextId = 1;
   private listeners = new Set<(e: UserEvent) => void>();
 
-  constructor(roster: User[]) {
+  // the shelf-session ledger this service tears rows out of whenever a shopper
+  // leaves a browse session (see endShelfSession). Injected so the dependency
+  // stays one-way (users → sessions); the MQTT/force-close close paths route
+  // back through here via the shelfClose action, keeping removal in one place.
+  constructor(
+    roster: User[],
+    private sessions: typeof sessionsServiceInstance,
+  ) {
     this.resetRoster(roster);
   }
 
@@ -70,7 +80,10 @@ class UsersService {
     // fresh crowd shows up on the next dashboard reload.
     const gone = [...this.store.keys()];
     this.resetRoster(roster);
-    for (const id of gone) this.emit({ type: "removed", user: { id } });
+    for (const id of gone) {
+      this.sessions.closeByUser(id); // drop any browse rows the wiped roster left behind
+      this.emit({ type: "removed", user: { id } });
+    }
     return this.list();
   }
 
@@ -138,13 +151,19 @@ class UsersService {
 
   remove(id: number) {
     if (!this.store.delete(id)) throw status(404, "User not found");
+    this.sessions.closeByUser(id); // a browsing user deleted mid-session leaves no orphan row
     this.emit({ type: "removed", user: { id } });
     return { id };
   }
 
-  // wipe a shelf session off the entity (does NOT emit — callers own that)
+  // wipe a shelf session off the entity AND tear down its ledger row. This is
+  // the single removal point for shelf-session rows: shelfClose, leave and
+  // walkAway all funnel through here, so a row exists iff its user is browsing.
+  // closeByUser emits the sessions `closed` SSE; this method itself does NOT
+  // emit a user event — callers own that.
   private endShelfSession(user: User) {
     user.shelf_id = null;
+    this.sessions.closeByUser(user.id);
   }
 
   // The four status transitions all enter through one door now: POST
@@ -155,7 +174,7 @@ class UsersService {
   // scanQR needs the shelf its sku resolves to; the route owns the shelfs
   // service, so it does the findBySku (+ online/checkout gating) and hands the
   // resolved shelf id in here. Every other action ignores it.
-  applyAction(id: number, input: ActionInput, skuShelfId?: number): User {
+  applyAction(id: number, input: ActionInput, skuShelfId?: string): User {
     switch (input.action) {
       case "enter":
         return this.enter(id);
@@ -245,7 +264,7 @@ class UsersService {
 
   // walk up to the shelf and hold there for a scanQR verdict — no self-scan,
   // the shelf-side mirror of enter/waiting
-  private walkToShelf(id: number, shelfId: number) {
+  private walkToShelf(id: number, shelfId: string) {
     const user = this.mustFind(id);
     if (user.status !== "inside")
       throw status(409, `User is ${user.status}, walkToShelf needs "inside"`);
@@ -268,7 +287,7 @@ class UsersService {
     id: number,
     result: "pass" | "fail",
     sku: string,
-    targetShelfId: number,
+    targetShelfId: string,
   ) {
     const user = this.mustFind(id);
     if (user.status !== "scanning" && user.status !== "inside")
@@ -359,7 +378,14 @@ class UsersService {
 // external roster is in hand — see fetchBootRoster's failure note in ../../utils/users.
 const bootRoster = await fetchBootRoster();
 
+// raw instance is exported too (for the MQTT loadcell handler, which lives
+// outside the Elysia graph and calls applyAction directly on shelf_close).
+export const usersServiceInstance = new UsersService(
+  bootRoster,
+  sessionsServiceInstance,
+);
+
 export const usersService = new Elysia({ name: "users.service" }).decorate(
   "usersService",
-  new UsersService(bootRoster),
+  usersServiceInstance,
 );

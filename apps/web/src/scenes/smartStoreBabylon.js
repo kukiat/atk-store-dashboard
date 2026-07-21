@@ -104,7 +104,8 @@ export function validateShelfLayout(shelves) {
   const seen = new Set();
   for (const sh of shelves) {
     const tag = `shelf ${sh?.id ?? '?'}`;
-    if (!Number.isInteger(sh?.id) || sh.id < 1) { errors.push(`${tag}: id must be a positive integer`); continue; }
+    // ids are device_id strings from the IoT feed (e.g. "10005" / "BF67EC")
+    if (typeof sh?.id !== 'string' || !sh.id) { errors.push(`${tag}: id must be a non-empty string`); continue; }
     if (seen.has(sh.id)) errors.push(`${tag}: duplicate id`);
     seen.add(sh.id);
     if (!SHELF_TYPE[sh.type]) { errors.push(`${tag}: unknown type "${sh.type}"`); continue; }
@@ -301,6 +302,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     if (!prodMats.has(col)) prodMats.set(col, pbr('prod', { color: col, roughness: 0.7 }));
     return prodMats.get(col);
   };
+  // pick a random palette colour that differs from the previous box in the row,
+  // so a shelf reads as a lively "alternating" mix rather than same-colour clumps
+  const pickColor = (palette, prev) => {
+    let c = palette[(Math.random() * palette.length) | 0];
+    if (palette.length > 1) while (c === prev) c = palette[(Math.random() * palette.length) | 0];
+    return c;
+  };
 
   // ---------- mesh helpers ----------
   let _id = 0;
@@ -395,6 +403,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // product boxes on the shelves tint from the shelf's own catalogue items so
   // the 3D scene and the LIVE STOCK panel tell one story; shelves with no
   // items fall back to the global palette
+  // reserved: pass this into gondola/wallShelf's `colors` param to tint boxes
+  // from a shelf's own item colours instead of the global palette
   const itemPalette = (sh) =>
     sh.items?.length ? sh.items.map((it) => parseInt(it.color.slice(1), 16)) : productColors;
 
@@ -408,11 +418,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       box(length, 0.1, depth, mat.shelf, 0, ly - 0.05, 0).parent = g;
       for (let side = -1; side <= 1; side += 2) {
         const pz = side * (depth / 2 - 0.32);
+        let prev = -1; // last colour placed in this row — kept distinct from the next
         for (let i = 0; i < length - 1; i++) {
           if (Math.random() < 0.1) continue;
           const px = -length / 2 + 0.75 + i;
           const ph = 0.5 + Math.random() * 0.4;
-          const col = colors[(i + Math.round(ly * 2)) % colors.length];
+          const col = pickColor(colors, prev);
+          prev = col;
           box(0.62, ph, 0.55, prodMat(col), px, ly, pz).parent = g;
         }
         box(length, 0.16, 0.04, mat.label, 0, ly + 0.08, side * (depth / 2 + 0.02)).parent = g;
@@ -433,11 +445,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const levels = [1.0, 2.3, 3.6, 4.9];
     for (const ly of levels) {
       box(length, 0.1, depth, mat.shelf, 0, ly - 0.05, 0).parent = g;
+      let prev = -1; // last colour placed in this row — kept distinct from the next
       for (let i = 0; i < length - 1; i++) {
         if (Math.random() < 0.08) continue;
         const px = -length / 2 + 0.7 + i;
         const ph = 0.55 + Math.random() * 0.45;
-        const col = colors[(i * 2 + Math.round(ly)) % colors.length];
+        const col = pickColor(colors, prev);
+        prev = col;
         box(0.6, ph, 0.5, prodMat(col), px, ly, 0.1).parent = g;
       }
       box(length, 0.16, 0.04, mat.label, 0, ly + 0.08, depth / 2 - 0.02).parent = g;
@@ -469,11 +483,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const td = SHELF_TYPE[sh.type];
     if (!td) continue; // validateShelfLayout already flagged it
     const rotY = ((sh.rotation ?? 0) * Math.PI) / 180;
-    const colors = itemPalette(sh);
+    // boxes use the global productColors palette (gondola/wallShelf defaults) so
+    // every shelf reads as a colourful random mix; pass itemPalette(sh) here to
+    // tint from the shelf's own item colours instead
     const unit =
-      sh.type === 'wall' ? wallShelf(sh.length, rotY, sh.x, sh.z, colors)
+      sh.type === 'wall' ? wallShelf(sh.length, rotY, sh.x, sh.z)
       : sh.type === 'checkout' ? checkout(sh.x, sh.z, rotY)
-      : gondola(sh.x, sh.z, sh.length, rotY, colors);
+      : gondola(sh.x, sh.z, sh.length, rotY);
     zones.push({
       id: sh.id, type: sh.type, rotY, data: sh,
       pos: new Vector3(sh.x, td.badgeH, sh.z),
@@ -549,7 +565,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
 
   const badges = [];
   zones.forEach((zn, i) => {
-    const b = makeBadge(String(zn.id).padStart(2, '0'));
+    // badge shows a 1-based shelf index (01, 02, …) for readability; the real
+    // device_id lives on metadata.shelfId for picking/selection
+    const b = makeBadge(String(i + 1).padStart(2, '0'));
     b.position.copyFrom(zn.pos);
     b.metadata = { shelfId: zn.id, base: zn.pos.y, t: i * 0.9 };
     b.parent = world;
@@ -576,7 +594,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // one master switch that opens every seam at once. The scene owns the lock
   // state machine and reports shelf-level transitions up through
   // onShelfEvent({ shelfId, type }); the dashboard only mirrors it. Zone 5 is
-  // the offline shelf — amber LED, never unlocks — and zone 6 (checkout
+  // the offline shelf — red LED, never unlocks — and zone 6 (checkout
   // counter) has nothing to enclose, so it gets the status strip only. Doors
   // slide toward their segment center (openings appear at the segment seams),
   // so no pane ever overhangs the shelf ends.
@@ -2660,11 +2678,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   }
 
   // ---------- browse slots: generated from every shelf's door seams ----------
-  // every online, non-checkout shelf takes a stand point + QR pedestal on
-  // each door seam of each glass face (gondolas get both sides), so the glass
-  // parts right in front of the shopper exactly like the classic wall-shelf
-  // slots. Offline shelves get none — their doors never open, so nobody is
-  // sent to scan at a dead reader.
+  // every non-checkout shelf takes a stand point + QR pedestal on each door seam
+  // of each glass face (gondolas get both sides), so the glass parts right in
+  // front of the shopper exactly like the classic wall-shelf slots. Offline
+  // shelves get their slots too — the pedestal is a physical fixture regardless
+  // of power — but freePickSlots gates them out live, so nobody is sent to a
+  // dead reader until a status heartbeat brings the shelf online (setShelfOnline).
   const qrTex = new DynamicTexture('qrTex', { width: 128, height: 128 }, scene, true);
   {
     const ctx = qrTex.getContext();
@@ -2694,7 +2713,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const SLOTS = []; // { x, z, ry, reach, shelfId, seam, plate, palette, route }
   for (const zn of zones) {
     const td = SHELF_TYPE[zn.type];
-    if (!td.lock || !zn.data.online) continue;
+    if (!td.lock) continue; // checkout has no doors; offline shelves keep their
+                            // slots (gated live in freePickSlots) so setShelfOnline
+                            // can wake them into scannability without a reload
     const lk = lockById.get(zn.id);
     const colors = itemPalette(zn.data);
     const wm = zn.unit.computeWorldMatrix(true);
@@ -2840,8 +2861,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       ry: bry + (Math.random() * 2 - 1) * 0.16,
     };
   }
+  // free = unreserved AND on a shelf that's currently online. The offline check
+  // is live (lk.offline flips via setShelfOnline), so an offline shelf never
+  // draws an autonomous browser and becomes eligible the instant it comes online.
   const freePickSlots = () => SLOTS.map((_, i) => i)
-    .filter((i) => !shoppers.some((p) => p.slot === i));
+    .filter((i) => !shoppers.some((p) => p.slot === i) && !lockById.get(SLOTS[i].shelfId).offline);
 
   // shared session setup: reserve the slot, size the basket, aim the
   // facing/sideways vectors the pick cycle animates along (the item itself is
@@ -4319,10 +4343,14 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
         pnl.mesh.position.x = pnl.closedX - pnl.dir * pnl.slide * amt;
       }
       let led;
-      if (lk.offline) led = _ledCol.copyFrom(LOCK_AMBER).scaleInPlace(0.5 + 0.5 * Math.abs(Math.sin(time * 1.7)));
+      // traffic-light status: red = offline (dead), amber = online-but-locked
+      // (held), green = online-and-open. The pulse stays tied to the STATE, not
+      // the colour — offline breathes to draw the eye to the one dead shelf,
+      // a resting locked shelf sits steady.
+      if (lk.offline) led = _ledCol.copyFrom(LOCK_RED).scaleInPlace(0.5 + 0.5 * Math.abs(Math.sin(time * 1.7)));
       else if (lk.flash > 0) { lk.flash -= dt; led = _ledCol.copyFrom(LOCK_GREEN).scaleInPlace(1.25 + 0.45 * Math.sin(time * 12)); }
       else if (time - lk.scanStamp < 0.12) led = _ledCol.copyFrom(ACCENT).scaleInPlace(1 + 0.4 * Math.sin(time * 14));
-      else if (lk.locked) led = _ledCol.copyFrom(LOCK_RED).scaleInPlace(0.9);
+      else if (lk.locked) led = _ledCol.copyFrom(LOCK_AMBER).scaleInPlace(0.9);
       else led = _ledCol.copyFrom(LOCK_GREEN);
       for (const m of lk.ledMats) m.emissiveColor.copyFrom(led);
       if (lk.tagT < 1.6) { // "UNLOCKED" pop: drift up, hold, fade
@@ -4515,8 +4543,21 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     if (canvas.parentNode === container) container.removeChild(canvas);
   }
 
+  // MQTT loadcell status heartbeat (via /shelfs/events → Dashboard): flip a
+  // shelf online/offline live. lk.offline already drives the LED (red pulse),
+  // door glide and scan gating in the frame loop, and freePickSlots reads it
+  // live — so setting the flag is the whole job. Offline blocks NEW browsers
+  // (doesn't evict a shopper mid-session); online makes the shelf scannable
+  // again. id is the shelf id (== device_id). Unknown/checkout id → false.
+  function setShelfOnline(id, online) {
+    const lk = lockById.get(id);
+    if (!lk) return false;
+    lk.offline = !online;
+    return true;
+  }
+
   const controller = {
-    dispose, selectShelf, setFloor, scene,
+    dispose, selectShelf, setFloor, setShelfOnline, scene,
     _step: (dt = 0.05, n = 1) => { for (let i = 0; i < n; i++) frame(dt); }, // debug fast-forward
 
     // crowd stepper in the dashboard; counts() feeds the UI (walking/browsing

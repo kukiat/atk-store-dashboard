@@ -481,12 +481,14 @@ canvas { display: block; }
 /* shelf lock chips (V5 — mirrors the 3D LED colors) */
 .sl-lock { margin-left: auto; font-size: 9px; letter-spacing: .07em; font-weight: 700; padding: 1.5px 6px; border-radius: 4px; flex: none; }
 .sl-lock + .sl-state { margin-left: 8px; }
-.sl-lock.locked { background: rgba(226,87,76,.14); color: #e2574c; }
+/* traffic-light status (mirrors the scene LED): amber = online-but-locked,
+   green = open, red = offline */
+.sl-lock.locked { background: rgba(239,178,58,.14); color: #efb23a; }
 .sl-lock.open { background: rgba(76,175,114,.16); color: #4caf72; }
-.sl-lock.offline { background: rgba(239,178,58,.14); color: #efb23a; }
-.lock-txt.locked { color: #e2574c; }
+.sl-lock.offline { background: rgba(226,87,76,.14); color: #e2574c; }
+.lock-txt.locked { color: #efb23a; }
 .lock-txt.open { color: #4caf72; }
-.lock-txt.offline { color: #efb23a; }
+.lock-txt.offline { color: #e2574c; }
 .view-all { display: inline-block; margin-top: 12px; color: var(--accent); font-size: 12px; cursor: pointer; }
 .view-all.sm { margin: 0; font-size: 11px; }
 
@@ -506,7 +508,7 @@ canvas { display: block; }
 .stk-filter { display: inline-flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 600; letter-spacing: .04em; color: #35c3ff; background: rgba(53,195,255,.12); border: 1px solid rgba(53,195,255,.35); border-radius: 999px; padding: 3px 9px; cursor: pointer; }
 .stk-filter:hover { background: rgba(53,195,255,.2); }
 .stk-filter-x { font-size: 13px; line-height: 1; opacity: .8; }
-.stk-offline { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #efb23a; background: rgba(239,178,58,.12); border-radius: 8px; padding: 7px 10px; margin-bottom: 10px; }
+.stk-offline { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #e2574c; background: rgba(226,87,76,.12); border-radius: 8px; padding: 7px 10px; margin-bottom: 10px; }
 .stk-empty { color: #6f86b8; font-size: 12px; padding: 8px 2px; }
 .stock-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
 .stk-row { display: flex; align-items: center; gap: 10px; padding: 4px 6px; border-radius: 8px; transition: background .45s ease; }

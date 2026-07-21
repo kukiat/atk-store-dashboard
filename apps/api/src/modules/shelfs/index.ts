@@ -1,2 +1,2 @@
 export { shelfsPlugin } from "./shelfs.plugin";
-export { shelfsService } from "./shelfs.service";
+export { shelfsService, shelfsServiceInstance } from "./shelfs.service";

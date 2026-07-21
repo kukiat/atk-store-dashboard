@@ -2,3 +2,4 @@
 // its helpers from here instead of declaring them alongside the class.
 export * from "./users";
 export * from "./crowd";
+export * from "./shelfs";
