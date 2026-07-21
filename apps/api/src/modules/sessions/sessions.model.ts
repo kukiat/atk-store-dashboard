@@ -35,12 +35,18 @@ const ExternalDevice = t.Object({
   device_type: t.String(),
   status: t.String(),
   enabled: t.Boolean(),
-  product: t.Object({
-    sku: t.String(),
-    item_name: t.String(),
-    unit_weight_kg: t.Number(),
-    max_qty: t.Number(),
-  }),
+  // null on unconfigured devices (mirrors ExternalDevice.product in ../../models);
+  // a session only ever holds a product-bearing device, but the schema stays
+  // faithful. current_qty is optional (only configured devices carry it).
+  product: t.Nullable(
+    t.Object({
+      sku: t.String(),
+      item_name: t.String(),
+      unit_weight_kg: t.Number(),
+      max_qty: t.Number(),
+      current_qty: t.Optional(t.Number()),
+    }),
+  ),
   position: t.Object({
     x: t.Number(),
     z: t.Number(),

@@ -82,7 +82,10 @@ export type ExternalDevice = {
   event_topic: string;
   drift_topic: string;
   payload_format: string;
-  product: ExternalDeviceProduct;
+  // null on unconfigured devices — the live feed ships `"product": null` until a
+  // product is assigned (all 6 devices were null on 2026-07-21). Consumers must
+  // guard: no product → placeholder shelf item, no sku match, no stock.
+  product: ExternalDeviceProduct | null;
   position: { x: number; z: number; rotation: number; length: number };
   enabled: boolean;
   status: string; // "online" | "offline" — drives Shelf.online

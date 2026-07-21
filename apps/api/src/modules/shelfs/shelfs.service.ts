@@ -68,7 +68,7 @@ class ShelfsService {
   // product sku for every device, so this resolves to the first match; an
   // unknown sku is a 404 like findById.
   async findBySku(sku: string) {
-    const d = (await this.ensure()).find((x) => x.product.sku === sku);
+    const d = (await this.ensure()).find((x) => x.product?.sku === sku);
     if (!d) throw status(404, `SKU ${sku} not found`);
     return toShelf(d);
   }
@@ -78,11 +78,14 @@ class ShelfsService {
   // (device_id) is stashed on the shelf session. Both are fresh copies — a
   // snapshot — so a later online flip doesn't mutate an open session's device.
   async resolveSku(sku: string) {
-    const d = (await this.ensure()).find((x) => x.product.sku === sku);
+    const d = (await this.ensure()).find((x) => x.product?.sku === sku);
     if (!d) throw status(404, `SKU ${sku} not found`);
     // deep-copy product too so a later setOnline/setStock on the cache doesn't
     // mutate the frozen snapshot the shelf session holds.
-    return { shelf: toShelf(d), device: { ...d, product: { ...d.product } } };
+    return {
+      shelf: toShelf(d),
+      device: { ...d, product: d.product ? { ...d.product } : null },
+    };
   }
 
   // MQTT loadcell/main/+/status heartbeat → online authority. Records the value
@@ -107,7 +110,7 @@ class ShelfsService {
   // → no-op (stock reseeds from current_qty on the next GET /shelfs anyway).
   setStock(deviceId: string, sku: string, qty: number) {
     const d = this.cache?.find((x) => x.device_id === deviceId);
-    if (!d || d.product.sku !== sku) return;
+    if (!d || !d.product || d.product.sku !== sku) return; // no product → no stock
     if (d.product.current_qty === qty) return; // dedup — no real change
     d.product.current_qty = qty;
     this.emit({ type: "stock", deviceId, sku, qty });

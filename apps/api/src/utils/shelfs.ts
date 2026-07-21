@@ -31,6 +31,11 @@ function colorFor(deviceId: string): string {
 // device's whole position block. Drop an entry once the device is fixed upstream.
 const POSITION_OVERRIDES: Record<string, ExternalDevice["position"]> = {
   "BF6600": { x: -3, z: -13.4, rotation: 0, length: 16 },
+  "10005": { x: 7, z: 9, rotation: 0, length: 5.5 },
+  "10003": { x: 1.5, z: 0, rotation: 0, length: 8 },
+  "10002": { x: 13, z: -5, rotation: 270, length: 12 },
+  "10001": { x: -8.5, z: 4, rotation: 0, length: 9 },
+  "BF67EC": { x: -6, z: 10, rotation: 90, length: 7 },
 };
 
 // The IoT feed carries no shelf type (every row is device_type "loadcell"), so
@@ -50,11 +55,16 @@ const TYPE_OVERRIDES: Record<string, Shelf["type"]> = {
 // on the item as `weight`. Shelf type comes from TYPE_OVERRIDES (default
 // "gondola"); other device types are filtered out before we get here.
 export function toShelf(d: ExternalDevice): Shelf {
-  const capacity = d.product.max_qty;
+  // product is null on unconfigured devices — fall back to device-level fields
+  // and an empty stock line so the shelf still renders. capacity falls back to a
+  // nonzero default (the scene validator requires capacity > 0), since a null
+  // product carries no max_qty.
+  const p = d.product;
+  const capacity = p?.max_qty || 10;
   return {
     id: d.device_id,
     name: d.device_name,
-    sku: d.product.sku,
+    sku: p?.sku ?? "",
     type: TYPE_OVERRIDES[d.device_id] ?? "gondola",
     x: d.position.x,
     z: d.position.z,
@@ -63,13 +73,13 @@ export function toShelf(d: ExternalDevice): Shelf {
     online: d.status === "online",
     items: [
       {
-        id: d.product.sku,
-        name: d.product.item_name,
+        id: p?.sku ?? d.device_id, // no product → key the row off the device id
+        name: p?.item_name ?? d.device_name,
         color: colorFor(d.device_id),
         capacity,
-        qty: d.product.current_qty ?? 0,
+        qty: p?.current_qty ?? 0,
         reorder: Math.max(1, Math.round(capacity * 0.1)),
-        weight: d.product.unit_weight_kg,
+        weight: p?.unit_weight_kg ?? 0,
       }
     ],
   };
