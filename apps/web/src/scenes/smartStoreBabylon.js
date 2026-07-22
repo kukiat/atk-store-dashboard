@@ -28,6 +28,7 @@ import {
   DefaultRenderingPipeline, ImageProcessingConfiguration, Scalar, SceneLoader, Matrix, Quaternion,
 } from '@babylonjs/core';
 import '@babylonjs/loaders/glTF';
+import { retargetClips } from './retargetMixamo';
 
 // ---------- store architecture (NOT data-driven) ----------
 // The building itself — walls, doors, gates, the shoppers' walk loop and the
@@ -1204,17 +1205,55 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // cheaper to parse). files load once into an AssetContainer, then every
   // person is a clone that owns its materials (per-person tints). appears
   // async; check metadata.ready.
-  const CHAR_SCALE = 0.8; // raw models are ~3.3 units tall, scene humans ~2.6
+  // Every shopper is normalized to the same on-screen height regardless of the
+  // source model's native units: Quaternius models are ~3.3 units tall (× the
+  // old 0.8 scale ≈ 2.64), Mixamo exports are ~200 (centimetres). We measure the
+  // bind-pose height at load and scale to TARGET_H so a swapped-in model can't
+  // come out giant or tiny. CHAR_SCALE stays only as a fallback.
+  const CHAR_SCALE = 0.8;
+  const TARGET_H = 3.325 * CHAR_SCALE; // ≈ 2.66 — the canonical Casual_Male height
+  const DONOR_FILE = 'Casual_Male'; // ships the Idle/Walk/PickUp clips we retarget
   const CHAR_FILES = [
-    'Casual_Male', 'Casual_Female', 'Casual2_Female', 'Casual3_Male', 'Suit_Male',
-    'Casual2_Male', 'Casual3_Female', 'OldClassy_Female', 'Worker_Male',
+    'Casual_Male',
+    'Casual_Female',
+    'Casual2_Female',
+    'Casual3_Male',
+    'Suit_Male',
+    'Casual2_Male',
+    'Casual3_Female',
+    'OldClassy_Female',
+    'Worker_Male'
   ];
   const charCache = new Map(); // file -> Promise<AssetContainer>
   function loadCharContainer(file) {
     if (!charCache.has(file)) {
-      charCache.set(file, SceneLoader.LoadAssetContainerAsync('/models/', file + '.glb', scene));
+      const p = SceneLoader.LoadAssetContainerAsync('/models/', file + '.glb', scene)
+        .then(async (container) => {
+          // a model that ships no clips (e.g. a Mixamo rig) borrows the crowd's
+          // Idle/Walk/PickUp, retargeted from the donor onto its own skeleton so
+          // it moves in lock-step with everyone else instead of standing frozen
+          if (container.animationGroups.length === 0 && file !== DONOR_FILE) {
+            const donor = await loadCharContainer(DONOR_FILE);
+            try { retargetClips(donor, container, scene); }
+            catch (e) { console.error('[retarget] failed for', file, e); }
+          }
+          return container;
+        });
+      charCache.set(file, p);
     }
     return charCache.get(file);
+  }
+  // bind-pose height of an instantiated root, from its child meshes' world AABBs
+  function measureHeight(root) {
+    let minY = Infinity, maxY = -Infinity;
+    for (const m of root.getChildMeshes()) {
+      m.computeWorldMatrix(true);
+      for (const v of m.getBoundingInfo().boundingBox.vectorsWorld) {
+        if (v.y < minY) minY = v.y;
+        if (v.y > maxY) maxY = v.y;
+      }
+    }
+    return maxY - minY;
   }
   // ---------- per-person look (hair / skin / clothes tints) ----------
   // Quaternius materials are flat baseColorFactors with stable names ('Hair',
@@ -1272,7 +1311,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       const entries = container.instantiateModelsToScene((n) => n, true, { doNotInstantiate: true });
       const root = entries.rootNodes[0];
       root.parent = h;
-      root.scaling.setAll(CHAR_SCALE);
+      // normalize to a common height (see TARGET_H) rather than a fixed scale,
+      // so models authored in different units land the same size in the crowd
+      root.scaling.setAll(1);
+      const rawH = measureHeight(root);
+      root.scaling.setAll(rawH > 0.01 ? TARGET_H / rawH : CHAR_SCALE);
       const mats = new Set();
       root.getChildMeshes().forEach((m) => {
         m.isPickable = false;
@@ -1288,12 +1331,19 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
           // lift so the eyes stay dark against the skin.
           const name = m.material.name;
           const lift = name === 'Skin' ? 0.5 : name === 'Face' ? 0 : 0.3;
-          m.material.emissiveColor = m.material.albedoColor.scale(lift);
+          // textured models (e.g. the Mixamo character) have no flat albedoColor
+          // to glow, so drive the lift from their albedo texture instead
+          if (m.material.albedoTexture) {
+            m.material.emissiveTexture = m.material.albedoTexture;
+            m.material.emissiveColor = new Color3(lift, lift, lift);
+          } else {
+            m.material.emissiveColor = m.material.albedoColor.scale(lift);
+          }
         }
       });
       u.mats = [...mats];
       entries.animationGroups.forEach((g) => { g.stop(); u.groups[g.name] = g; });
-      u.fist = root.getDescendants().find((n) => n.name === 'Fist.R') || null;
+      u.fist = root.getDescendants().find((n) => n.name === 'Fist.R' || n.name === 'mixamorig_RightHand') || null;
       u.entries = entries;
       u.ready = true;
     }).catch((e) => console.error('character load failed:', file, e));
@@ -1989,13 +2039,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     ? FEMALE_FILES[charSeq.female++ % FEMALE_FILES.length]
     : MALE_FILES[charSeq.male++ % MALE_FILES.length]);
   const MAX_PEOPLE = 8; // one cap for the whole crowd
-  // every person in the store is a shopper: one agent that walks the loop and
-  // sometimes turns off at a shelf for a browse session (mode machine:
-  // enter → loop ⇄ toshelf → browse → fromshelf, exit via exitwalk)
+  // every person in the store is a shopper: one agent that roams the floor on
+  // its own routed itinerary, stopping at shelves for browse sessions (mode
+  // machine: enter → roam ⇄ toshelf → browse, exit via exitwalk)
   const shoppers = [];
-  // everyone currently on the walk loop this frame — rebuilt by the render
-  // loop, read by the follow-the-leader braking in walk()
-  let loopTraffic = [];
   let pendingEntries = 0; // people queued to walk in through the door
   let pendingRemovals = 0; // − presses that must wait for a browse session to end
   const pendingApiEntries = []; // POSTed customers waiting outside for room
@@ -2226,7 +2273,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     return { speed: 0.032 + Math.random() * 0.014, pauseMul: 1.0, pauseDurMul: 1.0, diceMul: 1.6 }; // browser
   }
 
-  function makeShopper(mode, t, identOverride, pc = frontPC) {
+  function makeShopper(mode, identOverride, pc = frontPC) {
     const ident = identOverride ?? nextIdentity();
     const persona = rollPersona();
     const h = makeHuman(nextCharFile(ident.female));
@@ -2292,20 +2339,23 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const p = {
       h,
       pc, // portal config: front (API) or right (random) doorway
-      mode, // 'enter' | 'loop' | 'exitwalk' | 'toshelf' | 'browse' | 'fromshelf'
-      t: t ?? tMerge,
+      mode, // 'enter' | 'roam' | 'exitwalk' | 'toshelf' | 'browse'
       wp: 0,
       exit: false,
       speed: persona.speed,
       pauseMul: persona.pauseMul, pauseDurMul: persona.pauseDurMul, diceMul: persona.diceMul,
       // pace breathes around the base over ~7–15s so the crowd never
-      // metronomes in lockstep (follow-the-leader still wins under braking)
+      // metronomes in lockstep
       driftAmp: 0.12 + Math.random() * 0.06,
       driftFreq: (Math.PI * 2) / (7 + Math.random() * 8),
       driftPhase: Math.random() * Math.PI * 2,
+      // free-roam state: rp is the spine position the route is walked along
+      // (the weave rides on top of it), mv holds the current routed leg
+      rp: null, roamYaw: 0, nextGoalAt: 0,
+      recentShelves: [], // last two browsed — never revisited back to back
       // personal walking line: a lane preference that itself wanders slowly,
-      // plus a two-octave weave, applied perpendicular to the spline so
-      // nobody treads the exact same rail twice
+      // plus a two-octave weave, applied perpendicular to the heading so
+      // nobody treads the exact same line twice
       lat: (Math.random() * 2 - 1) * 0.2,
       latDriftFreq: (Math.PI * 2) / (20 + Math.random() * 20),
       latDriftPhase: Math.random() * Math.PI * 2,
@@ -2315,9 +2365,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       // phone. nextPause gates the roll; pause holds the live stop
       pause: null, pauseBlend: 0, pauseYaw: 0, pauseOff: null,
       nextPause: elapsed + (10 + Math.random() * 15) * persona.pauseMul,
-      latEase: mode === 'loop' ? 1 : 0, // door entries fade the offset in after the merge
+      latEase: 0, // door entries fade the personal offset in once inside
       // shelf-visit state (slot >= 0 reserves the browse spot from the moment
-      // the junction dice lands until the shopper merges back onto the loop)
+      // the destination is picked until they have stepped clear of it again)
       slot: -1, mv: null,
       cooldown: elapsed + 3 + Math.random() * 9, // no diving at a shelf right away
       item, itemShapes, itemMat, phone, beam, ring, ringMat, ringT: Infinity,
@@ -2327,7 +2377,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       // commanded shelf session (API shelf sub-machine): shelfHold suppresses
       // the self-scan/auto-pick loop; the verdict and picks arrive as events
       shelfHold: false, scanVerdict: null, inspect: null, inspectQueue: [],
-      pendingWalk: null, // a walkToShelf that arrived mid walk-out — replayed on merge
       f: new Vector3(0, 0, 1), s: new Vector3(1, 0, 0),
     };
     if (mode === 'enter') p.enterSeq = ++enterSeq;
@@ -2343,20 +2392,22 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     p.vtag.dispose(); p.vtagMat.dispose();
     disposeHuman(p.h);
   }
-  // initial shoppers only: they were "already in the store" when the
-  // dashboard opened, so they spawn directly on the loop
-  function spawnOnLoop(identOverride, pc = frontPC) {
-    let t = Math.random();
-    for (let tries = 0; tries < 12; tries++) {
-      const clear = shoppers.every((q) => {
-        if (q.mode !== 'loop') return true;
-        const d = (((q.t - t) % 1) + 1) % 1;
-        return Math.min(d, 1 - d) * walkPath.length > 2.0;
-      });
-      if (clear) break;
-      t = Math.random();
+  // initial shoppers only: they were "already in the store" when the dashboard
+  // opened, so they start scattered on the floor instead of walking in
+  function spawnOnFloor(identOverride, pc = frontPC) {
+    let spot = null;
+    for (let tries = 0; tries < 30 && !spot; tries++) {
+      const x = (Math.random() * 2 - 1) * ROAM_BOUND;
+      const z = (Math.random() * 2 - 1) * ROAM_BOUND;
+      if (!navFree(x, z) || nearPortal(x, z, 2.5)) continue;
+      if (shoppers.some((q) => Math.hypot(q.h.position.x - x, q.h.position.z - z) < 2)) continue;
+      spot = { x, z };
     }
-    makeShopper('loop', t, identOverride, pc);
+    const p = makeShopper('roam', identOverride, pc);
+    if (spot) p.h.position.set(spot.x, 0, spot.z);
+    p.h.rotation.y = Math.random() * Math.PI * 2;
+    enterRoam(p);
+    p.latEase = 1; // already "in the store" — no slide-in
   }
   function addPerson() {
     if (totalPeople() < MAX_PEOPLE) pendingEntries++;
@@ -2371,19 +2422,22 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     for (const w of shoppers) if (w.exit && (w.mode !== 'exitwalk' || w.wp === 0)) n++;
     return n;
   }
-  // soonest to reach the exit junction walks out first. Only people actually
+  // nearest to the exit junction walks out first. Only people actually
   // walking are candidates — browsers are never yanked out of a session; a
-  // pending removal waits in pendingRemovals until someone rejoins the loop.
+  // pending removal waits in pendingRemovals until someone starts roaming.
   // API-owned customers (apiId set) are never picked: the users API is the
   // sole authority over their exits (leave / verify fail / delete), which
   // is what keeps its status field truthful.
   function flagExit() {
     if (exitQueueLoad() >= 3) return false;
-    let pick = null, best = 2;
+    let pick = null, best = Infinity;
     for (const w of shoppers) {
       if (w.exit || w.slot >= 0 || w.person?.apiId != null) continue;
-      if (w.mode !== 'loop' && w.mode !== 'enter') continue;
-      const d = w.mode === 'loop' ? (((w.pc.tExit - w.t) % 1) + 1) % 1 : 1.5;
+      if (w.mode !== 'roam' && w.mode !== 'enter') continue;
+      const jp = walkPath.pointAt(w.pc.tExit);
+      const d = w.mode === 'roam'
+        ? Math.hypot(w.h.position.x - jp.x, w.h.position.z - jp.z)
+        : 40; // still queueing at the door — last resort
       if (d < best) { best = d; pick = w; }
     }
     if (pick) pick.exit = true;
@@ -2471,25 +2525,18 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const female = u.gender === 'female';
     if (female !== e.female) { e.female = female; respawnBody(p, female); }
   }
-  // abandon any shelf business mid-flight and rejoin the loop at the nearest
-  // point — used when an API command needs the shopper walkable NOW (body
+  // abandon any shelf business mid-flight and start roaming from where they
+  // stand — used when an API command needs the shopper walkable NOW (body
   // swaps, forced leave). No-op for people already on a walkable leg.
-  function snapToLoop(p) {
-    if (p.mode === 'loop' || p.mode === 'enter' || p.mode === 'exitwalk') return;
+  function snapToRoam(p) {
+    if (p.mode === 'roam' || p.mode === 'enter' || p.mode === 'exitwalk') return;
     releaseShelfAccess(p);
     p.slot = -1; p.mv = null; p.idling = false; p.shelfScan = null;
     p.picksLeft = 0; p.ringT = Infinity;
     p.shelfHold = false; p.scanVerdict = null; p.inspect = null; p.inspectQueue = [];
-    p.pendingWalk = null; // any queued re-target dies with the shelf session
     p.item.setEnabled(false); p.item.scaling.setAll(1); p.phone.setEnabled(false);
     p.beam.setEnabled(false); p.ring.setEnabled(false);
-    let best = Infinity, bt = 0;
-    for (let i = 0; i < 200; i++) {
-      const pt = walkPath.pointAt(i / 200);
-      const d = (pt.x - p.h.position.x) ** 2 + (pt.z - p.h.position.z) ** 2;
-      if (d < best) { best = d; bt = i / 200; }
-    }
-    p.mode = 'loop'; p.t = bt;
+    enterRoam(p);
   }
   // users API "leave" action → drop everything, walk to the exit gate at a
   // normal pace, and HOLD there to pay (payHold) instead of scanning out on
@@ -2504,7 +2551,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     }
     const p = shopperByApiId(id);
     if (!p || p.fadeStart != null || p.done) return;
-    snapToLoop(p);
+    snapToRoam(p);
     p.payHold = true;
     p.exit = true;
   }
@@ -2538,7 +2585,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       if (users[i].id === u.id) { users.splice(i, 1); break; } // no double life
     }
     const queueLen = shoppers.filter((q) => q.mode === 'enter' && q.wp === 0).length;
-    const p = makeShopper('enter', undefined, identFromUser(u));
+    const p = makeShopper('enter', identFromUser(u));
     p.gateHold = true;
     // appear one slot beyond the current tail of the sideways line
     const s = queueSlot(queueLen + 1);
@@ -2595,16 +2642,15 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   function apiWalkToShelfUser(id, shelfId) {
     const p = shopperByApiId(id);
     if (!p || p.fadeStart != null || p.done) return;
-    if (p.mode === 'fromshelf') {
-      // still walking out from a just-closed visit — shelfClose is instant on
-      // the API side but the walk-out is a real animation here. Same shelf:
-      // the slot is still reserved to them, so just turn back in. Different
-      // shelf: queue it for the moment they actually merge onto the loop.
-      if (SLOTS[p.slot]?.shelfId === shelfId) redirectToShelf(p);
-      else p.pendingWalk = { shelfId };
-      return;
+    if (p.mode !== 'roam') return; // at a gate or already at a shelf — not walkable
+    if (p.slot >= 0) {
+      // still stepping away from a just-closed visit — shelfClose is instant on
+      // the API side but the walk-out is a real animation here. Same shelf: the
+      // slot is still theirs, so turn straight back in. Different shelf: drop
+      // the reservation and re-route from wherever they got to.
+      if (SLOTS[p.slot]?.shelfId === shelfId) { redirectToShelf(p); return; }
+      p.slot = -1;
     }
-    if (p.slot >= 0 || p.mode !== 'loop') return; // still elsewhere — not walkable
     const free = [];
     for (let i = 0; i < SLOTS.length; i++) {
       if (SLOTS[i].shelfId === shelfId && !shoppers.some((q) => q.slot === i)) free.push(i);
@@ -2613,18 +2659,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     startBrowse(p, free[Math.floor(Math.random() * free.length)]);
     p.shelfHold = true; // commanded session: heldShelfCycle owns them at the shelf
   }
-  // cancel an in-flight walk-out and turn straight back into the still-
-  // reserved slot — the retraced leg reuses whatever waypoints were already
-  // walked, reversed, so there's no detour back through the loop
+  // cancel an in-flight walk-away and turn straight back into the still-
+  // reserved slot, re-routed from wherever they got to
   function redirectToShelf(p) {
-    const m = p.mv;
-    const g = jitterSlot(p.slot);
-    beginSession(p, p.slot, g.ry);
-    p.mode = 'toshelf';
-    p.mv = {
-      wps: [...m.wps.slice(0, m.wi).reverse(), new Vector3(g.x, 0, g.z)],
-      wi: 0, targetRy: g.ry, settleT: -1,
-    };
+    startBrowse(p, p.slot);
     p.shelfHold = true;
   }
   // scanQR verdict — queued if they're still walking up; the phone gesture
@@ -2647,7 +2685,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const p = shopperByApiId(id);
     if (!p || !p.shelfHold || p.fadeStart != null || p.done) return;
     if (p.mode === 'browse') leaveSlot(p);
-    else snapToLoop(p); // still on the spur — bail to the nearest loop point
+    else snapToRoam(p); // still walking up — bail back onto the floor
   }
   // the API's 30s browse timer fired: their seam glides shut behind them
   // (releaseShelfAccess inside leaveSlot); an item mid-inspect goes with them
@@ -2655,14 +2693,14 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const p = shopperByApiId(id);
     if (!p || !p.shelfHold || p.fadeStart != null || p.done) return;
     if (p.mode === 'browse') leaveSlot(p);
-    else snapToLoop(p);
+    else snapToRoam(p);
   }
   // body swap: keep the sim object and the person entry (custNo, picks, the
   // followed card), replace only the 3D body. Mid-browse swaps first snap the
   // shopper back onto the loop — a pick sequence can't survive losing its arms.
   function respawnBody(p, female) {
     const e = p.person;
-    snapToLoop(p);
+    snapToRoam(p);
     const old = p.h;
     const nh = makeHuman(nextCharFile(female));
     nh.parent = world;
@@ -2757,6 +2795,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     Math.min(NAV.n - 1, Math.max(0, Math.round((x - NAV.min) / NAV.cell))),
     Math.min(NAV.n - 1, Math.max(0, Math.round((z - NAV.min) / NAV.cell))),
   ];
+  const NAV_DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
   const navBlocked = new Uint8Array(NAV.n * NAV.n);
   {
     // 0.2 margin: tight, but this store has always walked people right along
@@ -2774,8 +2813,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     for (const s of SLOTS) { const [ix, iz] = navCell(s.x, s.z); navBlocked[navIdx(ix, iz)] = 0; }
   }
   const navFree = (x, z) => { const [ix, iz] = navCell(x, z); return !navBlocked[navIdx(ix, iz)]; };
+  // Sampled well below a cell: at half-cell steps a diagonal leg can pass clean
+  // through the corner of a blocked cell without any sample landing on it, and
+  // the taut rope would then happily pull a walk straight through a shelf end.
+  // Routes are planned once per destination, so the finer sweep costs nothing.
   function navLineFree(ax, az, bx, bz) {
-    const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / (NAV.cell * 0.5)));
+    const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / (NAV.cell * 0.2)));
     for (let s = 0; s <= steps; s++) {
       const k = s / steps;
       if (!navFree(ax + (bx - ax) * k, az + (bz - az) * k)) return false;
@@ -2808,7 +2851,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     for (let qi = 0; qi < queue.length && goal < 0; qi++) {
       const cur = queue[qi];
       const cx = cur % NAV.n, cz = (cur / NAV.n) | 0;
-      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+      for (const [dx, dz] of NAV_DIRS) {
         const nx2 = cx + dx, nz2 = cz + dz;
         if (nx2 < 0 || nz2 < 0 || nx2 >= NAV.n || nz2 >= NAV.n) continue;
         const ni = navIdx(nx2, nz2);
@@ -2837,13 +2880,85 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     }
     return { t: nearestT(jp.x, jp.z), wps };
   }
+  // reachability prune: a slot a walk can't flow out of is walled in, so no
+  // roamer could ever route to it either. The route itself is thrown away —
+  // shoppers plan their own from wherever they happen to be standing.
   for (let i = SLOTS.length - 1; i >= 0; i--) {
-    const r = routeFromLoop(SLOTS[i].x, SLOTS[i].z);
-    if (r) SLOTS[i].route = r;
-    else {
-      console.warn(`[smartStore] browse slot on shelf ${SLOTS[i].shelfId} is unreachable — skipped`);
-      SLOTS.splice(i, 1);
+    if (routeFromLoop(SLOTS[i].x, SLOTS[i].z)) continue;
+    console.warn(`[smartStore] browse slot on shelf ${SLOTS[i].shelfId} is unreachable — skipped`);
+    SLOTS.splice(i, 1);
+  }
+
+  // ---------- free-roam routing ----------
+  // Nobody rides a shared rail: every shopper walks their own route between
+  // their own destinations, so no two people trace the same line. Same navgrid,
+  // same BFS, same taut-rope pull as the slot spurs above — only the goal
+  // changes, from "nearest loop cell" to "this exact floor point".
+  function routeBetween(ax, az, bx, bz) {
+    const [six, siz] = navCell(ax, az);
+    const [gix, giz] = navCell(bx, bz);
+    const start = navIdx(six, siz), goalCell = navIdx(gix, giz);
+    if (navBlocked[goalCell]) return null;
+    if (start === goalCell) return [new Vector3(bx, 0, bz)];
+    const prev = new Int32Array(NAV.n * NAV.n).fill(-1);
+    prev[start] = start;
+    const queue = [start];
+    let found = false;
+    for (let qi = 0; qi < queue.length && !found; qi++) {
+      const cur = queue[qi];
+      const cx = cur % NAV.n, cz = (cur / NAV.n) | 0;
+      for (const [dx, dz] of NAV_DIRS) {
+        const nx2 = cx + dx, nz2 = cz + dz;
+        if (nx2 < 0 || nz2 < 0 || nx2 >= NAV.n || nz2 >= NAV.n) continue;
+        const ni = navIdx(nx2, nz2);
+        if (prev[ni] >= 0 || navBlocked[ni]) continue;
+        if (dx && dz && (navBlocked[navIdx(nx2, cz)] || navBlocked[navIdx(cx, nz2)])) continue;
+        prev[ni] = cur;
+        if (ni === goalCell) { found = true; break; }
+        queue.push(ni);
+      }
     }
+    if (!found) return null;
+    const pts = [];
+    for (let c = goalCell; c !== start; c = prev[c]) pts.push({ x: NAV.min + (c % NAV.n) * NAV.cell, z: NAV.min + ((c / NAV.n) | 0) * NAV.cell });
+    pts.push({ x: ax, z: az });
+    pts.reverse();                          // walk order: here → there
+    pts[pts.length - 1] = { x: bx, z: bz }; // exact destination, not its cell
+    // taut rope: keep only the corners a straight walk can't skip
+    const wps = [];
+    let a = 0;
+    while (a < pts.length - 1) {
+      let b = pts.length - 1;
+      while (b > a + 1 && !navLineFree(pts[a].x, pts[a].z, pts[b].x, pts[b].z)) b--;
+      wps.push(new Vector3(pts[b].x, 0, pts[b].z));
+      a = b;
+    }
+    return wps;
+  }
+
+  // door aprons are queue territory — a wanderer parking in one would plug the
+  // gate, so both destination pickers steer clear of them
+  const nearPortal = (x, z, r) => [frontPC, rightPC].some((pc) =>
+    Math.hypot(x - pc.mergePoint.x, z - pc.mergePoint.z) < r ||
+    Math.hypot(x - pc.exitDoorPoint.x, z - pc.exitDoorPoint.z) < r);
+  const ROAM_BOUND = half - 1.2; // keep destinations off the walls
+
+  // an open spot to drift toward, and the route to it. Rolled rather than
+  // authored, so the wander legs never repeat; the elbow-room test keeps
+  // anyone from ending up pressed against a fixture.
+  function randomRoamPoint(fromX, fromZ) {
+    for (let tries = 0; tries < 24; tries++) {
+      const x = (Math.random() * 2 - 1) * ROAM_BOUND;
+      const z = (Math.random() * 2 - 1) * ROAM_BOUND;
+      if (!navFree(x, z)) continue;
+      if (!navFree(x + 0.5, z) || !navFree(x - 0.5, z) ||
+          !navFree(x, z + 0.5) || !navFree(x, z - 0.5)) continue;
+      if (Math.hypot(x - fromX, z - fromZ) < 3) continue; // worth the walk
+      if (nearPortal(x, z, 2.5)) continue;
+      const wps = routeBetween(fromX, fromZ, x, z);
+      if (wps) return wps;
+    }
+    return null;
   }
 
   // a fresh stand point every time a slot is taken: slide along the shelf,
@@ -2884,21 +2999,64 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     p.nextPick = 0.6; // first gesture lands a beat after the door opens
   }
 
-  // junction dice landed: reserve the slot and turn off the loop
+  // reserve the slot and route there from wherever the shopper happens to be
   function startBrowse(p, slot) {
     endPause(p); // a commanded walkToShelf can land mid window-shop
     const g = jitterSlot(slot);
     beginSession(p, slot, g.ry);
     p.mode = 'toshelf';
     p.cur = p.cur ?? p.speed;
+    const wps = routeBetween(p.h.position.x, p.h.position.z, g.x, g.z);
     p.mv = {
-      wps: [...SLOTS[slot].route.wps, new Vector3(g.x, 0, g.z)],
+      wps: wps ?? [new Vector3(g.x, 0, g.z)], // walled in: walk it straight
       wi: 0, targetRy: g.ry, settleT: -1, // -1: still walking the leg
     };
   }
 
-  // session over — walk the spur back and merge onto the loop. The slot stays
-  // reserved until the merge so nobody dives into the spot they're leaving.
+  // how often a roamer's next destination is a shelf rather than open floor.
+  // Persona tilts it: a rusher mostly crosses the store, a browser mostly shops.
+  const ROAM_SHELF_BIAS = 0.7;
+  // best-of-two over the free slots, skipping the shelves this shopper just
+  // came from — keeps anyone from ping-ponging the shelf beside them and pulls
+  // the crowd out across the floor instead of clustering at the nearest one
+  function pickShelfSlot(p) {
+    let cands = freePickSlots();
+    const fresh = cands.filter((i) => !p.recentShelves.includes(SLOTS[i].shelfId));
+    if (fresh.length) cands = fresh;
+    if (!cands.length) return null;
+    const a = cands[(Math.random() * cands.length) | 0];
+    const b = cands[(Math.random() * cands.length) | 0];
+    const d = (i) => Math.hypot(SLOTS[i].x - p.h.position.x, SLOTS[i].z - p.h.position.z);
+    return d(a) > d(b) ? a : b;
+  }
+  // next destination: mostly a shelf front to browse, otherwise an open spot to
+  // drift to. API-owned customers never self-select a shelf — their visits are
+  // commanded through the users API — so they only ever wander between orders.
+  function planRoamGoal(p) {
+    // a body that hasn't finished loading can't play the scan/pick gestures —
+    // pickCycle bails on !ready every frame, so sending one to a shelf parks it
+    // there forever holding a slot reservation and a browse-cap place. Let it
+    // keep roaming (which needs no rig) until its character file lands.
+    if (isRandom(p) && p.h.metadata.ready && !p.exit && p.slot < 0 && elapsed > p.cooldown
+        && Math.random() < Math.min(0.9, ROAM_SHELF_BIAS * p.diceMul)) {
+      // Headroom has to match the 70/30 destination split, or the roll gets
+      // rejected most of the time and everyone falls through to wandering: the
+      // old floor(len/2) left a 3-person floor with a cap of ONE, which measured
+      // out at a 5% realized shelf share against the 70% intended.
+      const cap = Math.max(2, Math.ceil(shoppers.length * 0.6));
+      if (browsingCount() < cap) {
+        const slot = pickShelfSlot(p);
+        if (slot !== null) { startBrowse(p, slot); return; }
+      }
+    }
+    const wps = randomRoamPoint(p.h.position.x, p.h.position.z);
+    if (!wps) { p.nextGoalAt = elapsed + 0.5; return; } // boxed in — retry shortly
+    p.mv = { wps, wi: 0, kind: 'wander' };
+  }
+
+  // session over — step back onto the floor and pick a fresh destination. The
+  // slot stays reserved until they have actually cleared it (roamMove drops it)
+  // so nobody dives into the spot they're walking out of.
   function leaveSlot(p) {
     const u = p.h.metadata;
     releaseShelfAccess(p); // walking away — the door may close behind them
@@ -2907,21 +3065,20 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     u.movingState = undefined; // let applyGait start the Walk clip cleanly
     p.shelfHold = false; p.scanVerdict = null; p.inspect = null; p.inspectQueue = [];
     p.item.setEnabled(false); p.item.scaling.setAll(1);
-    const route = SLOTS[p.slot].route;
-    p.mode = 'fromshelf';
+    const shelfId = SLOTS[p.slot]?.shelfId;
+    if (shelfId != null) {
+      p.recentShelves = [shelfId, ...p.recentShelves.filter((s) => s !== shelfId)].slice(0, 2);
+    }
+    p.cooldown = elapsed + 6 + Math.random() * 10; // browse again, but not straight away
+    enterRoam(p);
     p.cur = 0;
-    p.mv = {
-      wps: [...[...route.wps].reverse(), walkPath.pointAt(route.t)], // merge exactly on the loop
-      wi: 0, mergeT: route.t,
-    };
   }
 
-  // straight waypoint legs between the loop and a slot ('toshelf'/'fromshelf'),
-  // verified clear of fixtures. Arrival settles into facing the shelf; the
-  // merge back waits short of the junction while the loop is congested there.
+  // routed walk to a reserved slot ('toshelf'), clear of fixtures. Arrival
+  // settles into facing the shelf, then pickCycle takes over.
   function shelfLegMove(p, dt) {
     const m = p.mv;
-    if (p.mode === 'toshelf' && m.settleT >= 0) { // arrived: turn to the shelf
+    if (m.settleT >= 0) { // arrived: turn to the shelf
       p.cur += (0 - p.cur) * Math.min(1, dt * 6);
       m.settleT += dt;
       p.h.rotation.y = shortestLerp(p.h.rotation.y, m.targetRy, Math.min(1, dt * 8));
@@ -2938,12 +3095,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const dist = Math.hypot(dx, dz);
     let target = p.speed;
     if (robotAhead(p.h)) target = 0;
-    if (p.mode === 'fromshelf' && m.wi === m.wps.length - 1 && dist < 1.6) {
-      const jp = m.wps[m.wps.length - 1];
-      const busy = shoppers.some((q) => q !== p && q.mode === 'loop' &&
-        Math.hypot(q.h.position.x - jp.x, q.h.position.z - jp.z) < 1.3);
-      if (busy) target = 0;
-    }
     p.cur += (target - p.cur) * Math.min(1, dt * 6);
     const step = p.cur * walkPath.length * dt;
     if (dist > 0.001) {
@@ -2954,22 +3105,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     }
     if (dist <= Math.max(0.12, step)) {
       m.wi++;
-      if (m.wi >= m.wps.length) {
-        if (p.mode === 'toshelf') m.settleT = 0;
-        else { // merged — back on the loop; the dice rests through a cooldown
-          p.mode = 'loop';
-          p.t = m.mergeT;
-          p.slot = -1;
-          p.mv = null;
-          p.cooldown = elapsed + 12 + Math.random() * 14;
-          if (p.pendingWalk) { // a different-shelf scan queued while walking out
-            const { shelfId } = p.pendingWalk;
-            const apiId = p.person?.apiId;
-            p.pendingWalk = null;
-            if (apiId != null) apiWalkToShelfUser(apiId, shelfId);
-          }
-        }
-      }
+      if (m.wi >= m.wps.length) m.settleT = 0;
     }
     applyGait(p);
   }
@@ -3127,7 +3263,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   function solveTorsoLean(p) {
     const u = p.h.metadata;
     if (u.spine === undefined) // Shoulder.R → Torso → Abdomen (waist) → Hips
-      u.spine = p.h.getDescendants(false).find((n) => n.name === 'Abdomen' && n.rotationQuaternion) ?? null;
+      u.spine = p.h.getDescendants(false).find((n) => (n.name === 'Abdomen' || n.name === 'mixamorig_Spine') && n.rotationQuaternion) ?? null;
     if (!u.spine) return { spine: null, qSpine: null };
     forceWorld(u.spine, p.h);
     Vector3.CrossToRef(Vector3.Up(), p.f, _leanAxis); // horizontal axis ⟂ facing; +angle tips forward
@@ -3637,10 +3773,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const _cardAnchor = new Vector3();
   const _cardScreen = new Vector3();
 
-  // traffic rules: follow the walker ahead instead of clipping through them,
-  // and brake for the robot when it is driving across in front
-  const FOLLOW_GAP = 2.0;   // start matching the leader's speed (path units)
-  const MIN_GAP = 1.0;      // full stop this close to the leader
+  // free-roaming shoppers cross each other's paths, so there is no leader to
+  // follow anymore — the crowd is sparse enough that the odd overlap never
+  // reads. The robot is another matter: it is big and people give way to it.
   const ROBOT_BRAKE = 2.4;  // person stops when the robot is this close ahead
 
   // shared brake: only an actively driving robot holds people up — one that
@@ -3724,7 +3859,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     let target = p.speed;
     // arriving: wait by the junction if the loop is congested right there
     if (p.mode === 'enter' && p.wp === 1 && dist < 1.6) {
-      const busy = shoppers.some((q) => q !== p && q.mode === 'loop' &&
+      const busy = shoppers.some((q) => q !== p && q.mode === 'roam' &&
         Math.hypot(q.h.position.x - pc.mergePoint.x, q.h.position.z - pc.mergePoint.z) < 1.3);
       if (busy) target = 0;
     }
@@ -3754,7 +3889,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
               p.verifyFail = Math.random() < 0.15; // first sweep rejected → rescan
             }
           }
-        } else { p.mode = 'loop'; p.t = pc.tMerge; }
+        } else enterRoam(p); // through the door — off to wherever they fancy
       }
       else if (p.wp === 0) {
         // reached the exit gate line.
@@ -3778,26 +3913,16 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   }
 
   // ---------- window-shopping pauses ----------
-  // a loop walker occasionally just… stops: eyes the nearest shelf, or pulls
-  // the phone out. Gated so the stop never plugs the works: nobody close
-  // behind, clear of every door junction, never while flagged to exit or
-  // holding a browse reservation. Commands landing mid-pause cancel it —
-  // walk() on the next frame for exit flags, startBrowse() on the spot.
-  const PAUSE_JUNCTION_CLEAR = 1.5; // path units kept clear around door junctions
+  // a roamer occasionally just… stops: eyes the nearest shelf, or pulls the
+  // phone out. Gated so the stop never plugs the works: clear of both door
+  // aprons, never while flagged to exit, walking out to the gate, or holding a
+  // browse reservation. Commands landing mid-pause cancel it — roamMove on the
+  // next frame for exit flags, startBrowse() on the spot.
+  const PAUSE_PORTAL_CLEAR = 2.6; // world units kept clear around the doors
   function tryStartPause(p) {
     const retry = () => { p.nextPause = elapsed + 3 + Math.random() * 4; };
-    if (p.exit || p.slot >= 0) return retry();
-    for (const q of loopTraffic) { // someone close behind would pile up
-      if (q === p) continue;
-      const d = (((p.t - q.t) % 1) + 1) % 1 * walkPath.length;
-      if (d > 0.001 && d < FOLLOW_GAP) return retry();
-    }
-    for (const pcx of [frontPC, rightPC]) { // keep the door junctions flowing
-      for (const tj of [pcx.tMerge, pcx.tExit]) {
-        const d = (((p.t - tj) % 1) + 1) % 1;
-        if (Math.min(d, 1 - d) * walkPath.length < PAUSE_JUNCTION_CLEAR) return retry();
-      }
-    }
+    if (p.exit || p.slot >= 0 || !p.mv || p.mv.kind === 'exit') return retry();
+    if (nearPortal(p.h.position.x, p.h.position.z, PAUSE_PORTAL_CLEAR)) return retry();
     // something to look at? face the nearest shelf stand — otherwise (or 40%
     // of the time regardless) it's a phone check
     let best = Infinity, bx = 0, bz = 0;
@@ -3829,67 +3954,81 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     p.phone.rotation.x = 0.55;
   }
 
-  function walk(p, dt) {
-    if (p.mode !== 'loop') { spurMove(p, dt); return; }
+  // ---------- free roam ----------
+  // p.rp is the spine position the route is walked along; the personal weave
+  // rides on top of it as a lateral offset. Adding the sway straight onto the
+  // body position would accumulate frame over frame and drift the walk off its
+  // own route — the old loop got this for free because the spline position was
+  // a pure function of t.
+  const ROAM_WEAVE_CLAMP = 0.18; // tighter than the loop's 0.3 — routed paths
+                                 // round shelf ends with less room to spare
+  function enterRoam(p) {
+    p.mode = 'roam';
+    p.mv = null;
+    p.rp = p.h.position.clone();
+    p.roamYaw = p.h.rotation.y;
+    p.nextGoalAt = 0;
+    p.pauseOff = null;
+    p.latEase = 0; // fade the personal offset in rather than snapping sideways
+  }
+  // flagged to leave → route to this portal's exit junction, where the gate
+  // queue takes over exactly as it did when people turned off the loop
+  function planExitLeg(p) {
+    const jp = walkPath.pointAt(p.pc.tExit);
+    const wps = routeBetween(p.h.position.x, p.h.position.z, jp.x, jp.z);
+    p.mv = { wps: wps ?? [new Vector3(jp.x, 0, jp.z)], wi: 0, kind: 'exit' };
+  }
 
-    // window-shopping pause: run it down, or roll for a new one. An exit
-    // flag (API leave or the auto flagger) or a DELETE fade trumps the
-    // daydream immediately — a fading body must not re-enable the phone,
-    // which is world-parented and would float at full opacity
+  function roamMove(p, dt) {
+    if (!p.rp) { p.rp = p.h.position.clone(); p.roamYaw = p.h.rotation.y; }
+    // far enough from the stand point we just left → release the reservation
+    if (p.slot >= 0 && SLOTS[p.slot]) {
+      const s = SLOTS[p.slot];
+      if (Math.hypot(p.h.position.x - s.x, p.h.position.z - s.z) > 1.3) p.slot = -1;
+    }
+    // an exit flag trumps whatever they were heading for
+    if (p.exit && p.mv?.kind !== 'exit') { endPause(p); planExitLeg(p); }
+
+    // window-shopping pause: run it down, or roll for a new one. An exit flag
+    // (API leave or the auto flagger) or a DELETE fade trumps the daydream
+    // immediately — a fading body must not re-enable the phone, which is
+    // world-parented and would float at full opacity
     if (p.pause && (p.exit || p.fadeStart != null || elapsed > p.pause.until)) endPause(p);
     else if (!p.pause && p.fadeStart == null && elapsed >= p.nextPause) tryStartPause(p);
 
-    // pick a target speed, then ease the current speed toward it
+    if (!p.mv) { // arrived, between destinations: stand a beat, then pick again
+      p.cur = (p.cur ?? 0) * Math.max(0, 1 - dt * 6);
+      if (elapsed >= p.nextGoalAt) {
+        planRoamGoal(p);
+        if (p.mode !== 'roam') return; // the planner dived at a shelf
+      }
+      applyGait(p);
+      return;
+    }
+
+    const m = p.mv;
+    const tgt = m.wps[m.wi];
+    const dx = tgt.x - p.rp.x, dz = tgt.z - p.rp.z;
+    const dist = Math.hypot(dx, dz);
+    // pace breathes around the persona's base so nobody metronomes
     let target = p.pause ? 0
       : p.speed * (1 + p.driftAmp * Math.sin(elapsed * p.driftFreq + p.driftPhase));
-    let gap = Infinity, leader = null;
-    for (const q of loopTraffic) {
-      if (q === p) continue;
-      const d = (((q.t - p.t) % 1) + 1) % 1 * walkPath.length;
-      if (d > 0.001 && d < gap) { gap = d; leader = q; }
-    }
-    if (leader && gap < MIN_GAP) target = 0;
-    else if (leader && gap < FOLLOW_GAP) target = Math.min(target, leader.cur ?? leader.speed);
     if (robotAhead(p.h)) target = 0;
     p.cur = (p.cur ?? p.speed) + (target - (p.cur ?? p.speed)) * Math.min(1, dt * 6);
-
-    const prevT = p.t;
-    p.t = (p.t + p.cur * dt) % 1;
-
-    // junction dice: crossing a free slot's loop junction may pull the shopper
-    // in for a browse session. Odds shrink as the shelves fill (soft cap: at
-    // most half the crowd browsing) and rest through a post-session cooldown.
-    // The four right-wall slots share one junction — one roll covers them all.
-    // API-owned customers never roll: their shelf visits are commanded through
-    // the users API (walkToShelf), keeping the roster `status` authoritative.
-    if (!p.exit && !p.pause && p.slot < 0 && isRandom(p) && elapsed > p.cooldown) {
-      const stepFrac = (((p.t - prevT) % 1) + 1) % 1;
-      let cand = null, nc = 0;
-      for (const i of freePickSlots()) {
-        const d = (((SLOTS[i].route.t - prevT) % 1) + 1) % 1;
-        if (d > stepFrac) continue; // junction not crossed this frame
-        if (Math.random() * ++nc < 1) cand = i; // reservoir pick among crossed slots
-      }
-      if (cand !== null) {
-        const cap = Math.max(1, Math.floor(shoppers.length / 2));
-        const busy = browsingCount();
-        if (busy < cap && Math.random() < Math.min(0.85, 0.55 * p.diceMul) * (1 - busy / cap)) {
-          startBrowse(p, cand);
-          return; // shelfLegMove owns the gait from the next frame
-        }
-        p.cooldown = elapsed + 2; // passed — don't re-roll while astride the junction
-      }
+    const step = p.cur * walkPath.length * dt;
+    if (dist > 0.001) {
+      const k = Math.min(1, step / dist);
+      p.rp.x += dx * k;
+      p.rp.z += dz * k;
+    }
+    // heading eased toward the leg so corners round off instead of snapping —
+    // it also carries the weave's perpendicular, which would jolt on a hard turn
+    if (p.cur > p.speed * 0.2 && dist > 0.001) {
+      p.roamYaw = shortestLerp(p.roamYaw, Math.atan2(dx, dz), Math.min(1, dt * 4));
     }
 
-    p.h.position.copyFrom(walkPath.pointAt(p.t));
-    const tan = walkPath.tangentAt(p.t);
-    const tanYaw = Math.atan2(tan.x, tan.z);
-    // paused shoppers turn to whatever caught their eye and back again;
-    // pauseBlend eases the handoff so neither end of the stop snaps
-    p.pauseBlend = Math.max(0, Math.min(1, p.pauseBlend + (p.pause ? dt * 3 : -dt * 3)));
-    p.h.rotation.y = p.pauseBlend > 0 ? shortestLerp(tanYaw, p.pauseYaw, p.pauseBlend) : tanYaw;
-    // the ±0.3 clamp keeps the worst case inside the spline's verified 0.68
-    // obstacle clearance with a body half-width to spare
+    // personal walking line, laid perpendicular to the current heading: a lane
+    // preference that itself wanders, plus a two-octave weave
     p.latEase = Math.min(1, p.latEase + dt * 0.5);
     const weave = p.lat
       + Math.sin(elapsed * p.latDriftFreq + p.latDriftPhase) * 0.1
@@ -3897,20 +4036,36 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       + Math.sin(elapsed * p.wobFreq * 2.7 + p.wobPhase * 1.7) * 0.05;
     // freeze the weave mid-stance while stopped — a time-driven offset would
     // skate an Idle body sideways at up to ~0.15 u/s
+    p.pauseBlend = Math.max(0, Math.min(1, p.pauseBlend + (p.pause ? dt * 3 : -dt * 3)));
     if (p.pause && p.pauseOff == null) p.pauseOff = weave;
     else if (!p.pause && p.pauseBlend <= 0) p.pauseOff = null;
     const mixed = p.pauseOff == null ? weave : weave + (p.pauseOff - weave) * p.pauseBlend;
-    const off = Math.max(-0.3, Math.min(0.3, mixed)) * p.latEase;
-    p.h.position.x += tan.z * off;
-    p.h.position.z -= tan.x * off;
+    let off = Math.max(-ROAM_WEAVE_CLAMP, Math.min(ROAM_WEAVE_CLAMP, mixed)) * p.latEase;
+    const nx = Math.cos(p.roamYaw), nz = -Math.sin(p.roamYaw); // left of the heading
+    // routes hug shelf ends — never let the sway push a body into a fixture
+    if (!navFree(p.rp.x + nx * off, p.rp.z + nz * off)) off *= 0.5;
+    if (!navFree(p.rp.x + nx * off, p.rp.z + nz * off)) off = 0;
+    p.h.position.x = p.rp.x + nx * off;
+    p.h.position.z = p.rp.z + nz * off;
+    // paused shoppers turn to whatever caught their eye and back again;
+    // pauseBlend eases the handoff so neither end of the stop snaps
+    p.h.rotation.y = p.pauseBlend > 0
+      ? shortestLerp(p.roamYaw, p.pauseYaw, p.pauseBlend) : p.roamYaw;
     if (p.pause?.phone) posePausePhone(p);
 
-    // flagged to leave → turn onto its portal's exit spur at the junction
-    if (p.exit) {
-      const d = (((p.pc.tExit - p.t) % 1) + 1) % 1 * walkPath.length;
-      if (d < 0.6) { p.mode = 'exitwalk'; p.wp = 0; p.exitSeq = ++exitSeq; }
+    if (dist <= Math.max(0.12, step)) {
+      m.wi++;
+      if (m.wi >= m.wps.length) {
+        if (m.kind === 'exit') { p.mode = 'exitwalk'; p.wp = 0; p.exitSeq = ++exitSeq; p.mv = null; }
+        else { p.mv = null; p.nextGoalAt = elapsed + 0.3 + Math.random() * 1.4; }
+      }
     }
     applyGait(p);
+  }
+
+  function walk(p, dt) {
+    if (p.mode === 'roam') roamMove(p, dt);
+    else spurMove(p, dt);
   }
 
   // "ready" = first real frame on screen (shaders/textures compiled), not just
@@ -3927,9 +4082,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       // still closes it (the shelfClose event then no-ops here harmlessly).
       const seedCount = users.filter((u) =>
         !u.status || u.status === 'inside' || u.status === 'scanning' || u.status === 'browsing').length;
-      for (let i = 0; i < seedCount; i++) spawnOnLoop();
+      for (let i = 0; i < seedCount; i++) spawnOnFloor();
       // …then the opening random crowd (auto, right-door population)
-      for (let i = 0; i < crowdTarget; i++) spawnOnLoop(genIdentity(), rightPC);
+      for (let i = 0; i < crowdTarget; i++) spawnOnFloor(genIdentity(), rightPC);
       booted = true; // future target changes now reconcile through the doors
       // customers the API left mid-enter resume their wait at the gate
       users.filter((u) => u.status === 'waiting').forEach((u) => apiEnterUser(u));
@@ -3951,7 +4106,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       const padBusy = shoppers.some((w) =>
         Math.hypot(w.h.position.x - DOOR.x, w.h.position.z - DOOR.zOut) < 1.6);
       if (!padBusy) {
-        const p = makeShopper('enter', undefined, pendingApiEntries.shift(), frontPC);
+        const p = makeShopper('enter', pendingApiEntries.shift(), frontPC);
         p.h.position.set(DOOR.x, 0, DOOR.zOut);
         p.h.rotation.y = Math.PI; // facing into the store
         p.cur = 0;
@@ -3965,7 +4120,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
         Math.hypot(w.h.position.x - padX, w.h.position.z - R_ENTRY_Z) < 1.6);
       if (!padBusy) {
         pendingEntries--;
-        const p = makeShopper('enter', undefined, genIdentity(), rightPC);
+        const p = makeShopper('enter', genIdentity(), rightPC);
         p.h.position.set(padX, 0, R_ENTRY_Z);
         p.h.rotation.y = -Math.PI / 2; // facing into the store (−x)
         p.cur = 0;
@@ -3978,7 +4133,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       const live = randomLive();
       if (live < crowdTarget) pendingEntries++;
       else if (live > crowdTarget) flagExit();
-      else if (shoppers.some((w) => isRandom(w) && w.mode === 'loop' && !w.exit) && flagExit()) {
+      else if (shoppers.some((w) => isRandom(w) && w.mode === 'roam' && !w.exit) && flagExit()) {
         pendingEntries++; // net-zero swap
       }
     }
@@ -3986,10 +4141,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     // full) wait here until a walking shopper frees up
     if (pendingRemovals > 0 && flagExit()) pendingRemovals--;
 
-    loopTraffic = shoppers.filter((w) => w.mode === 'loop');
     shoppers.forEach((p) => {
       if (p.mode === 'browse') pickCycle(p, dt); // idle sway comes from the GLB Idle clip
-      else if (p.mode === 'toshelf' || p.mode === 'fromshelf') shelfLegMove(p, dt);
+      else if (p.mode === 'toshelf') shelfLegMove(p, dt);
       else walk(p, dt);
     });
     // DELETEd customers dissolve where they stand (~1.2s), then despawn
@@ -4619,6 +4773,34 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
         return true;
       },
     },
+  };
+  // per-walker snapshot for the __storeBabylon console handle: enough to see
+  // who is heading where, which is otherwise invisible once routes are personal
+  controller.debug = {
+    shoppers: () => shoppers.map((p) => ({
+      name: p.person?.name ?? '?', mode: p.mode, slot: p.slot, ready: !!p.h.metadata.ready,
+      x: +p.h.position.x.toFixed(2), z: +p.h.position.z.toFixed(2),
+      goal: p.mv ? { kind: p.mv.kind ?? 'shelf', x: +p.mv.wps[p.mv.wps.length - 1].x.toFixed(2), z: +p.mv.wps[p.mv.wps.length - 1].z.toFixed(2), legs: p.mv.wps.length } : null,
+      speed: +(p.cur ?? 0).toFixed(3), exit: p.exit,
+    })),
+    navFree: (x, z) => navFree(x, z),
+    // route probes: a stand point sits inside an inflated shelf footprint, so
+    // "can a shopper actually walk back out of one" is worth being able to ask
+    route: (ax, az, bx, bz) => routeBetween(ax, az, bx, bz)?.map((v) => [+v.x.toFixed(2), +v.z.toFixed(2)]) ?? null,
+    roamPoint: (x, z) => randomRoamPoint(x, z)?.map((v) => [+v.x.toFixed(2), +v.z.toFixed(2)]) ?? null,
+    slots: () => SLOTS.map((s) => ({ shelfId: s.shelfId, x: +s.x.toFixed(2), z: +s.z.toFixed(2) })),
+    sessions: () => shoppers.filter((p) => p.mode === 'browse').map((p) => {
+      const lk = shelfLockOf(p);
+      return {
+        name: p.person?.name, hasPerson: !!p.person, nearShelf: p.person?.nearShelf,
+        slot: p.slot, slotShelf: SLOTS[p.slot]?.shelfId,
+        started: p.started, scanning: !!p.shelfScan, picksLeft: p.picksLeft,
+        access: p.access, seamOpen: p.accessSeam?.openAmt, seamHolders: p.accessSeam?.holders,
+        seamIsSlotSeam: p.accessSeam === SLOTS[p.slot]?.seam,
+        lkId: lk.id, lkOffline: lk.offline, lkMasterAmt: lk.masterAmt, lkHeld: lk.heldSeams,
+        gate: Math.max(lk.masterAmt, p.accessSeam?.openAmt ?? 0),
+      };
+    }),
   };
   if (typeof window !== 'undefined') window.__storeBabylon = controller; // debug handle
   return controller;
