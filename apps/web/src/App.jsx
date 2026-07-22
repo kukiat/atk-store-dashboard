@@ -16,19 +16,19 @@ const VERSIONS = {
     factory: createLogisticsScene,
     title: 'Smart Logistics Network',
     sub: 'Real-time supply chain · drag to orbit · scroll to zoom',
-    docTitle: 'Smart Logistics Network',
+    docTitle: 'Smart Logistics Network · ATK Store',
   },
   v2: {
     factory: createSmartShelfScene,
     title: 'Smart Shelf · Live Aisle',
     sub: 'Customer tracking active · drag to orbit · scroll to zoom',
-    docTitle: 'Smart Shelf · Live Aisle',
+    docTitle: 'Smart Shelf · ATK Store',
   },
   v3: {
     designer: true,
     title: 'Shelf Designer',
     sub: 'Drag products from the palette onto the 3D shelf',
-    docTitle: 'Shelf Designer',
+    docTitle: 'Shelf Designer · ATK Store',
   },
   v5: {
     dashboard: true,
@@ -38,7 +38,7 @@ const VERSIONS = {
     sceneFactory: createSmartStoreBabylonScene,
     title: 'Smart Shelf Dashboard',
     sub: 'Babylon.js engine',
-    docTitle: 'Smart Shelf Dashboard · Babylon',
+    docTitle: 'ATK Store Dashboard',
   },
 };
 

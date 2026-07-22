@@ -133,7 +133,7 @@ export default function Backdoor() {
   const [ef, setEf] = useState(EMPTY_EDIT);
 
   useEffect(() => {
-    document.title = 'Backdoor · User Admin';
+    document.title = 'User Admin · ATK Store';
   }, []);
 
   const pushToast = useCallback((msg, kind) => {

@@ -936,7 +936,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
       {/* ===== header ===== */}
       <header className="dash-head">
         <div className="brand-block">
-          <h1>SMART SHELF</h1>
+          <h1>ATK STORE</h1>
           <span>INTELLIGENT RETAIL SOLUTION</span>
         </div>
         <nav className="dash-nav">
