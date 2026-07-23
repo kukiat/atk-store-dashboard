@@ -54,6 +54,13 @@ pipeline {
     stage('Validate credentials params') {
       steps {
         script {
+          // First builds / blank param overrides often leave strings empty — coerce defaults.
+          def tag = (params.IMAGE_TAG ?: '').toString().trim()
+          env.IMAGE_TAG = tag ?: 'latest'
+          def viteUrl = (params.VITE_API_URL ?: '').toString().trim()
+          env.VITE_API_URL = viteUrl ?: 'https://atk.hexdas.cloud'
+          echo "IMAGE_TAG=${env.IMAGE_TAG} VITE_API_URL=${env.VITE_API_URL}"
+
           def hubId = (params.DOCKERHUB_CRED_ID ?: '').toString().trim()
           def sshId = (params.SSH_CRED_ID ?: '').toString().trim()
           if (hubId.startsWith('dckr_pat_') || hubId.contains('/') || hubId.length() > 80) {
@@ -186,15 +193,16 @@ Then leave DOCKERHUB_CRED_ID = dockerhub-creds'''
       sh 'docker logout || true'
     }
     success {
-      echo "OK — TARGET=${params.TARGET} tag=${params.IMAGE_TAG} deploy=${params.DEPLOY} mode=${params.DEPLOY_MODE}"
+      echo "OK — TARGET=${params.TARGET} tag=${env.IMAGE_TAG} deploy=${params.DEPLOY} mode=${params.DEPLOY_MODE}"
     }
     failure {
       echo '''
 FAILED — common causes:
-  1) Credential ID mismatch (DOCKERHUB_CRED_ID)
-  2) Agent missing docker / permission to docker.sock
-  3) DEPLOY_MODE=local: host must have DEPLOY_PATH and env files used by compose
-  4) Compose still points at armdocker123/* — update image lines to bunchax/atk-store*
+  1) Empty IMAGE_TAG → invalid docker tag (leave default "latest")
+  2) Credential ID mismatch (DOCKERHUB_CRED_ID)
+  3) Agent missing docker / permission to docker.sock
+  4) DEPLOY_MODE=local: host must have DEPLOY_PATH and env files used by compose
+  5) Compose still points at armdocker123/* — update image lines to bunchax/atk-store*
 '''
     }
   }
