@@ -1,10 +1,10 @@
 # Build from the monorepo root:
-#   docker build -f apps/api/Dockerfile -t atk-api .
+#   docker build -f apps/api/Dockerfile -t bunchax/atk-store-api .
 #
 # Run:
-#   docker run --env-file apps/api/.env -p 3004:3004 atk-api
+#   docker run --env-file apps/api/.env -p 3004:3004 bunchax/atk-store-api
 
-FROM oven/bun:1 AS deps
+FROM oven/bun:1 AS build
 WORKDIR /app
 
 COPY package.json bun.lock ./
@@ -14,20 +14,13 @@ COPY packages/shared/package.json ./packages/shared/
 
 RUN bun install --frozen-lockfile
 
-FROM oven/bun:1 AS build
-WORKDIR /app
-
-COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/package.json ./package.json
-COPY --from=deps /app/bun.lock ./bun.lock
-COPY --from=deps /app/apps/api/package.json ./apps/api/package.json
-COPY --from=deps /app/apps/web/package.json ./apps/web/package.json
-COPY --from=deps /app/packages/shared/package.json ./packages/shared/package.json
-
+# Copy sources only — do not overwrite apps/api/node_modules from install
 COPY packages/shared ./packages/shared
-COPY apps/api ./apps/api
+COPY apps/api/tsconfig.json apps/api/drizzle.config.ts ./apps/api/
+COPY apps/api/src ./apps/api/src
 
-RUN bun run --filter '@atk-store-dashboard/api' build
+WORKDIR /app/apps/api
+RUN bun run build
 
 FROM oven/bun:1-slim AS runner
 WORKDIR /app
