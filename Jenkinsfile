@@ -178,7 +178,8 @@ Then leave DOCKERHUB_CRED_ID = dockerhub-creds'''
             set -e
             cd ${params.DEPLOY_PATH}
             docker compose pull ${svc}
-            docker compose up -d --force-recreate ${svc}
+            # --no-deps: do not restart siblings (e.g. atk-animation-seed healthchecks)
+            docker compose up -d --force-recreate --no-deps ${svc}
             docker image prune -f
           """.stripIndent().trim()
 
@@ -203,6 +204,7 @@ FAILED — common causes:
   3) Agent missing docker / permission to docker.sock
   4) DEPLOY_MODE=local: host must have DEPLOY_PATH and env files used by compose
   5) Compose still points at armdocker123/* — update image lines to bunchax/atk-store*
+  6) Deploy without --no-deps can fail if a depends_on healthcheck (e.g. atk-animation-seed) is unhealthy
 '''
     }
   }
