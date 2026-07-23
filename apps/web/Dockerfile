@@ -1,6 +1,6 @@
 # Build from the monorepo root:
 #   docker build -f apps/web/Dockerfile -t bunchax/atk-store \
-#     --build-arg VITE_API_URL=https://atk.hexdas.cloud .
+#     --build-arg VITE_API_URL=https://atk-dashboard.hexdas.cloud .
 #
 # Run:
 #   docker run -p 8080:80 bunchax/atk-store

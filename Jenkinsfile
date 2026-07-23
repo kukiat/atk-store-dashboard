@@ -2,7 +2,7 @@
 // Script Path (default): Jenkinsfile
 //
 // Deploys the same stack that already runs on the host as:
-//   atk-store      → web  (Host: atk.hexdas.cloud)
+//   atk-store      → web  (Host: atk-dashboard.hexdas.cloud)
 //   atk-store-api  → api  (PathPrefix on the same host)
 // Compose path: /docker/hexdas/atk  (alongside atk-store-mqtt / shelfbox)
 //
@@ -27,7 +27,7 @@ pipeline {
     string(name: 'IMAGE_TAG', defaultValue: 'latest', description: 'Docker image tag')
     string(
       name: 'VITE_API_URL',
-      defaultValue: 'https://atk.hexdas.cloud',
+      defaultValue: 'https://atk-dashboard.hexdas.cloud',
       description: 'API base URL baked into the web image (same Traefik host; API via PathPrefix)'
     )
     booleanParam(name: 'DEPLOY', defaultValue: true, description: 'Recreate compose services after push')
@@ -58,7 +58,7 @@ pipeline {
           def tag = (params.IMAGE_TAG ?: '').toString().trim()
           env.IMAGE_TAG = tag ?: 'latest'
           def viteUrl = (params.VITE_API_URL ?: '').toString().trim()
-          env.VITE_API_URL = viteUrl ?: 'https://atk.hexdas.cloud'
+          env.VITE_API_URL = viteUrl ?: 'https://atk-dashboard.hexdas.cloud'
           echo "IMAGE_TAG=${env.IMAGE_TAG} VITE_API_URL=${env.VITE_API_URL}"
 
           def hubId = (params.DOCKERHUB_CRED_ID ?: '').toString().trim()
