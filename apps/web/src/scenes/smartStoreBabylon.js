@@ -153,7 +153,9 @@ export function validateUsers(users) {
   return errors;
 }
 
-export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelectPerson, onReady, onShelfEvent, shelves = [], users = [] } = {}) {
+// `onProgress` reports boot milestones for the loading splash — semantic only
+// ('built' / 'frame' / 'model'); the dashboard owns the weighting and the %.
+export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelectPerson, onReady, onProgress, onShelfEvent, shelves = [], users = [] } = {}) {
   const ACCENT_HEX = '#35c3ff';
   const ACCENT = Color3.FromHexString(ACCENT_HEX);
   const C3 = (hex) => Color3.FromHexString('#' + hex.toString(16).padStart(6, '0'));
@@ -188,6 +190,96 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const scene = new Scene(engine);
   scene.useRightHandedSystem = true;           // keep Three's coordinate math 1:1
   scene.clearColor = new Color4(0, 0, 0, 0);   // transparent — dashboard backdrop shows through
+
+  // ---------- shopper models: declared here, first thing after the scene, purely
+  // so the preload below can fire before the (synchronous, seconds-long) build
+  // starts — the network fetches then run alongside a wedged main thread instead
+  // of queueing behind it. Everything that *uses* these lives further down.
+  // each .glb packs its buffers plus the clips we use: Idle / Walk / PickUp
+  // (repacked from the original embedded-base64 .gltf — ~40% smaller and much
+  // cheaper to parse). files load once into an AssetContainer, then every
+  // person is a clone that owns its materials (per-person tints). appears
+  // async; check metadata.ready.
+  // Every shopper is normalized to the same on-screen height regardless of the
+  // source model's native units: Quaternius models are ~3.3 units tall (× the
+  // old 0.8 scale ≈ 2.64), Mixamo exports are ~200 (centimetres). We measure the
+  // bind-pose height once per file at load and scale to TARGET_H so a swapped-in
+  // model can't come out giant or tiny. CHAR_SCALE stays only as a fallback.
+  const CHAR_SCALE = 0.8;
+  const TARGET_H = 3.325 * CHAR_SCALE; // ≈ 2.66 — the canonical Casual_Male height
+  const DONOR_FILE = 'Casual_Male'; // ships the Idle/Walk/PickUp clips we retarget
+  const CHAR_FILES = [
+    'Casual_Male',
+    'Casual_Female',
+    'Casual2_Female',
+    'Casual3_Male',
+    'Suit_Male',
+    'Casual2_Male',
+    'Casual3_Female',
+    'OldClassy_Female',
+    'Worker_Male'
+  ];
+  // Bind-pose height of a just-loaded container, read straight off the vertex
+  // positions. Bounding boxes are unusable for this: Babylon refreshes a skinned
+  // mesh's box lazily, so measuring a *clone* right after instantiation catches a
+  // half-built box — three consecutive spawns of one file measured 3.05, 1.33 and
+  // 2.99, and the 1.33 turned TARGET_H/raw into a 2× giant (a shopper taller than
+  // the store's own doorway). refreshBoundingInfo({ applySkeleton: true }) is no
+  // better; it fixed some clones and broke others. Vertices are the geometry
+  // itself, so one measurement per file is exact and every clone of that file
+  // lands on the same scale.
+  function measureBindHeight(container) {
+    const root = container.rootNodes[0];
+    const toLocal = root ? Matrix.Invert(root.computeWorldMatrix(true)) : Matrix.Identity();
+    const v = new Vector3();
+    let minY = Infinity, maxY = -Infinity;
+    for (const m of container.meshes) {
+      const pos = m.getVerticesData('position');
+      if (!pos) continue;
+      const toRoot = m.computeWorldMatrix(true).multiply(toLocal);
+      for (let i = 0; i < pos.length; i += 3) {
+        Vector3.TransformCoordinatesFromFloatsToRef(pos[i], pos[i + 1], pos[i + 2], toRoot, v);
+        if (v.y < minY) minY = v.y;
+        if (v.y > maxY) maxY = v.y;
+      }
+    }
+    return maxY - minY;
+  }
+  const charCache = new Map(); // file -> Promise<AssetContainer>
+  const charScale = new Map(); // file -> uniform scale that puts it at TARGET_H
+  function loadCharContainer(file) {
+    if (!charCache.has(file)) {
+      const p = SceneLoader.LoadAssetContainerAsync('/models/', file + '.glb', scene)
+        .then(async (container) => {
+          // a model that ships no clips (e.g. a Mixamo rig) borrows the crowd's
+          // Idle/Walk/PickUp, retargeted from the donor onto its own skeleton so
+          // it moves in lock-step with everyone else instead of standing frozen
+          if (container.animationGroups.length === 0 && file !== DONOR_FILE) {
+            const donor = await loadCharContainer(DONOR_FILE);
+            try { retargetClips(donor, container, scene); }
+            catch (e) { console.error('[retarget] failed for', file, e); }
+          }
+          const rawH = measureBindHeight(container);
+          charScale.set(file, rawH > 0.01 ? TARGET_H / rawH : CHAR_SCALE);
+          return container;
+        });
+      charCache.set(file, p);
+    }
+    return charCache.get(file);
+  }
+  // The whole crowd is pulled in up front: it gates the reveal (nobody wants to
+  // watch shoppers pop into a finished store), and each file that lands is a
+  // real tick for the boot splash — the only honest, fine-grained progress this
+  // boot has. A failed file still ticks: one bad download must not park the bar,
+  // and the spawn that wanted it just falls back to another model.
+  let charsLoaded = 0;
+  const charsReady = Promise.all(CHAR_FILES.map((file) =>
+    loadCharContainer(file)
+      .catch((e) => { console.error('[chars] failed to load', file, e); })
+      .then(() => {
+        charsLoaded++;
+        onProgress?.({ phase: 'model', loaded: charsLoaded, total: CHAR_FILES.length });
+      })));
 
   // ---------- camera (ortho ArcRotate ≈ V4 OrbitControls + OrthographicCamera) ----------
   // V4 sat at (30,26,30) looking at (0,3,0). Convert that offset to alpha/beta/radius.
@@ -1200,61 +1292,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   sensor(-3, -8); sensor(6, -3); sensor(-8, 4); sensor(4, 6);
 
   // ---------- shoppers (Quaternius CC0 rigged characters, public/models/) ----------
-  // each .glb packs its buffers plus the clips we use: Idle / Walk / PickUp
-  // (repacked from the original embedded-base64 .gltf — ~40% smaller and much
-  // cheaper to parse). files load once into an AssetContainer, then every
-  // person is a clone that owns its materials (per-person tints). appears
-  // async; check metadata.ready.
-  // Every shopper is normalized to the same on-screen height regardless of the
-  // source model's native units: Quaternius models are ~3.3 units tall (× the
-  // old 0.8 scale ≈ 2.64), Mixamo exports are ~200 (centimetres). We measure the
-  // bind-pose height at load and scale to TARGET_H so a swapped-in model can't
-  // come out giant or tiny. CHAR_SCALE stays only as a fallback.
-  const CHAR_SCALE = 0.8;
-  const TARGET_H = 3.325 * CHAR_SCALE; // ≈ 2.66 — the canonical Casual_Male height
-  const DONOR_FILE = 'Casual_Male'; // ships the Idle/Walk/PickUp clips we retarget
-  const CHAR_FILES = [
-    'Casual_Male',
-    'Casual_Female',
-    'Casual2_Female',
-    'Casual3_Male',
-    'Suit_Male',
-    'Casual2_Male',
-    'Casual3_Female',
-    'OldClassy_Female',
-    'Worker_Male'
-  ];
-  const charCache = new Map(); // file -> Promise<AssetContainer>
-  function loadCharContainer(file) {
-    if (!charCache.has(file)) {
-      const p = SceneLoader.LoadAssetContainerAsync('/models/', file + '.glb', scene)
-        .then(async (container) => {
-          // a model that ships no clips (e.g. a Mixamo rig) borrows the crowd's
-          // Idle/Walk/PickUp, retargeted from the donor onto its own skeleton so
-          // it moves in lock-step with everyone else instead of standing frozen
-          if (container.animationGroups.length === 0 && file !== DONOR_FILE) {
-            const donor = await loadCharContainer(DONOR_FILE);
-            try { retargetClips(donor, container, scene); }
-            catch (e) { console.error('[retarget] failed for', file, e); }
-          }
-          return container;
-        });
-      charCache.set(file, p);
-    }
-    return charCache.get(file);
-  }
-  // bind-pose height of an instantiated root, from its child meshes' world AABBs
-  function measureHeight(root) {
-    let minY = Infinity, maxY = -Infinity;
-    for (const m of root.getChildMeshes()) {
-      m.computeWorldMatrix(true);
-      for (const v of m.getBoundingInfo().boundingBox.vectorsWorld) {
-        if (v.y < minY) minY = v.y;
-        if (v.y > maxY) maxY = v.y;
-      }
-    }
-    return maxY - minY;
-  }
+  // the loader + file list sit up by the scene creation so their downloads can
+  // start before the blocking build (see "shopper models" there).
   // ---------- per-person look (hair / skin / clothes tints) ----------
   // Quaternius materials are flat baseColorFactors with stable names ('Hair',
   // 'Face', 'Shirt', 'Pants', …), so a look is just material name -> sRGB hex,
@@ -1312,10 +1351,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       const root = entries.rootNodes[0];
       root.parent = h;
       // normalize to a common height (see TARGET_H) rather than a fixed scale,
-      // so models authored in different units land the same size in the crowd
-      root.scaling.setAll(1);
-      const rawH = measureHeight(root);
-      root.scaling.setAll(rawH > 0.01 ? TARGET_H / rawH : CHAR_SCALE);
+      // so models authored in different units land the same size in the crowd.
+      // The scale was measured once when the file loaded (measureBindHeight) —
+      // never re-measure per clone, the clone's bounding box lies.
+      root.scaling.setAll(charScale.get(file) ?? CHAR_SCALE);
       const mats = new Set();
       root.getChildMeshes().forEach((m) => {
         m.isPickable = false;
@@ -4068,26 +4107,36 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     else spurMove(p, dt);
   }
 
-  // "ready" = first real frame on screen (shaders/textures compiled), not just
-  // factory return — the dashboard keeps its boot overlay up until this fires.
-  // The starting crowd (5, all on the loop) spawns right after the reveal so
-  // its async character loads never delay the overlay. Nobody spawns
+  // Reveal order: first real frame (shaders/textures compiled) → every character
+  // file in → spawn the opening crowd → one more frame → onReady. The crowd used
+  // to stream in after the reveal, which meant an empty store on screen and
+  // people popping in; now the splash holds until the store is populated, and
+  // the clone pass gets a frame to land before the overlay lifts. Nobody spawns
   // pre-scanned at a shelf: every open door traces back to a visible scan.
   scene.executeWhenReady(() => {
     scene.onAfterRenderObservable.addOnce(() => {
-      onReady?.();
-      // roster 'inside' users seed onto the loop as API customers… A user
-      // caught mid shelf-session (scanning/browsing) seeds as a plain walker:
-      // the session's visuals can't be reconstructed, and the API's own timer
-      // still closes it (the shelfClose event then no-ops here harmlessly).
-      const seedCount = users.filter((u) =>
-        !u.status || u.status === 'inside' || u.status === 'scanning' || u.status === 'browsing').length;
-      for (let i = 0; i < seedCount; i++) spawnOnFloor();
-      // …then the opening random crowd (auto, right-door population)
-      for (let i = 0; i < crowdTarget; i++) spawnOnFloor(genIdentity(), rightPC);
-      booted = true; // future target changes now reconcile through the doors
-      // customers the API left mid-enter resume their wait at the gate
-      users.filter((u) => u.status === 'waiting').forEach((u) => apiEnterUser(u));
+      onProgress?.({ phase: 'frame' });
+      charsReady.then(() => {
+        // roster 'inside' users seed onto the loop as API customers… A user
+        // caught mid shelf-session (scanning/browsing) seeds as a plain walker:
+        // the session's visuals can't be reconstructed, and the API's own timer
+        // still closes it (the shelfClose event then no-ops here harmlessly).
+        const seedCount = users.filter((u) =>
+          !u.status || u.status === 'inside' || u.status === 'scanning' || u.status === 'browsing').length;
+        for (let i = 0; i < seedCount; i++) spawnOnFloor();
+        // …then the opening random crowd (auto, right-door population)
+        for (let i = 0; i < crowdTarget; i++) spawnOnFloor(genIdentity(), rightPC);
+        booted = true; // future target changes now reconcile through the doors
+        // customers the API left mid-enter resume their wait at the gate
+        users.filter((u) => u.status === 'waiting').forEach((u) => apiEnterUser(u));
+        // give the spawn pass a painted frame before lifting the splash. rAF is
+        // throttled to ~1s in a background tab (and the headless harness fakes
+        // frames), so a timer races it — whichever lands first wins.
+        let released = false;
+        const release = () => { if (!released) { released = true; onReady?.(); } };
+        requestAnimationFrame(release);
+        setTimeout(release, 400);
+      });
     });
   });
 
@@ -4709,6 +4758,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     lk.offline = !online;
     return true;
   }
+
+  // the blocking part of the boot is done — everything past here is callbacks
+  // and the render loop, so the splash can move on to waiting for a real frame
+  onProgress?.({ phase: 'built' });
 
   const controller = {
     dispose, selectShelf, setFloor, setShelfOnline, scene,

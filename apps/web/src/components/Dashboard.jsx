@@ -4,6 +4,7 @@ import gsap from 'gsap';
 import { useGSAP } from '@gsap/react';
 import { Flip } from 'gsap/Flip';
 import { createSmartStoreBabylonScene, validateShelfLayout, validateUsers } from '../scenes/smartStoreBabylon.js';
+import BootSplash, { useBootProgress } from './BootSplash.jsx';
 import { apiFetch } from '../api';
 
 gsap.registerPlugin(Flip);
@@ -140,7 +141,7 @@ const BOTTOM = [
 // `sceneFactory(container, { onSelectShelf }) => { dispose, selectShelf }` lets
 // V4 (Three.js) and V5 (Babylon.js) share the exact same dashboard chrome —
 // only the engine driving the center stage differs.
-function StoreStage({ selectedShelf, selectedPerson, onSelectShelf, onSelectPerson, onShelfEvent, sceneFactory, onController, defer = false, onReady, shelves, users }) {
+function StoreStage({ selectedShelf, selectedPerson, onSelectShelf, onSelectPerson, onShelfEvent, sceneFactory, onController, defer = false, onReady, onProgress, shelves, users }) {
   const ref = useRef(null);
   const ctrlRef = useRef(null);
 
@@ -151,31 +152,43 @@ function StoreStage({ selectedShelf, selectedPerson, onSelectShelf, onSelectPers
     const create = () => {
       if (controller) return; // double-rAF and the timeout fallback can race
       controller = { dispose() {}, selectShelf() {} };
-      try { controller = sceneFactory(container, { onSelectShelf, onSelectPerson, onReady, onShelfEvent, shelves, users }); }
+      try { controller = sceneFactory(container, { onSelectShelf, onSelectPerson, onReady, onProgress, onShelfEvent, shelves, users }); }
       catch (e) { console.error('[storeStage] scene factory failed:', e); onReady?.(); }
       ctrlRef.current = controller;
       onController?.(controller);
+    };
+    // arms the splash's creep across the build. Must be committed and PAINTED
+    // before create() runs, or the target lands with the main thread already
+    // wedged and the bar sits still through the whole build. Guarded like
+    // create(): the rAF pair and the timeout fallback both call it, and a second
+    // arming after the build is done would re-creep a phase already paid for.
+    let armed = false;
+    const armBuild = () => {
+      if (armed || controller) return;
+      armed = true;
+      onProgress?.({ phase: 'build' });
     };
     let raf1 = 0, raf2 = 0, fallback = 0;
     if (!defer) {
       // Create directly — the container already has its committed layout size in
       // the effect, so we don't need to defer a frame (and some headless
       // environments throttle rAF, which would stall the deferred create).
+      armBuild();
       create();
     } else {
       // V5's synchronous scene build blocks the main thread for seconds — let
       // the browser paint the boot overlay first. Double rAF guarantees one
       // painted frame before the blocking work; the timeout is the safety net
       // for throttled/background tabs where rAF may take ~1s per tick.
-      raf1 = requestAnimationFrame(() => { raf2 = requestAnimationFrame(create); });
-      fallback = setTimeout(create, 500);
+      raf1 = requestAnimationFrame(() => { armBuild(); raf2 = requestAnimationFrame(create); });
+      fallback = setTimeout(() => { armBuild(); create(); }, 500);
     }
     return () => {
       cancelAnimationFrame(raf1); cancelAnimationFrame(raf2); clearTimeout(fallback);
       controller?.dispose(); ctrlRef.current = null; onController?.(null);
     };
     // created once; selection flows in via the sync effects below.
-  }, [onSelectShelf, onSelectPerson, onShelfEvent, sceneFactory, onController, defer, onReady, shelves, users]);
+  }, [onSelectShelf, onSelectPerson, onShelfEvent, sceneFactory, onController, defer, onReady, onProgress, shelves, users]);
 
   // React owns the selection — push it into the scene to drive the outline.
   useEffect(() => {
@@ -480,6 +493,9 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   // then everything derives ----
   const [catalog, setCatalog] = useState(null);   // { shelves: [...], users: [...] } once loaded
   const [loadError, setLoadError] = useState(null);
+  // boot splash: one continuous 0→100% screen over the fetch, the scene build
+  // and the character preload. It owns the % — the scene only reports milestones.
+  const boot = useBootProgress(true);
   const loadCatalog = useCallback(() => {
     setLoadError(null);
     setCatalog(null);
@@ -490,11 +506,15 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
       .then(([shelfData, userData]) => {
         const errors = [...validateShelfLayout(shelfData), ...validateUsers(userData)];
         if (errors.length) throw new Error(errors.join(' · '));
+        boot.mark('data');
         setCatalog({ shelves: shelfData, users: userData });
       })
-      .catch((e) => setLoadError(String(e?.message || e)));
+      .catch((e) => { setLoadError(String(e?.message || e)); boot.fail(e?.message || e); });
+    // boot.mark/fail are stable — no reason to re-arm the fetch on a re-render
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => { loadCatalog(); }, [loadCatalog]);
+  const retryCatalog = useCallback(() => { boot.reset(); loadCatalog(); }, [boot, loadCatalog]);
 
   // stable identity — `?? []` inline would mint a new array every render and
   // cascade through the memos below into an effect loop while catalog is null
@@ -519,11 +539,12 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   const lockInitRef = useRef(lockInit);
   lockInitRef.current = lockInit;
 
-  // Boot overlay (deferScene versions only): covers the dash until the scene's
-  // first frame is on screen, so the heavy synchronous scene build never shows
-  // as a frozen half-drawn dashboard. The scene signals readiness via onReady.
-  const [booting, setBooting] = useState(deferScene);
-  const handleReady = useCallback(() => setBooting(false), []);
+  // Boot splash: covers the dash from the first paint until the scene is live
+  // AND populated, so the heavy synchronous build never shows as a frozen
+  // half-drawn dashboard. The scene signals readiness via onReady; the splash
+  // then lands the bar on 100% and fades itself out.
+  const booting = boot.visible;
+  const handleReady = boot.ready;
 
   // Entrance: stagger the big blocks in once on mount. Scoped to `.dash` so the
   // selectors can't reach outside this dashboard. `.is-armed` (set in JSX) hides
@@ -886,53 +907,23 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   const onlineCount = shelvesDef.filter((s) => s.online).length;
   const offlineCount = shelvesDef.length - onlineCount;
 
-  // catalogue not in yet: the dashboard derives everything from it, so hold
-  // the whole chrome behind the same boot overlay look; failures show a
-  // retry instead of a spinner that never lands.
+  // catalogue not in yet: the dashboard derives everything from it, so hold the
+  // chrome back and let the splash carry the wait. Same root element type with
+  // the splash as its first child in BOTH branches — React then reconciles the
+  // splash in place instead of remounting it, which would rewind the bar to 0
+  // at the exact moment the data lands.
   if (loadError || !catalog) {
     return (
-      <div className="dash">
-        <div className="loading dash-loading">
-          {loadError ? (
-            <>
-              <span style={{ fontSize: 26 }}>⚠</span>
-              <span style={{ maxWidth: 480, textAlign: 'center' }}>
-                Failed to load store data — {loadError}
-              </span>
-              <button
-                onClick={loadCatalog}
-                style={{
-                  marginTop: 14, padding: '8px 22px', cursor: 'pointer',
-                  background: 'transparent', color: '#35c3ff',
-                  border: '1px solid #35c3ff', borderRadius: 6,
-                  font: 'inherit', letterSpacing: '0.08em',
-                }}
-              >
-                RETRY
-              </button>
-            </>
-          ) : (
-            <>
-              <span className="boot-spinner" />
-              Loading store data…
-            </>
-          )}
-        </div>
+      <div className="dash" ref={rootRef}>
+        <BootSplash boot={boot} onRetry={retryCatalog} />
       </div>
     );
   }
 
   return (
     <div className="dash is-armed" ref={rootRef}>
-      {/* boot overlay — same .loading chrome as V1–V3; the spinner animates on
-          the compositor, so it keeps turning even while the scene build blocks
-          the main thread. Stays mounted so the .hidden fade-out can play. */}
-      {deferScene && (
-        <div className={`loading dash-loading${booting ? '' : ' hidden'}`}>
-          <span className="boot-spinner" />
-          Initializing store…
-        </div>
-      )}
+      {/* stays mounted after 100% so the .hidden fade-out can play */}
+      <BootSplash boot={boot} onRetry={retryCatalog} />
       {/* ===== header ===== */}
       <header className="dash-head">
         <div className="brand-block">
@@ -1027,6 +1018,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
             onController={handleController}
             defer={deferScene}
             onReady={handleReady}
+            onProgress={boot.mark}
             shelves={catalog.shelves}
             users={catalog.users}
           />

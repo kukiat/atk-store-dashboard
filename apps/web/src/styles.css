@@ -35,17 +35,111 @@ body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
 }
 .loading.hidden { opacity: 0; pointer-events: none; }
 
-/* dashboard boot overlay (V5) — spinner is transform-only so the compositor
-   keeps it turning while the synchronous scene build blocks the main thread */
-.dash-loading { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; }
-.boot-spinner {
-  width: 34px; height: 34px; border-radius: 50%;
-  border: 3px solid #16294f; border-top-color: #35c3ff;
-  animation: boot-spin .9s linear infinite;
+/* ===== game-style boot splash (V5) =====
+   One screen from page-open to populated store. Everything that moves here is
+   transform/opacity ONLY: the scene build wedges the main thread for seconds,
+   and compositor-driven motion is the only kind that survives it. `--p` (0..100)
+   and `--d` (duration) are set imperatively by useBootProgress; the bar and the
+   odometer both read them, so they can never drift apart. */
+.boot { --p: 0; --d: .4s; overflow: hidden; }
+.boot-card {
+  position: relative; z-index: 1;
+  width: min(560px, calc(100vw - 48px));
+  display: flex; flex-direction: column; align-items: stretch;
+}
+.boot-title {
+  font-size: 30px; font-weight: 600; letter-spacing: .42em;
+  color: #eaf2ff; text-align: center; text-indent: .42em; /* offset the trailing letter-space */
+}
+.boot-sub {
+  margin-top: 10px; margin-bottom: 34px;
+  font-size: 11px; letter-spacing: .26em; color: #4a6395;
+  text-align: center; text-transform: uppercase; text-indent: .26em;
+}
+
+/* perspective floor grid, drifting toward the horizon — the store's own idiom */
+.boot-grid {
+  position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  opacity: .5;
+  background-image:
+    linear-gradient(rgba(53,195,255,.10) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(53,195,255,.10) 1px, transparent 1px);
+  background-size: 46px 46px;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 50%, #000 10%, transparent 78%);
+  animation: boot-drift 6s linear infinite;
   will-change: transform;
 }
-@keyframes boot-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .boot-spinner { animation: none; } }
+@keyframes boot-drift { to { transform: translate3d(0, 46px, 0); } }
+
+/* the fill is full-width and slides in from the left behind a clipping track:
+   translateX keeps the head glow, the shimmer and the rounded cap undistorted,
+   which scaleX would not */
+.boot-bar {
+  position: relative; height: 6px; border-radius: 999px; overflow: hidden;
+  background: #10203c; box-shadow: inset 0 0 0 1px rgba(53,195,255,.14);
+}
+.boot-fill {
+  position: absolute; inset: 0; border-radius: 999px;
+  background: linear-gradient(90deg, #1c6ea8 0%, var(--accent) 78%, #a8e9ff 100%);
+  box-shadow: 0 0 12px rgba(53,195,255,.75);
+  transform: translateX(calc((var(--p) - 100) * 1%));
+  transition: transform var(--d) ease-out;
+  will-change: transform;
+}
+.boot-shimmer {
+  position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,.42) 50%, transparent 100%);
+  animation: boot-sweep 1.6s linear infinite;
+  will-change: transform;
+}
+@keyframes boot-sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+
+.boot-status {
+  margin-top: 16px; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px;
+}
+.boot-label {
+  font-size: 11px; letter-spacing: .2em; color: #6f86b8; text-transform: uppercase;
+  padding-top: 9px; /* optically centre against the tall odometer */
+}
+.boot-detail { font-style: normal; margin-left: 12px; color: var(--accent); }
+
+/* odometer: the full 0…100 column scrolls behind a one-line window. At rest it
+   always lands on an integer (every target is one); mid-transition it rolls,
+   which is the point. --lh must be a fixed length — `lh` units drift with the
+   font and would park the digits half out of the window. */
+.boot-pct {
+  --lh: 30px; display: flex; align-items: flex-start; gap: 2px; color: #eaf2ff;
+  font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: .04em;
+}
+.boot-pct > i { font-style: normal; font-size: 13px; font-weight: 400; letter-spacing: .1em; color: #4a6395; padding-top: 6px; }
+/* the window: exactly one line tall, so only the current number shows */
+.boot-odo-win { display: block; height: var(--lh); overflow: hidden; text-align: right; min-width: 3ch; }
+/* the strip: one transform for all 101 numbers */
+.boot-odo {
+  display: block;
+  transform: translateY(calc(var(--p) * var(--lh) * -1));
+  transition: transform var(--d) ease-out;
+  will-change: transform;
+}
+.boot-odo > span { display: block; height: var(--lh); line-height: var(--lh); }
+
+.boot-retry {
+  align-self: center; margin-top: 26px; padding: 8px 22px; cursor: pointer;
+  background: transparent; color: var(--accent);
+  border: 1px solid var(--accent); border-radius: 6px;
+  font: inherit; letter-spacing: .08em;
+}
+.boot-failed .boot-fill {
+  background: linear-gradient(90deg, #7a2230 0%, #ff5a6e 100%);
+  box-shadow: 0 0 12px rgba(255,90,110,.6);
+}
+.boot-failed .boot-shimmer { animation: none; opacity: 0; }
+.boot-failed .boot-label { color: #ff8a98; }
+
+@media (prefers-reduced-motion: reduce) {
+  .boot-grid, .boot-shimmer { animation: none; }
+  .boot-fill, .boot-odo { transition: none; }
+}
 
 canvas { display: block; }
 
