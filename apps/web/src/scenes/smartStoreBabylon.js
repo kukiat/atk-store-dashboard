@@ -155,6 +155,28 @@ export function validateUsers(users) {
 
 // `onProgress` reports boot milestones for the loading splash — semantic only
 // ('built' / 'frame' / 'model'); the dashboard owns the weighting and the %.
+// ---------- file map ----------
+// module level: store architecture constants, validateShelfLayout, validateUsers.
+// createSmartStoreBabylonScene is one big closure, organised as:
+//   1. boot script — every imperative statement, in execution order (engine,
+//      camera, build, observers, pointer wiring, render loop kick-off).
+//   2. function library — all closure functions grouped by topic (hoisted,
+//      so grouping them below the script changes nothing at runtime):
+//        01 · materials & primitives
+//        02 · store structure
+//        03 · floor 2
+//        04 · shelf lock rigs & LEDs
+//        05 · camera
+//        06 · picking & selection
+//        07 · character loading & bodies
+//        08 · identity & person registry
+//        09 · overhead tags & effects
+//        10 · API user commands
+//        11 · crowd management
+//        12 · routing & nav
+//        13 · shelf sessions & gestures/IK
+//        14 · movement, robot & main loop
+//   3. controller assembly + return (the public API of the scene).
 export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelectPerson, onReady, onProgress, onShelfEvent, shelves = [], users = [] } = {}) {
   const ACCENT_HEX = '#35c3ff';
   const ACCENT = Color3.FromHexString(ACCENT_HEX);
@@ -219,54 +241,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     'OldClassy_Female',
     'Worker_Male'
   ];
-  // Bind-pose height of a just-loaded container, read straight off the vertex
-  // positions. Bounding boxes are unusable for this: Babylon refreshes a skinned
-  // mesh's box lazily, so measuring a *clone* right after instantiation catches a
-  // half-built box — three consecutive spawns of one file measured 3.05, 1.33 and
-  // 2.99, and the 1.33 turned TARGET_H/raw into a 2× giant (a shopper taller than
-  // the store's own doorway). refreshBoundingInfo({ applySkeleton: true }) is no
-  // better; it fixed some clones and broke others. Vertices are the geometry
-  // itself, so one measurement per file is exact and every clone of that file
-  // lands on the same scale.
-  function measureBindHeight(container) {
-    const root = container.rootNodes[0];
-    const toLocal = root ? Matrix.Invert(root.computeWorldMatrix(true)) : Matrix.Identity();
-    const v = new Vector3();
-    let minY = Infinity, maxY = -Infinity;
-    for (const m of container.meshes) {
-      const pos = m.getVerticesData('position');
-      if (!pos) continue;
-      const toRoot = m.computeWorldMatrix(true).multiply(toLocal);
-      for (let i = 0; i < pos.length; i += 3) {
-        Vector3.TransformCoordinatesFromFloatsToRef(pos[i], pos[i + 1], pos[i + 2], toRoot, v);
-        if (v.y < minY) minY = v.y;
-        if (v.y > maxY) maxY = v.y;
-      }
-    }
-    return maxY - minY;
-  }
   const charCache = new Map(); // file -> Promise<AssetContainer>
   const charScale = new Map(); // file -> uniform scale that puts it at TARGET_H
-  function loadCharContainer(file) {
-    if (!charCache.has(file)) {
-      const p = SceneLoader.LoadAssetContainerAsync('/models/', file + '.glb', scene)
-        .then(async (container) => {
-          // a model that ships no clips (e.g. a Mixamo rig) borrows the crowd's
-          // Idle/Walk/PickUp, retargeted from the donor onto its own skeleton so
-          // it moves in lock-step with everyone else instead of standing frozen
-          if (container.animationGroups.length === 0 && file !== DONOR_FILE) {
-            const donor = await loadCharContainer(DONOR_FILE);
-            try { retargetClips(donor, container, scene); }
-            catch (e) { console.error('[retarget] failed for', file, e); }
-          }
-          const rawH = measureBindHeight(container);
-          charScale.set(file, rawH > 0.01 ? TARGET_H / rawH : CHAR_SCALE);
-          return container;
-        });
-      charCache.set(file, p);
-    }
-    return charCache.get(file);
-  }
   // The whole crowd is pulled in up front: it gates the reveal (nobody wants to
   // watch shoppers pop into a finished store), and each file that lands is a
   // real tick for the boot splash — the only honest, fine-grained progress this
@@ -288,12 +264,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   let zoom = 1, zoomTarget = 1;                // ortho zoom factor (V4 camera.zoom)
   const ZOOM_MIN = 0.7, ZOOM_MAX = 2.6;
 
-  function poseFromOffset(offset) {
-    const radius = offset.length();
-    const beta = Math.acos(Scalar.Clamp(offset.y / radius, -1, 1));
-    const alpha = Math.atan2(offset.z, offset.x);
-    return { alpha, beta, radius };
-  }
   const start = poseFromOffset(new Vector3(30, 23, 30)); // (30,26,30) - (0,3,0)
 
   const camera = new ArcRotateCamera('cam', start.alpha, start.beta, start.radius, TARGET0.clone(), scene);
@@ -308,14 +278,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   camera.attachControl(canvas, true);
   camera.inputs.removeByType('ArcRotateCameraMouseWheelInput'); // we drive zoom ourselves
 
-  function applyOrtho() {
-    const aspect = engine.getRenderWidth() / Math.max(1, engine.getRenderHeight());
-    const fz = frustum / zoom;
-    camera.orthoLeft = -fz * aspect;
-    camera.orthoRight = fz * aspect;
-    camera.orthoTop = fz;
-    camera.orthoBottom = -fz;
-  }
   applyOrtho();
 
   const onWheel = (e) => {
@@ -350,29 +312,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   key.shadowMaxZ = 110;
 
   // ---------- material factories ----------
-  // lit PBR ≈ MeshStandardMaterial({color, roughness, metalness, emissive, emissiveIntensity})
-  function pbr(name, o) {
-    const m = new PBRMaterial(name, scene);
-    m.albedoColor = C3(o.color);
-    m.metallic = o.metalness ?? 0;
-    m.roughness = o.roughness ?? 1;
-    m.ambientColor = Color3.White();
-    if (o.emissive !== undefined) m.emissiveColor = C3(o.emissive).scale(o.emissiveIntensity ?? 1);
-    if (o.alpha !== undefined && o.alpha < 1) { m.alpha = o.alpha; }
-    m.environmentIntensity = 0.35;
-    return m;
-  }
-  // unlit ≈ MeshBasicMaterial({color, transparent, opacity})
-  function basic(name, o) {
-    const m = new StandardMaterial(name, scene);
-    m.disableLighting = true;
-    m.emissiveColor = C3(o.color);
-    m.diffuseColor = Color3.Black();
-    m.specularColor = Color3.Black();
-    if (o.alpha !== undefined && o.alpha < 1) m.alpha = o.alpha;
-    m.backFaceCulling = false;
-    return m;
-  }
 
   const mat = {
     floor: pbr('floor', { color: 0x10192f, roughness: 0.95, metalness: 0.1 }),
@@ -405,16 +344,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
 
   // ---------- mesh helpers ----------
   let _id = 0;
-  function box(w, h, d, material, x = 0, y = 0, z = 0) {
-    const m = MeshBuilder.CreateBox('b' + _id++, { width: w, height: h, depth: d }, scene);
-    m.position.set(x, y + h / 2, z);
-    m.material = material;
-    m.receiveShadows = true;
-    m.isPickable = false;
-    shadowGen.addShadowCaster(m);
-    return m;
-  }
-  function group(name) { return new TransformNode(name, scene); }
 
   const world = group('world');
 
@@ -468,25 +397,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
 
   // ---------- back walls ----------
   const WALL_H = 9;
-  function wall(len, rotY, x, z) {
-    const w = box(len, WALL_H, 0.4, mat.wall, 0, 0, 0);
-    w.position.set(x, WALL_H / 2, z);
-    w.rotation.y = rotY;
-    w.parent = world;
-    return w;
-  }
   const half = ROOM / 2;
   l1Roots.push(wall(ROOM, 0, 0, -half));
   l1Roots.push(wall(ROOM, Math.PI / 2, -half, 0));
 
   const bandMat = pbr('band', { color: 0x0c1730, emissive: 0x35c3ff, emissiveIntensity: 1.4, roughness: 0.4 });
-  function wallBand(len, rotY, x, z) {
-    const b = box(len, 0.5, 0.1, bandMat, 0, 0, 0);
-    b.position.set(x, WALL_H - 1.4, z);
-    b.rotation.y = rotY;
-    b.parent = world;
-    return b;
-  }
   l1Roots.push(wallBand(ROOM - 2, 0, 0, -half + 0.3));
   l1Roots.push(wallBand(ROOM - 2, Math.PI / 2, -half + 0.3, 0));
 
@@ -500,77 +415,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // from a shelf's own item colours instead of the global palette
   const itemPalette = (sh) =>
     sh.items?.length ? sh.items.map((it) => parseInt(it.color.slice(1), 16)) : productColors;
-
-  function gondola(x, z, length, rotY = 0, colors = productColors) {
-    const g = group('gondola');
-    const depth = 1.5, gheight = 3.6;
-    box(length, gheight, 0.18, mat.shelfDk, 0, 0, 0).parent = g;
-    box(length, 0.35, depth, mat.shelf, 0, 0, 0).parent = g;
-    const levels = [1.0, 2.0, 3.0];
-    for (const ly of levels) {
-      box(length, 0.1, depth, mat.shelf, 0, ly - 0.05, 0).parent = g;
-      for (let side = -1; side <= 1; side += 2) {
-        const pz = side * (depth / 2 - 0.32);
-        let prev = -1; // last colour placed in this row — kept distinct from the next
-        for (let i = 0; i < length - 1; i++) {
-          if (Math.random() < 0.1) continue;
-          const px = -length / 2 + 0.75 + i;
-          const ph = 0.5 + Math.random() * 0.4;
-          const col = pickColor(colors, prev);
-          prev = col;
-          box(0.62, ph, 0.55, prodMat(col), px, ly, pz).parent = g;
-        }
-        box(length, 0.16, 0.04, mat.label, 0, ly + 0.08, side * (depth / 2 + 0.02)).parent = g;
-      }
-    }
-    box(0.16, gheight, depth, mat.metal, -length / 2, 0, 0).parent = g;
-    box(0.16, gheight, depth, mat.metal, length / 2, 0, 0).parent = g;
-    g.position.set(x, 0, z);
-    g.rotation.y = rotY;
-    g.parent = world;
-    return g;
-  }
-
-  function wallShelf(length, rotY, x, z, colors = productColors) {
-    const g = group('wallShelf');
-    const depth = 1.3, gheight = 6.5;
-    box(length, gheight, 0.15, mat.shelfDk, 0, 0, -depth / 2).parent = g;
-    const levels = [1.0, 2.3, 3.6, 4.9];
-    for (const ly of levels) {
-      box(length, 0.1, depth, mat.shelf, 0, ly - 0.05, 0).parent = g;
-      let prev = -1; // last colour placed in this row — kept distinct from the next
-      for (let i = 0; i < length - 1; i++) {
-        if (Math.random() < 0.08) continue;
-        const px = -length / 2 + 0.7 + i;
-        const ph = 0.55 + Math.random() * 0.45;
-        const col = pickColor(colors, prev);
-        prev = col;
-        box(0.6, ph, 0.5, prodMat(col), px, ly, 0.1).parent = g;
-      }
-      box(length, 0.16, 0.04, mat.label, 0, ly + 0.08, depth / 2 - 0.02).parent = g;
-    }
-    g.position.set(x, 0, z);
-    g.rotation.y = rotY;
-    g.parent = world;
-    return g;
-  }
-
-  function checkout(x, z, rotY = 0) {
-    const g = group('checkout');
-    box(5.5, 1.1, 2.4, mat.counter, 0, 0, 0).parent = g;
-    box(5.5, 0.18, 2.6, mat.metal, 0, 1.1, 0).parent = g;
-    box(0.9, 0.7, 0.6, mat.metal, -1.8, 1.28, 0).parent = g;
-    const screen = MeshBuilder.CreatePlane('pos', { width: 0.8, height: 0.5 }, scene);
-    screen.material = mat.screen;
-    screen.position.set(-1.8, 1.95, 0.31);
-    screen.isPickable = false;
-    screen.parent = g;
-    box(5.5, 0.12, 0.05, pbr('costrip', { color: 0x0c1730, emissive: 0x35c3ff, emissiveIntensity: 1.6, roughness: 0.4 }), 0, 0.45, 1.22).parent = g;
-    g.position.set(x, 0, z);
-    g.rotation.y = rotY;
-    g.parent = world;
-    return g;
-  }
 
   for (const sh of shelves) {
     const td = SHELF_TYPE[sh.type];
@@ -595,66 +439,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   for (const zn of zones) l1Roots.push(zn.unit); // shelves ride up to Floor 2 too
 
   // ---------- floating numbered zone badges ----------
-  function makeBadge(num) {
-    const size = 256;
-    const tex = new DynamicTexture('badge' + num, { width: size, height: size }, scene, true);
-    tex.hasAlpha = true;
-    const ctx = tex.getContext();
-    ctx.clearRect(0, 0, size, size);
-    // Soft navy backdrop halo: a radial gradient whose core is nearly opaque —
-    // enough to mute whatever is behind the badge (e.g. the emissive wall band)
-    // so it reads as a circle instead of a rectangular strip framing the number
-    // — then feathers to full transparency at the rim, so the edge glows softly
-    // rather than cutting a hard opaque disc.
-    const cx = size / 2, cy = size / 2;
-    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, size / 2 - 4);
-    grad.addColorStop(0.0, 'rgba(11,22,44,0.95)');
-    grad.addColorStop(0.6, 'rgba(11,22,44,0.9)');
-    grad.addColorStop(0.86, 'rgba(11,22,44,0.45)');
-    grad.addColorStop(1.0, 'rgba(11,22,44,0.0)');
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(cx, cy, size / 2 - 4, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(cx, cy, 102, 0, Math.PI * 2);
-    ctx.lineWidth = 6;
-    ctx.strokeStyle = '#35c3ff';
-    ctx.shadowColor = '#35c3ff';
-    ctx.shadowBlur = 42;
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = '#eaf6ff';
-    ctx.font = 'bold 104px ui-sans-serif, system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(num, size / 2, size / 2 + 4);
-    tex.update();
-    tex.hasAlpha = true;
-    tex.uScale = -1; tex.uOffset = 1; // un-mirror text under right-handed billboard
-
-    // Unlit textured badge: diffuseTexture carries the base color + circular
-    // alpha (disableLighting forces it full-bright), emissiveTexture adds the
-    // neon glow on the bright ring/number so they bloom while the navy disc
-    // stays dark. (emissiveTexture alone renders the disc blown-out white.)
-    const m = new StandardMaterial('badgeMat' + num, scene);
-    m.disableLighting = true;
-    m.diffuseTexture = tex;
-    m.useAlphaFromDiffuseTexture = true;
-    m.emissiveTexture = tex;
-    m.emissiveColor = Color3.White();
-    m.diffuseColor = Color3.White();
-    m.specularColor = Color3.Black();
-    m.disableDepthWrite = true;
-    m.backFaceCulling = false;
-
-    const plane = MeshBuilder.CreatePlane('badge', { size: 2.8 }, scene);
-    plane.material = m;
-    plane.billboardMode = TransformNode.BILLBOARDMODE_ALL;
-    plane.renderingGroupId = 1;
-    plane.isPickable = false;
-    return plane;
-  }
 
   const badges = [];
   zones.forEach((zn, i) => {
@@ -735,49 +519,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const lockById = new Map(shelfLocks.map((lk) => [lk.id, lk]));
   const emitShelfEvent = (shelfId, type) => onShelfEvent?.({ shelfId, type });
 
-  function buildShelfLockRig(lk, unit, { length, zFront, faces, hBase, hTop, nseg: nsegOpt }) {
-    const led = basic('lockLed' + lk.id, { color: 0xe04848 });
-    lk.ledMats.push(led);
-    const H = hTop - hBase;
-    const nseg = nsegOpt ?? Math.max(2, Math.round(length / 4));
-    const segW = length / nseg;
-    // interior seams: openable units — each owns the two panes flanking it
-    // (their glide toward segment centers parts the glass at the seam). The
-    // anchor is the seam's world position; localX lets the slot generator put
-    // a browse stand + QR pedestal on every seam.
-    for (let si = 0; si < nseg - 1; si++) {
-      const sx = -length / 2 + segW * (si + 1);
-      const anchor = Vector3.TransformCoordinates(
-        new Vector3(sx, 0, zFront * faces[0]), unit.computeWorldMatrix(true));
-      lk.seams.push({ openAmt: 0, holders: 0, anchor, localX: sx });
-    }
-    for (const face of faces) { // 1 / -1 → the unit's local ±z front
-      for (let si = 0; si < nseg; si++) {
-        const cx = -length / 2 + segW * (si + 0.5);
-        for (const dir of [-1, 1]) {
-          // the two panes of a segment ride separate tracks so they can stack
-          const zo = (zFront + (dir > 0 ? 0.05 : 0)) * face;
-          const panel = box(segW / 2 - 0.03, H, 0.05, lockGlassMat, cx + dir * (segW / 4), hBase, zo);
-          shadowGen.removeShadowCaster(panel);
-          const trim = box(0.06, H, 0.07, lockTrimMat, dir * (segW / 4 - 0.04), -H / 2, 0);
-          shadowGen.removeShadowCaster(trim); // bright leading edge
-          trim.parent = panel;
-          panel.parent = unit;
-          panel.metadata = { shelfId: lk.id };
-          panel.isPickable = true;
-          // a dir=+1 pane retreats from the seam on its right (index si), a
-          // dir=-1 pane from the seam on its left (si-1); end panes at the
-          // shelf edges have no seam and only move on a master unlock
-          const seam = lk.seams[dir > 0 ? si : si - 1] ?? null;
-          lk.panels.push({ mesh: panel, closedX: cx + dir * (segW / 4), dir, slide: (segW / 4) * 0.94, seam });
-        }
-      }
-      const strip = box(length, 0.1, 0.08, led, 0, hTop + 0.02, (zFront + 0.03) * face);
-      shadowGen.removeShadowCaster(strip);
-      strip.parent = unit;
-      strip.metadata = { shelfId: lk.id };
-    }
-  }
   // rig params come from the shelf's type (see SHELF_TYPE): every seam is a
   // browse-slot candidate, so nseg derives from the type's seam span — a
   // 16m wall shelf lands on the classic nseg 5 / 4-seam layout.
@@ -842,47 +583,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   phoneBeamMat.alphaMode = Engine.ALPHA_ADD;
   phoneBeamMat.disableDepthWrite = true;
   phoneBeamMat.backFaceCulling = false;
-  function makeScanRingMat() {
-    const m = new StandardMaterial('scanRingMat', scene);
-    m.disableLighting = true;
-    m.emissiveColor = LOCK_GREEN.scale(1.4);
-    m.alpha = 0;
-    m.alphaMode = Engine.ALPHA_ADD;
-    m.disableDepthWrite = true;
-    m.backFaceCulling = false;
-    return m;
-  }
 
   // ---------- selection outline + hover glow ----------
-  function unitBounds(node) {
-    let min = new Vector3(Infinity, Infinity, Infinity);
-    let max = new Vector3(-Infinity, -Infinity, -Infinity);
-    node.getChildMeshes().forEach((m) => {
-      m.computeWorldMatrix(true);
-      const bb = m.getBoundingInfo().boundingBox;
-      min = Vector3.Minimize(min, bb.minimumWorld);
-      max = Vector3.Maximize(max, bb.maximumWorld);
-    });
-    return { min, max, center: min.add(max).scale(0.5), size: max.subtract(min) };
-  }
 
-  // 12-edge wireframe of a unit cube as a reusable scalable line box
-  function makeLineBox(name, color, alpha) {
-    const s = 0.5;
-    const corners = [
-      [-s, -s, -s], [s, -s, -s], [s, -s, s], [-s, -s, s],
-      [-s, s, -s], [s, s, -s], [s, s, s], [-s, s, s],
-    ].map((c) => new Vector3(c[0], c[1], c[2]));
-    const E = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]];
-    const lines = E.map(([a, b]) => [corners[a], corners[b]]);
-    const m = MeshBuilder.CreateLineSystem(name, { lines }, scene);
-    m.color = color;
-    m.alpha = alpha;
-    m.isPickable = false;
-    m.isVisible = false;
-    m.parent = world;
-    return m;
-  }
   const selOutline = makeLineBox('selOutline', ACCENT, 0.9);
 
   const hoverGlow = MeshBuilder.CreateBox('hoverGlow', { size: 1 }, scene);
@@ -899,13 +602,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   hoverGlow.parent = world;
   hoverGlow.metadata = { sx: 1, sy: 1, sz: 1, cx: 0, cy: 0, cz: 0 };
 
-  function frameOutline(outline, unit, pad) {
-    const b = unitBounds(unit);
-    outline.scaling.set(b.size.x + pad, b.size.y + pad, b.size.z + pad);
-    outline.position.copyFrom(b.center);
-    outline.isVisible = true;
-  }
-
   // ---------- camera fly-to ----------
   const FLY_DUR = 0.9;
   const fly = {
@@ -915,60 +611,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   };
   let homePose = null;
 
-  function landingPoseFor(id) {
-    const zn = zoneById.get(id);
-    const b = unitBounds(zn.unit);
-    const center = b.center;
-    const pos = center.add(zn.face.scale(zn.dist)).add(new Vector3(0, zn.height, 0));
-    const pose = poseFromOffset(pos.subtract(center));
-    return { ...pose, target: center.clone(), zoom: zn.focusZoom ?? 1.8 };
-  }
-
   // double-click on a browsing shopper: frame *them* at their slot instead of
   // the shelf center (long shelves would crop them out). Yaw swings off the
   // face normal toward the shelf end they stand nearest, so the shelf recedes
   // into frame past them. dist/height keep beta ≈ PI/2.6 through poseFromOffset.
   const PFOCUS = { yaw: 0.61, dist: 13, height: 4.9, targetY: 1.5, zoom: 2.6 };
   let pendingFocusPose = null; // { id, pose } — consumed by the next selectShelf round-trip
-  function personFocusPoseFor(e) {
-    const s = SLOTS[e.ref.slot];
-    const away = new Vector3(-Math.sin(s.ry), 0, -Math.cos(s.ry)); // slot ry faces the shelf
-    const along = new Vector3(away.z, 0, -away.x);
-    const c = unitBounds(zoneById.get(s.shelfId).unit).center;
-    const side = (e.h.position.x - c.x) * along.x + (e.h.position.z - c.z) * along.z >= 0 ? 1 : -1;
-    const dir = away.scale(Math.cos(PFOCUS.yaw)).add(along.scale(side * Math.sin(PFOCUS.yaw)));
-    const pose = poseFromOffset(dir.scale(PFOCUS.dist).add(new Vector3(0, PFOCUS.height, 0)));
-    return {
-      ...pose,
-      target: new Vector3(e.h.position.x, PFOCUS.targetY, e.h.position.z),
-      zoom: PFOCUS.zoom,
-    };
-  }
-
-  function shortestAngle(from, to) {
-    let d = (to - from) % (Math.PI * 2);
-    if (d > Math.PI) d -= Math.PI * 2;
-    if (d < -Math.PI) d += Math.PI * 2;
-    return from + d;
-  }
-
-  function flyTo(pose) {
-    fly.fromAlpha = camera.alpha;
-    fly.toAlpha = shortestAngle(camera.alpha, pose.alpha);
-    fly.fromBeta = camera.beta;
-    fly.toBeta = pose.beta;
-    fly.fromRadius = camera.radius;
-    fly.toRadius = pose.radius;
-    fly.fromTarget.copyFrom(camera.target);
-    fly.toTarget.copyFrom(pose.target);
-    fly.fromZoom = zoom;
-    fly.toZoom = pose.zoom;
-    fly.t = 0;
-    fly.active = true;
-    camera.detachControl();
-    // radius is locked for orbit; relax the lock so the tween can move it
-    camera.lowerRadiusLimit = camera.upperRadiusLimit = null;
-  }
 
   // ============================================================
   //  Stacked Floor-2 view + escalators  (FLOOR PLAN buttons)
@@ -981,59 +629,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   let floor2 = null;            // TransformNode parenting all the clones
   const floor2Meshes = [];      // solid clones we cross-fade via .visibility
   const floor2Lines = [];       // { m, base } — LinesMesh ignores .visibility, fade its .alpha instead
-  function buildFloor2() {
-    if (floor2) return;
-    floor2 = new TransformNode('floor2', scene);
-    floor2.position.y = FLOOR_RISE;
-    for (const src of l1Roots) {
-      if (src.name === 'floor') continue; // Floor 2 gets a decked floor with a stairwell well instead
-      const c = src.clone(src.name + '_f2', floor2);
-      if (!c) continue;
-      for (const m of [c, ...c.getChildMeshes(false)]) {
-        m.isPickable = false;   // Floor 2 is decor — it never picks or dims as a target
-        m.metadata = null;
-        m.visibility = 0;
-        if (m.getClassName?.() === 'LinesMesh') { floor2Lines.push({ m, base: m.alpha }); m.alpha = 0; }
-        if (m.getTotalVertices && m.getTotalVertices() > 0) floor2Meshes.push(m);
-      }
-    }
-    buildFloor2Deck();
-    floor2.setEnabled(false);
-  }
-
-  // Floor-2 floor: the room minus a rectangular stairwell (tiled as strips so we
-  // dodge a CSG boolean on a fading clone), ringed on its open sides by an emissive lip.
-  function buildFloor2Deck() {
-    const R = ROOM / 2;
-    const panel = (cx, cz, w, d) => {
-      if (w <= 0.01 || d <= 0.01) return;
-      const p = MeshBuilder.CreatePlane('deckF2', { width: w, height: d }, scene);
-      p.rotation.x = Math.PI / 2;
-      p.position.set(cx, 0, cz);
-      p.material = mat.floor;
-      p.isPickable = false;
-      p.visibility = 0;
-      // mid-fade the deck joins the alpha-blend queue (visibility<1); draw it
-      // before the always-alpha grid/edge lines so it can't paint over them
-      p.alphaIndex = 0;
-      p.parent = floor2;
-      floor2Meshes.push(p);
-    };
-    panel(0, (WELL.z1 + R) / 2, ROOM, R - WELL.z1);                                   // in front of the well
-    panel(0, (-R + WELL.z0) / 2, ROOM, WELL.z0 + R);                                  // behind the well
-    panel((WELL.x1 + R) / 2, (WELL.z0 + WELL.z1) / 2, R - WELL.x1, WELL.z1 - WELL.z0); // right of the well
-    // emissive lip around the three open sides (the fourth hugs the wall)
-    const cx = (WELL.x0 + WELL.x1) / 2, cz = (WELL.z0 + WELL.z1) / 2;
-    const lip = (w, d, x, z) => {
-      const b = box(w, 0.35, d, bandMat, x, 0.02, z);
-      b.parent = floor2;
-      b.visibility = 0;
-      floor2Meshes.push(b);
-    };
-    lip(WELL.x1 - WELL.x0, 0.12, cx, WELL.z1); // front edge
-    lip(WELL.x1 - WELL.x0, 0.12, cx, WELL.z0); // back edge
-    lip(0.12, WELL.z1 - WELL.z0, WELL.x1, cz); // right edge
-  }
 
   // ---- fade tween (advanced from the render loop) ----
   // Fade-in outruns the 0.9s camera fly so Floor 2 is fully solid before the
@@ -1042,80 +637,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const FLOOR2_FADE_IN = 0.35;
   const floor2Anim = { active: false, t: 0, from: 0, to: 0, value: 0, dur: FLY_DUR };
   let floorHome = null;         // camera pose saved on the way up, restored on the way down
-  function setFloor2(show) {
-    if (show) buildFloor2();
-    if (!floor2) return;
-    if (show) floor2.setEnabled(true); // enable up-front so the fade-in is visible
-    floor2Anim.from = floor2Anim.value;
-    floor2Anim.to = show ? 1 : 0;
-    floor2Anim.dur = show ? FLOOR2_FADE_IN : FLY_DUR;
-    floor2Anim.t = 0;
-    floor2Anim.active = true;
-  }
-
-  // FLOOR PLAN buttons route here. Only Floor 2 (index 1) stacks a storey;
-  // Floor 1 and the not-yet-built Floor 3 both collapse back to a single storey.
-  function setFloor(i) {
-    const show = i === 1;
-    setFloor2(show);
-    if (show) {
-      if (!floorHome) floorHome = { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone(), zoom };
-      // keep the user's orbit, lift the aim to mid-building and zoom to frame both
-      // storeys. 0.95 crops the outermost wall-top corners slightly (~30px at the
-      // default orbit) — chosen deliberately for a tighter, closer look.
-      flyTo({ alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: new Vector3(0, FLOOR_RISE - 1, 0), zoom: 0.95 });
-    } else if (floorHome) {
-      flyTo(floorHome);
-      floorHome = null;
-    }
-  }
 
   // ---- escalators: an up/down pair in the back-left corner, always visible ----
   const escParts = []; // { treads, rail, L, speed, dir } — animated in the render loop
   const escGlass = basic('escGlass', { color: 0x35c3ff, alpha: 0.16 });
   const escTread = pbr('escTread', { color: 0x2a3a5c, emissive: 0x35c3ff, emissiveIntensity: 0.5, roughness: 0.5, metalness: 0.4 });
-  function escalator(x, z, rotY, dir) {
-    const g = group('escalator');
-    g.position.set(x, 0, z);
-    g.rotation.y = rotY;
-    g.parent = world;
-
-    const rise = FLOOR_RISE, run = 10;
-    const L = Math.hypot(run, rise), ang = Math.atan2(rise, run), w = 1.5;
-
-    // flat landings — bottom on Floor 1, top level with Floor 2
-    box(2, 0.3, w + 0.4, mat.metal, -0.6, 0, 0).parent = g;
-    box(2, 0.3, w + 0.4, mat.metal, run + 0.6, rise - 0.3, 0).parent = g;
-
-    // tilted spine everything rides on (local +x runs up the slope)
-    const inc = group('inc');
-    inc.parent = g;
-    inc.rotation.z = ang;
-    box(L, 0.5, w, mat.shelfDk, L / 2, -0.35, 0).parent = inc; // truss underside
-    for (const s of [-1, 1]) {
-      box(L, 1.1, 0.1, escGlass, L / 2, 0.55, (s * w) / 2).parent = inc;  // balustrade glass
-      box(L, 0.18, 0.34, mat.metal, L / 2, 1.15, (s * w) / 2).parent = inc; // handrail cap
-    }
-
-    // moving step treads
-    const nT = 16, gap = L / nT, treads = [], rail = [];
-    for (let i = 0; i < nT; i++) {
-      const t = box(gap * 0.62, 0.18, w * 0.86, escTread, 0, 0.02, 0);
-      t.parent = inc;
-      t.position.x = i * gap;
-      treads.push(t);
-    }
-    // moving handrail nubs, so the rail visibly travels with the steps
-    for (const s of [-1, 1]) {
-      for (let i = 0; i < nT; i++) {
-        const r = box(0.3, 0.1, 0.14, mat.metal, 0, 1.3, (s * w) / 2);
-        r.parent = inc;
-        r.position.x = i * gap;
-        rail.push(r);
-      }
-    }
-    escParts.push({ treads, rail, L, speed: 2.4, dir });
-  }
   // back-left corner, two parallel lanes side-by-side in world X, both facing the
   // same way: Floor-1 landings at the front (z -3), Floor-2 landings at the back —
   // stand at the front and board up or step off down right next to each other.
@@ -1141,12 +667,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const dimSkip = new Set(['selOutline', 'hoverMat', ...shelfLocks.map((lk) => 'lockLed' + lk.id)]);
   const dimReg = [];
   const seenMat = new Set();
-  function zoneIdOf(mesh) {
-    for (let p = mesh; p; p = p.parent) {
-      if (p.metadata && p.metadata.shelfId !== undefined) return p.metadata.shelfId;
-    }
-    return 0;
-  }
   scene.meshes.forEach((o) => {
     if (!o.material || dimSkip.has(o.material.name)) return;
     const mats = o.material.subMaterials ? o.material.subMaterials : [o.material];
@@ -1165,70 +685,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const DIM_DUR = FLY_DUR;
   const dim = { active: false, t: 0, from: 0, to: 0, value: 0 };
   let dimFocus = null;
-  function applyDim(v) {
-    for (const e of dimReg) {
-      const f = e.zoneId !== dimFocus ? 1 - (1 - DIM_FLOOR) * v : 1;
-      if (e.albedo) e.m.albedoColor.copyFrom(e.albedo).scaleInPlace(f);
-      if (e.emissive) e.m.emissiveColor.copyFrom(e.emissive).scaleInPlace(f);
-    }
-  }
-  function setDim(focusId) {
-    if (focusId) dimFocus = focusId;
-    dim.from = dim.value;
-    dim.to = focusId ? 1 : 0;
-    dim.t = 0;
-    dim.active = true;
-  }
 
   // ---------- selection API (React <-> scene) ----------
   let selectedId = null;
   let hoverId = null;
   let hoverProgress = 0;
-  function selectShelf(id) {
-    const pf = pendingFocusPose; // dbl-click pose rides one round-trip, then dies
-    pendingFocusPose = null;
-    const prev = selectedId;
-    selectedId = id || null;
-    if (!selectedId) {
-      selOutline.isVisible = false;
-      setDim(null);
-      if (homePose) { flyTo(homePose); homePose = null; }
-      return;
-    }
-    if (!zoneById.has(selectedId)) { selectedId = prev; return; } // unknown id — leave the camera alone
-    if (!prev && !homePose) {
-      homePose = { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone(), zoom };
-    }
-    frameOutline(selOutline, zoneById.get(selectedId).unit, 0.5);
-    setDim(selectedId);
-    flyTo(pf && pf.id === selectedId ? pf.pose : landingPoseFor(selectedId));
-  }
 
   // ---------- picking (shelves + people share one nearest-hit ray) ----------
-  function pickTarget() {
-    const allowPerson = selectedId == null; // design rule: shelf focus locks people out
-    const hit = scene.pick(scene.pointerX, scene.pointerY, (m) => {
-      if (!m.isPickable || !m.metadata) return false;
-      if (m.metadata.shelfId !== undefined) return true;
-      // person capsules become pickable once the async model is actually visible
-      return allowPerson && m.metadata.personId !== undefined && !!m.parent?.metadata?.ready;
-    });
-    if (!hit || !hit.hit || !hit.pickedMesh) return null;
-    const md = hit.pickedMesh.metadata;
-    return md.personId !== undefined
-      ? { type: 'person', id: md.personId }
-      : { type: 'shelf', id: md.shelfId };
-  }
-  function setHoverGlow(id) {
-    hoverId = id;
-    const zn = zoneById.get(id);
-    if (!zn) return;
-    const b = unitBounds(zn.unit);
-    const pad = 0.35;
-    const ud = hoverGlow.metadata;
-    ud.sx = b.size.x + pad; ud.sy = b.size.y + pad; ud.sz = b.size.z + pad;
-    ud.cx = b.center.x; ud.cy = b.center.y; ud.cz = b.center.z;
-  }
 
   const CLICK_SLOP = 6;
   let downPos = null;
@@ -1276,19 +739,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
 
   // ---------- ceiling sensors ----------
   const sensors = [];
-  function sensor(x, z) {
-    const g = group('sensor');
-    box(0.6, 0.3, 0.6, mat.metal, 0, 8.4, 0).parent = g;
-    const lens = MeshBuilder.CreateSphere('lens', { diameter: 0.36, segments: 16 }, scene);
-    lens.material = basic('lensMat', { color: 0x9fe6ff });
-    lens.position.set(0, 8.4, 0);
-    lens.isPickable = false;
-    lens.parent = g;
-    g.position.set(x, 0, z);
-    g.parent = world;
-    g.metadata = { lens, t: Math.random() * 6 };
-    sensors.push(g);
-  }
   sensor(-3, -8); sensor(6, -3); sensor(-8, 4); sensor(4, 6);
 
   // ---------- shoppers (Quaternius CC0 rigged characters, public/models/) ----------
@@ -1315,89 +765,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const SUITS = ['#232a3d', '#2f2f33', '#3a2f28', '#20302a']; // suits stay sober
   const DRESS_SHIRTS = ['#e8e8e8', '#dbe4f0', '#f0e4e4'];
   let lookSeq = 0;
-  function buildLook(file) {
-    const i = ++lookSeq;
-    const pick = (arr, stride) => arr[(i * stride) % arr.length];
-    // 'Skin' is the whole body (head/neck/arms/hands); 'Face' is the thin
-    // eye/brow band at the front of the head — skin tone on the body, a dark
-    // colour on the band so the eyes read against the skin instead of vanishing
-    const skin = pick(SKIN_TONES, 3);
-    const look = { Skin: skin, Face: EYE_DARK };
-    if (file === 'Suit_Male') {
-      look.Black = pick(SUITS, 3); // 'Black' is the jacket+trousers material
-      look.Shirt = pick(DRESS_SHIRTS, 2);
-    } else {
-      look.Shirt = pick(SHIRTS, 7);
-      look.Pants = pick(PANTS, 5);
-    }
-    if (file === 'OldClassy_Female') look.Hair = pick(HAIR_GREY, 3);
-    else if (i % 7 === 5) look.Hair = HAIR_FASHION[i % HAIR_FASHION.length];
-    else look.Hair = pick(HAIR_NATURAL, 5); // stride 5: coprime with 6
-    // card avatar echoes the torso garment so the UI ties back to the 3D body
-    look.torso = look.Black || look.Shirt;
-    return look;
-  }
-
-  function makeHuman(file) {
-    const h = group('human');
-    const u = { ready: false, groups: {}, fist: null, entries: null, look: buildLook(file), mats: null };
-    h.metadata = u;
-    loadCharContainer(file).then((container) => {
-      if (h.isDisposed()) return; // removed while still loading
-      // cloneMaterials + doNotInstantiate: instanced meshes silently keep the
-      // shared material (assetContainer skips the swap on InstancedMesh), so
-      // real clones are required for the per-person tints
-      const entries = container.instantiateModelsToScene((n) => n, true, { doNotInstantiate: true });
-      const root = entries.rootNodes[0];
-      root.parent = h;
-      // normalize to a common height (see TARGET_H) rather than a fixed scale,
-      // so models authored in different units land the same size in the crowd.
-      // The scale was measured once when the file loaded (measureBindHeight) —
-      // never re-measure per clone, the clone's bounding box lies.
-      root.scaling.setAll(charScale.get(file) ?? CHAR_SCALE);
-      const mats = new Set();
-      root.getChildMeshes().forEach((m) => {
-        m.isPickable = false;
-        shadowGen.addShadowCaster(m);
-        if (m.material) {
-          mats.add(m.material);
-          const hex = u.look[m.material.name];
-          if (hex) m.material.albedoColor = Color3.FromHexString(hex).toLinearSpace();
-          // emissive lift: the blue light rig reflects nothing off warm tones,
-          // so let every body part glow its own albedo a little. body skin
-          // ('Skin') gets a stronger lift so warm tones still read under the
-          // blue rig instead of crushing to black; the 'Face' eye band gets no
-          // lift so the eyes stay dark against the skin.
-          const name = m.material.name;
-          const lift = name === 'Skin' ? 0.5 : name === 'Face' ? 0 : 0.3;
-          // textured models (e.g. the Mixamo character) have no flat albedoColor
-          // to glow, so drive the lift from their albedo texture instead
-          if (m.material.albedoTexture) {
-            m.material.emissiveTexture = m.material.albedoTexture;
-            m.material.emissiveColor = new Color3(lift, lift, lift);
-          } else {
-            m.material.emissiveColor = m.material.albedoColor.scale(lift);
-          }
-        }
-      });
-      u.mats = [...mats];
-      entries.animationGroups.forEach((g) => { g.stop(); u.groups[g.name] = g; });
-      u.fist = root.getDescendants().find((n) => n.name === 'Fist.R' || n.name === 'mixamorig_RightHand') || null;
-      u.entries = entries;
-      u.ready = true;
-    }).catch((e) => console.error('character load failed:', file, e));
-    return h;
-  }
-  function disposeHuman(h) {
-    unregisterPerson(h); // closes the detail card if this was the followed shopper
-    const u = h.metadata || {};
-    if (u.entries) {
-      u.entries.animationGroups.forEach((g) => g.dispose());
-      u.entries.skeletons.forEach((s) => s.dispose());
-    }
-    if (u.mats) u.mats.forEach((m) => m.dispose()); // per-person tint clones
-    h.dispose(false, false); // recursively disposes the clone's meshes
-  }
 
   // ---------- person identity + selection (click a shopper → floating card) ----------
   // Identities come from the mock customer roster (users.json), consumed in
@@ -1423,38 +790,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     // display-only profile fields carried through to the dashboard cards
     avatarUrl: u.avatar_url ?? '', email: u.email ?? '',
   });
-  // a freshly minted (apiId-less) walk-in identity — the random crowd. Never
-  // touches the roster, so these stay off the users API entirely.
-  function genIdentity() {
-    const id = ++identSeq;
-    const female = id % 2 === 0; // walk-ins alternate so both wardrobes stay in play
-    const firsts = female ? FIRST_F : FIRST_M;
-    const first = firsts[(id * 3 + (female ? 1 : 0)) % firsts.length];
-    const last = LAST[(id * 7 + 3) % LAST.length]; // stride coprime with 10 → all 10 surnames cycle
-    return { custNo: String(id).padStart(2, '0'), name: `${first} ${last}`, female };
-  }
-  function nextIdentity() {
-    // only customers the API says are inside may be seeded onto the floor;
-    // outside/waiting ones arrive through enter, never as ambient fill
-    while (rosterIdx < users.length && users[rosterIdx].status && users[rosterIdx].status !== 'inside') rosterIdx++;
-    if (rosterIdx < users.length) return identFromUser(users[rosterIdx++]);
-    return genIdentity();
-  }
-  // first + last word of the name (roster names are free text, may be one word)
-  function initialsOf(name) {
-    const w = name.trim().split(/\s+/);
-    return w[0].charAt(0) + (w.length > 1 ? w[w.length - 1].charAt(0) : '');
-  }
-
-  // avatar chip = the shopper's torso tint, lifted toward mid-brightness so
-  // the white initials stay readable (suits are near-black otherwise)
-  function cardColor(hex) {
-    const c = Color3.FromHexString(hex);
-    const lum = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
-    const w = lum < 0.35 ? 0.35 : 0.1;
-    const f = (v) => Math.round((v + (1 - v) * w) * 255).toString(16).padStart(2, '0');
-    return '#' + f(c.r) + f(c.g) + f(c.b);
-  }
 
   const persons = new Map(); // personId -> entry
   let personSeq = 0;
@@ -1470,160 +805,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // body despawns first). onReveal(true) reveals it, onReveal(false) drops it.
   let flashPending = null;
 
-  // invisible pick proxy — rides along and is disposed with the person's body
-  function makePickCap(personId, h) {
-    const cap = MeshBuilder.CreateCapsule('personCap' + personId, { radius: 0.5, height: 2.6, tessellation: 8 }, scene);
-    cap.position.y = 1.3;
-    cap.visibility = 0;
-    cap.isPickable = true;
-    cap.metadata = { personId };
-    cap.parent = h;
-    return cap;
-  }
-
-  function registerPerson(h, kind, ident, ref) {
-    const id = ++personSeq;
-    makePickCap(id, h);
-    const entry = {
-      id, h, kind, ref, // ref: the shopper sim object (mode/exit/slot live there)
-      custNo: ident.custNo,
-      name: ident.name,
-      initials: initialsOf(ident.name),
-      female: ident.female,
-      apiId: ident.apiId ?? null, // set for roster/API customers, null for walk-ins
-      avatarUrl: ident.avatarUrl ?? '', // '' for walk-ins → card falls back to chip
-      email: ident.email ?? '', // '' for walk-ins → card hides the email
-      color: cardColor(h.metadata.look.torso),
-      spawnT: elapsed,
-      picks: 0,
-      nearShelf: zones[0]?.id ?? 1, // set when a browse session starts; walking: computed live in getPersonData
-    };
-    persons.set(id, entry);
-    return entry;
-  }
-
-  function unregisterPerson(h) {
-    for (const [id, e] of persons) {
-      if (e.h !== h) continue;
-      persons.delete(id);
-      if (hoverPersonId === id) hoverPersonId = null;
-      if (selectedPersonId === id) { selectedPersonId = null; onSelectPerson?.(null); }
-      break;
-    }
-  }
-
-  // React <-> scene sync (mirror of selectShelf, for people)
-  function selectPerson(id) {
-    if (id && !persons.has(id)) { onSelectPerson?.(null); return; } // despawned between click and sync
-    selectedPersonId = id || null;
-    if (hoverPersonId === selectedPersonId) hoverPersonId = null;
-  }
-
-  function getPersonData(id) {
-    const e = persons.get(id);
-    if (!e) return null;
-    let status, near, picks = null;
-    const nearestZone = () => {
-      let best = Infinity, nz = zones[0]?.id ?? 1;
-      zones.forEach((zn) => {
-        const d = (zn.pos.x - e.h.position.x) ** 2 + (zn.pos.z - e.h.position.z) ** 2;
-        if (d < best) { best = d; nz = zn.id; }
-      });
-      return nz;
-    };
-    if (e.ref.mode === 'browse') {
-      // commanded sessions (API shelf sub-machine): scanning until the door
-      // opens; ambient self-scanners only flash 'scanning' during the gesture
-      status = e.ref.shelfHold
-        ? (e.ref.access ? 'browsing' : 'scanning')
-        : e.ref.shelfScan ? 'scanning' : 'browsing';
-      near = e.nearShelf;
-    } else {
-      status = e.ref.verifying ? 'verifying'
-        : e.ref.paying ? 'paying'
-        : (e.ref.exit || e.ref.retreat || e.ref.mode === 'exitwalk') ? 'leaving' : 'walking';
-      near = nearestZone();
-    }
-    picks = e.picks; // cumulative across every browse session this visit
-    return {
-      id, custNo: e.custNo, name: e.name, initials: e.initials, color: e.color,
-      avatarUrl: e.avatarUrl, email: e.email,
-      kind: e.kind, status, near, picks, api: e.apiId != null, apiId: e.apiId ?? null,
-      inStoreSec: Math.max(0, Math.floor(elapsed - e.spawnT)),
-    };
-  }
-
-  function bindCard(el) {
-    cardEl = el;
-    if (cardEl) cardEl.style.visibility = 'hidden'; // revealed on the first tracked frame
-  }
-
-  // verify/pay-pass image bubble: React hands over its wrapper el (bindFlash)
-  // and arms a pending flash (armFlash) on the SSE pass. The bubble only
-  // reveals once the in-scene scan beam sweeps that customer through — see
-  // notifyScanPass, fired from the entry/exit gate sweep-complete. Shared by
-  // both verify and pay. The frame loop writes the follow transform, mirroring
-  // the person-card track above.
-  function bindFlash(el) {
-    flashEl = el;
-    if (flashEl) flashEl.style.visibility = 'hidden'; // revealed on the first tracked frame
-    else flashApiId = null;                            // React unmounted it → stop tracking
-  }
-  // arm on the SSE pass; hold until the scan beam clears this customer. No body
-  // in the scene means no sweep will ever come, so drop it right away.
-  function armFlash(apiId, onReveal) {
-    if (!shopperByApiId(apiId)) { onReveal?.(false); return; }
-    flashPending = { apiId, onReveal };
-  }
-  // the gate sweep just cleared this shopper (green flash / ID or paid tag) — if
-  // a flash was armed for them, reveal it now and start React's 3s clock.
-  function notifyScanPass(p) {
-    const id = p?.person?.apiId;
-    if (id == null || !flashPending || flashPending.apiId !== id) return;
-    flashApiId = id;
-    const cb = flashPending.onReveal; flashPending = null;
-    cb?.(true);
-  }
-
-  // selection / hover rings under the feet (RTS style). Shared meshes that
-  // chase the current target each frame — parenting them to the person would
-  // get them disposed together with the human on despawn.
-  function personRing(name, alpha) {
-    const r = MeshBuilder.CreateTorus(name, { diameter: 1.5, thickness: 0.07, tessellation: 40 }, scene);
-    const m = new StandardMaterial(name + 'Mat', scene);
-    m.disableLighting = true;
-    m.emissiveColor = ACCENT.scale(1.2);
-    m.alpha = alpha;
-    m.alphaMode = Engine.ALPHA_ADD;
-    m.disableDepthWrite = true;
-    m.backFaceCulling = false;
-    r.material = m;
-    r.isPickable = false;
-    r.isVisible = false;
-    r.parent = world;
-    return r;
-  }
   const selRing = personRing('personSelRing', 0.8);
   const hoverRing = personRing('personHoverRing', 0.3);
-
-  // arc-length sampled path (≈ Three CatmullRomCurve3 getPointAt/getTangentAt)
-  function makePath(points, closed) {
-    const curve = Curve3.CreateCatmullRomSpline(points, 16, closed);
-    const pts = curve.getPoints();
-    const cum = [0];
-    for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Vector3.Distance(pts[i - 1], pts[i]));
-    const total = cum[cum.length - 1] || 1;
-    function pointAt(t) {
-      const d = ((t % 1) + 1) % 1 * total;
-      let i = 1;
-      while (i < cum.length && cum[i] < d) i++;
-      const i0 = i - 1, i1 = Math.min(i, pts.length - 1);
-      const seg = (cum[i1] - cum[i0]) || 1;
-      return Vector3.Lerp(pts[i0], pts[i1], (d - cum[i0]) / seg);
-    }
-    function tangentAt(t) { return pointAt(t + 0.002).subtract(pointAt(t - 0.002)).normalize(); }
-    return { pointAt, tangentAt, length: total };
-  }
 
   // waypoints verified against the default layout's footprints (spline min
   // clearance 0.68 units incl. the curve's bow); fixed architecture — JSON
@@ -1632,13 +815,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // coarse arc samples for "is the robot parked astride the walk line" checks
   const walkPathPts = [];
   for (let i = 0; i < 200; i++) walkPathPts.push(walkPath.pointAt(i / 200));
-  function nearWalkPath(x, z, r) {
-    for (const q of walkPathPts) {
-      const dx = q.x - x, dz = q.z - z;
-      if (dx * dx + dz * dz < r * r) return true;
-    }
-    return false;
-  }
 
   // ---------- entrance: low glass storefront + auto sliding doors ----------
   // sits on the open camera-side edge (z = +half) right above the walk loop's
@@ -1795,15 +971,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   paidTag.position.set(EXIT.x, 2.1, GATE.z);
   paidTag.parent = world;
   let paidTagT = Infinity;
-  function showPaidTag() {
-    // shoppers carry no real basket (picked items vanish into an imaginary
-    // bag at the shelf), so the charged amount is decorative
-    const amt = 60 + Math.floor(Math.random() * 560);
-    drawVerdictTag(paidTex.getContext(), `฿${amt} ✓`, '#4caf72');
-    paidTex.update();
-    paidTagT = 0;
-    paidTag.isVisible = true;
-  }
 
   // red "DECLINED" twin of the paid tag — pops when an API payment fails so
   // it reads why the shopper is stuck at the gate (not just red lamps)
@@ -1824,12 +991,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   declinedTag.position.set(EXIT.x, 2.1, GATE.z);
   declinedTag.parent = world;
   let declinedTagT = Infinity;
-  function showDeclinedTag() {
-    drawVerdictTag(declinedTex.getContext(), 'DECLINED ✗', '#e2574c', 480);
-    declinedTex.update();
-    declinedTagT = 0;
-    declinedTag.isVisible = true;
-  }
 
   // PASS/FAILED badge over a shopper's head at a shelf reader (the scanQR
   // verdict of the API shelf sub-machine). The words never change, so two
@@ -1899,10 +1060,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   idTag.position.set(DOOR.x, 2.1, ENTRY_GATE.z);
   idTag.parent = world;
   let idTagT = Infinity;
-  function showIdTag() {
-    idTagT = 0;
-    idTag.isVisible = true;
-  }
 
   // entry gate state: deny > 0 while the red "rescan" flash runs
   const entryGate = { user: null, flash: 0, deny: 0 };
@@ -2005,59 +1162,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     reticleTex.update();
   }
   const _headPos = new Vector3();
-  function makeFaceReticle(name) {
-    const rMat = new StandardMaterial(name + 'Mat', scene);
-    rMat.disableLighting = true;
-    rMat.emissiveColor = ACCENT.clone();
-    rMat.emissiveTexture = reticleTex;
-    rMat.opacityTexture = reticleTex;
-    rMat.backFaceCulling = false;
-    const plane = MeshBuilder.CreatePlane(name, { size: 0.55 }, scene);
-    plane.material = rMat;
-    plane.billboardMode = TransformNode.BILLBOARDMODE_ALL;
-    plane.isPickable = false;
-    plane.isVisible = false;
-    plane.parent = world;
-    const r = { target: null, t: 0, hold: 0, seed: Math.random() * 10 };
-    r.start = (p) => { r.target = p; r.t = 0; r.hold = 0; rMat.alpha = 1; plane.isVisible = true; };
-    r.succeed = () => { r.hold = 0.6; }; // green hold, then fade out
-    r.step = (dt, denied) => {
-      const p = r.target;
-      if (!p) return;
-      if (p.h.isDisposed()) { r.target = null; plane.isVisible = false; return; }
-      r.t += dt;
-      // follow the rig's head node when it has one (rides the idle bob);
-      // fixed height above the root otherwise
-      if (!p.headNode && p.h.metadata?.ready) {
-        p.headNode = p.h.getDescendants(false).find((n) => /head/i.test(n.name)) || 'none';
-      }
-      if (p.headNode && p.headNode !== 'none') {
-        _headPos.copyFrom(p.headNode.getAbsolutePosition());
-      } else {
-        _headPos.copyFrom(p.h.getAbsolutePosition());
-        _headPos.y += 1.55;
-      }
-      if (r.t > 0.25 && r.hold <= 0) { // tracking jitter once locked
-        _headPos.x += Math.sin(elapsed * 21 + r.seed) * 0.008;
-        _headPos.y += Math.cos(elapsed * 17 + r.seed) * 0.008;
-      }
-      plane.setAbsolutePosition(_headPos);
-      // lock-on: open at 1.8× and snap down onto the face
-      plane.scaling.setAll(1 + Math.max(0, (0.25 - r.t) / 0.25) * 0.8);
-      if (r.hold > 0) { // verified — green, hold, fade out while they walk on
-        r.hold -= dt;
-        rMat.emissiveColor.copyFrom(LAMP_GREEN);
-        rMat.alpha = Math.min(1, r.hold / 0.35);
-        if (r.hold <= 0) { r.target = null; plane.isVisible = false; rMat.alpha = 1; }
-      } else if (denied) { // entry rescan — blink red with the post lamps
-        const blink = Math.sin(elapsed * 16) > 0 ? 1 : 0.3;
-        rMat.emissiveColor.copyFrom(LAMP_RED).scaleInPlace(blink);
-      } else {
-        rMat.emissiveColor.copyFrom(ACCENT);
-      }
-    };
-    return r;
-  }
   const entryReticle = makeFaceReticle('entryFaceReticle');
   const exitReticle = makeFaceReticle('exitFaceReticle');
 
@@ -2148,71 +1252,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     entry: { panes: [[1.36, -1.96], [2.72, 2.64]], header: [6.7, 0.68], gateD: 1.0 },
     exit: { panes: [[3.6, -3.16], [3.6, 3.16]], header: [9.9, 0], gateD: 1.9 },
   };
-  // build one gated doorway on the right wall. kind: 'entry' | 'exit'
-  function makeRightDoorway(centerZ, kind) {
-    const rig = R_RIG[kind];
-    const H = 2.5;
-    // world point: a = along the wall (+z), d = depth inward (+ = into store)
-    const W = (a, d) => ({ x: half - d, z: centerZ + a });
-    const facing = -Math.PI / 2; // face −x, into the store
-    // a wall box spanning `wa` along z (world depth) and `tn` through x (world
-    // width), floor-anchored at (a, d), optional y lift
-    const wput = (wa, h, tn, a, d, m, y = 0) => {
-      const p = W(a, d);
-      const mesh = box(tn, h, wa, m, p.x, y, p.z);
-      mesh.parent = world;
-      return mesh;
-    };
-    wput(0.16, H, 0.16, -1.28, 0, mat.metal);
-    wput(0.16, H, 0.16, 1.28, 0, mat.metal);
-    for (const [pw, pa] of rig.panes) wput(pw, H - 0.1, 0.06, pa, 0, glassMat);
-    wput(rig.header[0], 0.22, 0.2, rig.header[1], 0, mat.metal, H);
-    wput(rig.header[0], 0.06, 0.22, rig.header[1], 0, trimMat, H + 0.22);
-    wput(3.4, 0.04, 2.6, 0, -1.35, mat.counter); // pad outside
-    wput(3.4, 0.02, 0.14, 0, -0.35, trimMat, 0.04); // cyan strip on the pad
-    const panels = [-1, 1].map((s) => {
-      const p0 = W(s * 0.62, 0.14);
-      // box() floor-anchors its y param — 0.02 puts the panel centre at 1.19,
-      // matching the front doors (which set the centre absolutely)
-      const panel = box(0.07, 2.34, 1.24, doorGlassMat, p0.x, 0.02, p0.z);
-      box(0.08, 2.34, 0.1, trimMat, 0, -1.17, 0).parent = panel;
-      panel.parent = world;
-      return { mesh: panel, side: s, closedZ: p0.z };
-    });
-    const lampMats = [];
-    for (const s of [-1, 1]) {
-      const gp = W(s * 0.8, rig.gateD);
-      box(0.18, 1.18, 0.18, mat.metal, gp.x, 0, gp.z).parent = world;
-      const cam = box(0.3, 0.13, 0.13, mat.shelfDk, gp.x, 1.18, gp.z);
-      cam.rotation.y = facing; cam.rotation.x = 0.32;
-      cam.parent = world;
-      const lm = basic(`rGateLamp${kind}${s}`, { color: 0x35c3ff, alpha: 0.95 });
-      lampMats.push(lm);
-      box(0.2, 0.05, 0.2, lm, gp.x, 1.33, gp.z).parent = world;
-    }
-    const gw = W(0, rig.gateD);
-    const beam = MeshBuilder.CreateBox(`rGateBeam${kind}`, { width: 0.7, height: 0.05, depth: 1.42 }, scene);
-    beam.material = gateBeamMat; beam.isPickable = false; beam.isVisible = false;
-    beam.position.set(gw.x, 1, gw.z); beam.parent = world;
-    // floating verdict tag over the gate
-    const mkTag = (draw, tw = 384, pw = 1.9) => {
-      const key = `${kind}${centerZ}${Math.random()}`;
-      const tex = new DynamicTexture(`rTagTex${key}`, { width: tw, height: 144 }, scene, true);
-      tex.hasAlpha = true; tex.uScale = -1; tex.uOffset = 1;
-      const m = new StandardMaterial(`rTagMat${key}`, scene);
-      m.disableLighting = true; m.emissiveTexture = tex; m.opacityTexture = tex; m.backFaceCulling = false;
-      const plane = MeshBuilder.CreatePlane(`rTagPl${key}`, { width: pw, height: 0.71 }, scene);
-      plane.material = m; plane.billboardMode = TransformNode.BILLBOARDMODE_ALL;
-      plane.isPickable = false; plane.isVisible = false;
-      plane.position.set(gw.x, 2.1, gw.z); plane.parent = world;
-      if (draw) draw(tex.getContext());
-      tex.update();
-      return { plane, mat: m, tex };
-    };
-    const doorAnchor = { x: W(0, 0).x, z: centerZ };
-    const reticle = makeFaceReticle(`rReticle${kind}${centerZ}`);
-    return { panels, lampMats, beam, gateWorld: gw, doorAnchor, reticle, mkTag, openAmt: 0 };
-  }
 
   const rEntry = makeRightDoorway(R_ENTRY_Z, 'entry');
   const rExit = makeRightDoorway(R_EXIT_Z, 'exit');
@@ -2301,218 +1340,14 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     idTagT: Infinity, paidTagT: Infinity, declinedTagT: Infinity,
   };
 
-  // walking temperament, rolled once per shopper: rusher barrels through and
-  // rarely stops, stroller ambles and window-shops, browser is the shelf
-  // magnet. Applies to API customers too — it's visual life only; commands
-  // cancel a pause on arrival and the junction dice still never rolls for them.
-  function rollPersona() {
-    const r = Math.random();
-    if (r < 0.25) return { speed: 0.042 + Math.random() * 0.013, pauseMul: 3.5, pauseDurMul: 0.6, diceMul: 0.4 }; // rusher
-    if (r < 0.6) return { speed: 0.026 + Math.random() * 0.010, pauseMul: 0.7, pauseDurMul: 1.0, diceMul: 1.0 }; // stroller
-    return { speed: 0.032 + Math.random() * 0.014, pauseMul: 1.0, pauseDurMul: 1.0, diceMul: 1.6 }; // browser
-  }
-
-  function makeShopper(mode, identOverride, pc = frontPC) {
-    const ident = identOverride ?? nextIdentity();
-    const persona = rollPersona();
-    const h = makeHuman(nextCharFile(ident.female));
-    // browse kit, disabled until a shelf visit: a hand-sized item (one of
-    // four small-goods shapes — can / bottle / snack bag / packet — re-rolled
-    // per gesture by armItem), phone + beam for the QR scan, green access
-    // ring for the feet
-    const itemMat = pbr('pickItemM', { color: productColors[0], roughness: 0.7 });
-    const item = new TransformNode('pickItem', scene);
-    item.parent = world;
-    const shape = (mesh) => {
-      mesh.material = itemMat;
-      mesh.isPickable = false;
-      shadowGen.addShadowCaster(mesh);
-      mesh.parent = item;
-      return mesh;
-    };
-    const itemShapes = [
-      shape(MeshBuilder.CreateCylinder('itCan', { diameter: 0.09, height: 0.13, tessellation: 12 }, scene)),
-      shape(MeshBuilder.CreateCylinder('itBottle', { diameter: 0.075, height: 0.19, tessellation: 12 }, scene)),
-      shape(MeshBuilder.CreateBox('itBag', { width: 0.16, height: 0.2, depth: 0.055 }, scene)),
-      shape(MeshBuilder.CreateBox('itPacket', { width: 0.13, height: 0.09, depth: 0.035 }, scene)),
-    ];
-    // bottle neck rides the bottle body so a shape swap stays one setEnabled
-    const neck = MeshBuilder.CreateCylinder('itNeck', { diameter: 0.035, height: 0.05, tessellation: 8 }, scene);
-    neck.material = itemMat;
-    neck.isPickable = false;
-    neck.position.y = 0.12;
-    neck.parent = itemShapes[1];
-    item.setEnabled(false);
-    const phone = MeshBuilder.CreateBox('phone', { width: 0.1, height: 0.18, depth: 0.026 }, scene);
-    phone.material = phoneBodyMat;
-    const scr = MeshBuilder.CreateBox('phoneScr', { width: 0.084, height: 0.15, depth: 0.006 }, scene);
-    scr.material = phoneScreenMat;
-    scr.position.z = 0.014;
-    scr.isPickable = false;
-    scr.parent = phone;
-    phone.isPickable = false;
-    phone.setEnabled(false);
-    phone.parent = world;
-    const beam = MeshBuilder.CreateBox('phoneBeam', { width: 0.05, height: 0.05, depth: 1 }, scene);
-    beam.material = phoneBeamMat;
-    beam.isPickable = false;
-    beam.setEnabled(false);
-    beam.parent = world;
-    const ringMat = makeScanRingMat();
-    const ring = MeshBuilder.CreateTorus('scanRing', { diameter: 1.5, thickness: 0.06, tessellation: 48 }, scene);
-    ring.material = ringMat;
-    ring.isPickable = false;
-    ring.setEnabled(false);
-    ring.parent = world;
-    // PASS/FAILED verdict billboard over the head — texture swapped per
-    // verdict from the shared shelfPassTex/shelfFailTex pair
-    const vtagMat = new StandardMaterial('shelfVtagMat', scene);
-    vtagMat.disableLighting = true;
-    vtagMat.backFaceCulling = false;
-    const vtag = MeshBuilder.CreatePlane('shelfVtag', { width: 1.35, height: 0.5 }, scene);
-    vtag.material = vtagMat;
-    vtag.billboardMode = TransformNode.BILLBOARDMODE_ALL;
-    vtag.isPickable = false;
-    vtag.isVisible = false;
-    vtag.parent = world;
-    const p = {
-      h,
-      pc, // portal config: front (API) or right (random) doorway
-      mode, // 'enter' | 'roam' | 'exitwalk' | 'toshelf' | 'browse'
-      wp: 0,
-      exit: false,
-      speed: persona.speed,
-      pauseMul: persona.pauseMul, pauseDurMul: persona.pauseDurMul, diceMul: persona.diceMul,
-      // pace breathes around the base over ~7–15s so the crowd never
-      // metronomes in lockstep
-      driftAmp: 0.12 + Math.random() * 0.06,
-      driftFreq: (Math.PI * 2) / (7 + Math.random() * 8),
-      driftPhase: Math.random() * Math.PI * 2,
-      // free-roam state: rp is the spine position the route is walked along
-      // (the weave rides on top of it), mv holds the current routed leg
-      rp: null, roamYaw: 0, nextGoalAt: 0,
-      recentShelves: [], // last two browsed — never revisited back to back
-      // personal walking line: a lane preference that itself wanders slowly,
-      // plus a two-octave weave, applied perpendicular to the heading so
-      // nobody treads the exact same line twice
-      lat: (Math.random() * 2 - 1) * 0.2,
-      latDriftFreq: (Math.PI * 2) / (20 + Math.random() * 20),
-      latDriftPhase: Math.random() * Math.PI * 2,
-      wobPhase: Math.random() * Math.PI * 2,
-      wobFreq: 0.25 + Math.random() * 0.3,
-      // window-shopping: an occasional dead stop to eye a shelf or check the
-      // phone. nextPause gates the roll; pause holds the live stop
-      pause: null, pauseBlend: 0, pauseYaw: 0, pauseOff: null,
-      nextPause: elapsed + (10 + Math.random() * 15) * persona.pauseMul,
-      latEase: 0, // door entries fade the personal offset in once inside
-      // shelf-visit state (slot >= 0 reserves the browse spot from the moment
-      // the destination is picked until they have stepped clear of it again)
-      slot: -1, mv: null,
-      cooldown: elapsed + 3 + Math.random() * 9, // no diving at a shelf right away
-      item, itemShapes, itemMat, phone, beam, ring, ringMat, ringT: Infinity,
-      vtag, vtagMat, vtagT: Infinity,
-      shelfScan: null, access: null, accessSeam: null, idling: false, started: false,
-      picksLeft: 0, pickT: 0, nextPick: 0, pickLat: 0, reach: 1,
-      // commanded shelf session (API shelf sub-machine): shelfHold suppresses
-      // the self-scan/auto-pick loop; the verdict and picks arrive as events
-      shelfHold: false, scanVerdict: null, inspect: null, inspectQueue: [],
-      f: new Vector3(0, 0, 1), s: new Vector3(1, 0, 0),
-    };
-    if (mode === 'enter') p.enterSeq = ++enterSeq;
-    p.h.parent = world;
-    p.person = registerPerson(p.h, 'shopper', ident, p);
-    shoppers.push(p);
-    return p;
-  }
-  function disposeShopper(p) {
-    releaseShelfAccess(p); // last one out re-locks the shelf
-    p.item.dispose(); p.itemMat.dispose();
-    p.phone.dispose(); p.beam.dispose(); p.ring.dispose(); p.ringMat.dispose();
-    p.vtag.dispose(); p.vtagMat.dispose();
-    disposeHuman(p.h);
-  }
-  // initial shoppers only: they were "already in the store" when the dashboard
-  // opened, so they start scattered on the floor instead of walking in
-  function spawnOnFloor(identOverride, pc = frontPC) {
-    let spot = null;
-    for (let tries = 0; tries < 30 && !spot; tries++) {
-      const x = (Math.random() * 2 - 1) * ROAM_BOUND;
-      const z = (Math.random() * 2 - 1) * ROAM_BOUND;
-      if (!navFree(x, z) || nearPortal(x, z, 2.5)) continue;
-      if (shoppers.some((q) => Math.hypot(q.h.position.x - x, q.h.position.z - z) < 2)) continue;
-      spot = { x, z };
-    }
-    const p = makeShopper('roam', identOverride, pc);
-    if (spot) p.h.position.set(spot.x, 0, spot.z);
-    p.h.rotation.y = Math.random() * Math.PI * 2;
-    enterRoam(p);
-    p.latEase = 1; // already "in the store" — no slide-in
-  }
-  function addPerson() {
-    if (totalPeople() < MAX_PEOPLE) pendingEntries++;
-    return totalPeople();
-  }
-  // gate queue cap: beyond 3 the tail slots stretch back over the robot
-  // lane (node 5) and the loop's checkout stretch, so hold further exits
-  // until it drains. Flagged shoppers still walking the loop count too —
-  // they are queue members already in flight.
-  function exitQueueLoad() {
-    let n = 0;
-    for (const w of shoppers) if (w.exit && (w.mode !== 'exitwalk' || w.wp === 0)) n++;
-    return n;
-  }
-  // nearest to the exit junction walks out first. Only people actually
-  // walking are candidates — browsers are never yanked out of a session; a
-  // pending removal waits in pendingRemovals until someone starts roaming.
-  // API-owned customers (apiId set) are never picked: the users API is the
-  // sole authority over their exits (leave / verify fail / delete), which
-  // is what keeps its status field truthful.
-  function flagExit() {
-    if (exitQueueLoad() >= 3) return false;
-    let pick = null, best = Infinity;
-    for (const w of shoppers) {
-      if (w.exit || w.slot >= 0 || w.person?.apiId != null) continue;
-      if (w.mode !== 'roam' && w.mode !== 'enter') continue;
-      const jp = walkPath.pointAt(w.pc.tExit);
-      const d = w.mode === 'roam'
-        ? Math.hypot(w.h.position.x - jp.x, w.h.position.z - jp.z)
-        : 40; // still queueing at the door — last resort
-      if (d < best) { best = d; pick = w; }
-    }
-    if (pick) pick.exit = true;
-    return !!pick;
-  }
   // random-crowd census + reconcile toward crowdTarget (API users are never
   // counted here — they are commanded, not ambient)
   const isRandom = (p) => p.person?.apiId == null;
   const randomOnFloor = () =>
     shoppers.filter((p) => isRandom(p) && !p.exit && !p.retreat && p.fadeStart == null).length;
   const randomLive = () => randomOnFloor() + pendingEntries;
-  function setCrowdTarget(n) {
-    crowdTarget = Math.max(0, Math.min(CROWD_MAX, Math.round(n)));
-    // before the opening crowd is seeded onto the loop, just record the target
-    // (boot spawns exactly crowdTarget on the loop); reconciling here would
-    // double-count against a floor that isn't populated yet
-    if (!booted) return crowdTarget;
-    let live = randomLive();
-    while (live < crowdTarget) { pendingEntries++; live++; }   // queue the deficit at the right door
-    while (live > crowdTarget && flagExit()) live--;           // send the surplus out the right door
-    return crowdTarget;
-  }
-  function removePerson() {
-    if (pendingEntries > 0) pendingEntries--;
-    else if (!flagExit()) pendingRemovals++; // everyone busy → leave when free
-    return totalPeople();
-  }
 
   // ---------- users API control channel (SSE → Dashboard → here) ----------
-  // The users API owns the customer roster; these hooks make its mutations
-  // visible in the running store. Sim walk-ins/outs and the crowd stepper
-  // never write back — the roster is who is *known*, not who is inside.
-  function shopperByApiId(apiId) {
-    for (const p of shoppers) if (p.person?.apiId === apiId) return p;
-    return null;
-  }
   // enter that arrived while the same customer's old body was still animating
   // out (walk-out after pay, retreat after verify fail) parks here instead of
   // being dropped — dropping it wedged the user invisible: the API said
@@ -2520,239 +1355,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // spawns the entry the moment the old body despawns; a verify verdict that
   // lands while parked rides along (`verdict`) or cancels the entry (fail).
   const pendingReenters = new Map(); // apiId → { u, verdict? }
-  // POST /users → a brand-new customer (status `waiting`) appears at the
-  // storefront and HOLDS at the scanner for a verify verdict, exactly like
-  // enter — not a walk-straight-in. They queue behind any existing line and
-  // don't count toward MAX_PEOPLE until verify-pass admits them. Delegates to
-  // the enter spawn so both paths stay identical.
-  function apiAddUser(u) {
-    apiEnterUser(u);
-  }
-  // DELETE /users/:id → fade out in place (no walk-out); customers still in a
-  // queue (gate or unconsumed roster) just never materialise
-  function apiRemoveUser(id) {
-    pendingReenters.delete(id); // parked entry never materialises (old body, if any, fades below)
-    const qi = pendingApiEntries.findIndex((i) => i.apiId === id);
-    if (qi >= 0) { pendingApiEntries.splice(qi, 1); return; }
-    for (let i = rosterIdx; i < users.length; i++) {
-      if (users[i].id === id) { users.splice(i, 1); return; }
-    }
-    const p = shopperByApiId(id);
-    if (!p || p.fadeStart != null) return;
-    p.fadeStart = elapsed;
-    if (entryGate.user === p) entryGate.user = null; // don't wedge the scanner
-    p.item.setEnabled(false); p.phone.setEnabled(false);
-    p.beam.setEnabled(false); p.ring.setEnabled(false);
-  }
-  // PATCH /users/:id → names refresh live; a gender change respawns the same
-  // customer in place with a new gender-matched body
-  function apiUpdateUser(u) {
-    const pend = pendingReenters.get(u.id);
-    if (pend) pend.u = u; // parked entry spawns with the fresh identity; the old body below still refreshes too
-    const q = pendingApiEntries.find((i) => i.apiId === u.id);
-    if (q) { Object.assign(q, identFromUser(u)); return; }
-    for (let i = rosterIdx; i < users.length; i++) {
-      if (users[i].id === u.id) { users[i] = u; return; }
-    }
-    const p = shopperByApiId(u.id);
-    if (!p || p.fadeStart != null) return;
-    const e = p.person;
-    e.name = u.name;
-    e.initials = initialsOf(u.name);
-    e.avatarUrl = u.avatar_url ?? ''; // PATCH reflects live in the cards, like name
-    e.email = u.email ?? '';
-    const female = u.gender === 'female';
-    if (female !== e.female) { e.female = female; respawnBody(p, female); }
-  }
-  // abandon any shelf business mid-flight and start roaming from where they
-  // stand — used when an API command needs the shopper walkable NOW (body
-  // swaps, forced leave). No-op for people already on a walkable leg.
-  function snapToRoam(p) {
-    if (p.mode === 'roam' || p.mode === 'enter' || p.mode === 'exitwalk') return;
-    releaseShelfAccess(p);
-    p.slot = -1; p.mv = null; p.idling = false; p.shelfScan = null;
-    p.picksLeft = 0; p.ringT = Infinity;
-    p.shelfHold = false; p.scanVerdict = null; p.inspect = null; p.inspectQueue = [];
-    p.item.setEnabled(false); p.item.scaling.setAll(1); p.phone.setEnabled(false);
-    p.beam.setEnabled(false); p.ring.setEnabled(false);
-    enterRoam(p);
-  }
-  // users API "leave" action → drop everything, walk to the exit gate at a
-  // normal pace, and HOLD there to pay (payHold) instead of scanning out on
-  // their own — the exit-side mirror of gateHold. Ordinary loop traffic rules
-  // apply the whole way (braking, robot stop, single-file gate queue).
-  // Release comes from apiPayUser.
-  function apiLeaveUser(id) {
-    const qi = pendingApiEntries.findIndex((i) => i.apiId === id);
-    if (qi >= 0) { pendingApiEntries.splice(qi, 1); return; } // never arrived
-    for (let i = rosterIdx; i < users.length; i++) {
-      if (users[i].id === id) { users.splice(i, 1); return; }
-    }
-    const p = shopperByApiId(id);
-    if (!p || p.fadeStart != null || p.done) return;
-    snapToRoam(p);
-    p.payHold = true;
-    p.exit = true;
-  }
-  // users API "pay" action → verdict for a payHold customer at the exit fare
-  // gate. pass: the beam sweeps them, they pay and walk out. fail: red deny
-  // blink + DECLINED tag, they stay put to try again — the one asymmetry with
-  // verify (a failed entry turns you away; a failed pay just holds you).
-  function applyPay(p, result) {
-    p.payVerdict = undefined;
-    if (result === 'pass') {
-      p.scan = 0; // hand over to the normal sweep; success clears payHold
-      p.payHold = false;
-    } else {
-      gate.deny = 0.9;
-      showDeclinedTag();
-    }
-  }
-  function apiPayUser(id, result) {
-    const p = shopperByApiId(id);
-    if (!p || !p.payHold || p.fadeStart != null || p.done) return;
-    if (gate.user === p) applyPay(p, result);
-    else p.payVerdict = result; // applies the moment they reach the scanner
-  }
-  // users API "enter" action → the customer shows up outside and joins the
-  // entry line, holding at the scanner (gateHold) until a verify verdict
-  // arrives — no self-scan like ambient walk-ins. Long lines stack visibly
-  // out the door: each spawn starts behind the current tail.
-  function apiEnterUser(u) {
-    if (shopperByApiId(u.id)) { pendingReenters.set(u.id, { u }); return; } // old body still leaving — respawn on despawn
-    for (let i = rosterIdx; i < users.length; i++) {
-      if (users[i].id === u.id) { users.splice(i, 1); break; } // no double life
-    }
-    const queueLen = shoppers.filter((q) => q.mode === 'enter' && q.wp === 0).length;
-    const p = makeShopper('enter', identFromUser(u));
-    p.gateHold = true;
-    // appear one slot beyond the current tail of the sideways line
-    const s = queueSlot(queueLen + 1);
-    p.h.position.set(Math.max(s.x - ENTRY_GATE.spacing, Q_LINE.minX), 0, Q_LINE.z);
-    p.h.rotation.y = Math.PI / 2; // facing along the line toward the door
-    p.cur = 0;
-  }
-  // users API "verify" action → verdict for a gateHold customer. pass: the beam
-  // sweeps them like any shopper and they walk in. fail: red deny blink, they
-  // turn around and leave (despawn outside) — enter can bring them back.
-  function applyVerdict(p, result) {
-    p.verdict = undefined;
-    if (result === 'pass') {
-      p.scan = 0; // hand over to the normal sweep; success path clears gateHold
-      p.verifyFail = false;
-    } else {
-      p.gateHold = false;
-      p.verifying = false;
-      p.retreat = true;
-      if (entryGate.user === p) { entryGate.user = null; entryGate.deny = 0.9; }
-    }
-  }
-  function apiVerifyUser(id, result) {
-    const pend = pendingReenters.get(id);
-    if (pend) {
-      // verdict landed before the parked entry ever spawned: fail turns them
-      // away sight-unseen, pass rides along and pre-approves the spawn
-      if (result === 'fail') pendingReenters.delete(id);
-      else pend.verdict = result;
-      return;
-    }
-    const p = shopperByApiId(id);
-    if (!p || !p.gateHold || p.fadeStart != null || p.done) return;
-    if (entryGate.user === p) applyVerdict(p, result);
-    else if (result === 'fail') applyVerdict(p, result); // turned away from anywhere in line
-    else p.verdict = result; // pre-approved: sweeps the moment they reach the scanner
-  }
   // ---------- users API shelf sub-machine ----------
-  // walkToShelf / scanQR / inspectItem / walkAway arrive over SSE like the
-  // gate verdicts above; shelfClose is the API's own 30s browse timer firing.
-  // API-owned shoppers never roll the junction dice, so every shelf visit
-  // below is the only way they get one. Events for shoppers in the wrong
-  // phase are dropped, mirroring how the other API hooks tolerate skew.
-  function showShelfVerdict(p, pass) {
-    const tex = pass ? shelfPassTex : shelfFailTex;
-    p.vtagMat.emissiveTexture = tex;
-    p.vtagMat.opacityTexture = tex;
-    p.vtagMat.alpha = 1;
-    p.vtag.position.set(p.h.position.x, 2.15, p.h.position.z);
-    p.vtag.isVisible = true;
-    p.vtagT = 0;
-  }
-  // walk to a free reader slot on the shelf and hold there (no self-scan)
-  function apiWalkToShelfUser(id, shelfId) {
-    const p = shopperByApiId(id);
-    if (!p || p.fadeStart != null || p.done) return;
-    if (p.mode !== 'roam') return; // at a gate or already at a shelf — not walkable
-    if (p.slot >= 0) {
-      // still stepping away from a just-closed visit — shelfClose is instant on
-      // the API side but the walk-out is a real animation here. Same shelf: the
-      // slot is still theirs, so turn straight back in. Different shelf: drop
-      // the reservation and re-route from wherever they got to.
-      if (SLOTS[p.slot]?.shelfId === shelfId) { redirectToShelf(p); return; }
-      p.slot = -1;
-    }
-    const free = [];
-    for (let i = 0; i < SLOTS.length; i++) {
-      if (SLOTS[i].shelfId === shelfId && !shoppers.some((q) => q.slot === i)) free.push(i);
-    }
-    if (free.length === 0) return; // every seam taken — the mock drops the event
-    startBrowse(p, free[Math.floor(Math.random() * free.length)]);
-    p.shelfHold = true; // commanded session: heldShelfCycle owns them at the shelf
-  }
-  // cancel an in-flight walk-away and turn straight back into the still-
-  // reserved slot, re-routed from wherever they got to
-  function redirectToShelf(p) {
-    startBrowse(p, p.slot);
-    p.shelfHold = true;
-  }
-  // scanQR verdict — queued if they're still walking up; the phone gesture
-  // plays on arrival and pass/fail lands mid-beam (see updateShelfScan)
-  function apiScanShelfUser(id, result) {
-    const p = shopperByApiId(id);
-    if (!p || !p.shelfHold || p.access || p.fadeStart != null || p.done) return;
-    p.scanVerdict = result;
-  }
-  // one commanded pick: keep pockets it, return puts it back. Queued FIFO —
-  // even before the door is open (commands can outrun the walk + scan
-  // gesture); heldShelfCycle plays the queue only once access is granted
-  function apiInspectItemUser(id, result) {
-    const p = shopperByApiId(id);
-    if (!p || !p.shelfHold || p.fadeStart != null || p.done) return;
-    p.inspectQueue.push(result);
-  }
-  // gave up waiting for a verdict → rejoin the loop
-  function apiWalkAwayUser(id) {
-    const p = shopperByApiId(id);
-    if (!p || !p.shelfHold || p.fadeStart != null || p.done) return;
-    if (p.mode === 'browse') leaveSlot(p);
-    else snapToRoam(p); // still walking up — bail back onto the floor
-  }
-  // the API's 30s browse timer fired: their seam glides shut behind them
-  // (releaseShelfAccess inside leaveSlot); an item mid-inspect goes with them
-  function apiShelfCloseUser(id) {
-    const p = shopperByApiId(id);
-    if (!p || !p.shelfHold || p.fadeStart != null || p.done) return;
-    if (p.mode === 'browse') leaveSlot(p);
-    else snapToRoam(p);
-  }
-  // body swap: keep the sim object and the person entry (custNo, picks, the
-  // followed card), replace only the 3D body. Mid-browse swaps first snap the
-  // shopper back onto the loop — a pick sequence can't survive losing its arms.
-  function respawnBody(p, female) {
-    const e = p.person;
-    snapToRoam(p);
-    const old = p.h;
-    const nh = makeHuman(nextCharFile(female));
-    nh.parent = world;
-    nh.position.copyFrom(old.position);
-    nh.rotation.y = old.rotation.y;
-    p.h = nh;
-    p.started = false; // any browse session died with the old body
-    p.headNode = null; // cached bones point into the old skeleton — re-resolve
-    e.h = nh; // re-point the entry BEFORE disposing — unregisterPerson then no-ops
-    e.color = cardColor(nh.metadata.look.torso);
-    makePickCap(e.id, nh);
-    disposeHuman(old);
-  }
 
   // ---------- browse slots: generated from every shelf's door seams ----------
   // every non-checkout shelf takes a stand point + QR pedestal on each door seam
@@ -2852,27 +1455,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     for (const s of SLOTS) { const [ix, iz] = navCell(s.x, s.z); navBlocked[navIdx(ix, iz)] = 0; }
   }
   const navFree = (x, z) => { const [ix, iz] = navCell(x, z); return !navBlocked[navIdx(ix, iz)]; };
-  // Sampled well below a cell: at half-cell steps a diagonal leg can pass clean
-  // through the corner of a blocked cell without any sample landing on it, and
-  // the taut rope would then happily pull a walk straight through a shelf end.
-  // Routes are planned once per destination, so the finer sweep costs nothing.
-  function navLineFree(ax, az, bx, bz) {
-    const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / (NAV.cell * 0.2)));
-    for (let s = 0; s <= steps; s++) {
-      const k = s / steps;
-      if (!navFree(ax + (bx - ax) * k, az + (bz - az) * k)) return false;
-    }
-    return true;
-  }
-  function nearestT(x, z) {
-    let best = Infinity, bt = 0;
-    for (let i = 0; i < 400; i++) {
-      const pt = walkPath.pointAt(i / 400);
-      const d = (pt.x - x) ** 2 + (pt.z - z) ** 2;
-      if (d < best) { best = d; bt = i / 400; }
-    }
-    return bt;
-  }
   // cells the walk loop passes through — the BFS goal set
   const loopCellT = new Map();
   walkPathPts.forEach((p, i) => {
@@ -2880,45 +1462,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const id = navIdx(ix, iz);
     if (!loopCellT.has(id)) loopCellT.set(id, i / walkPathPts.length);
   });
-  function routeFromLoop(sx, sz) {
-    const [six, siz] = navCell(sx, sz);
-    const start = navIdx(six, siz);
-    const prev = new Int32Array(NAV.n * NAV.n).fill(-1);
-    prev[start] = start;
-    const queue = [start];
-    let goal = -1;
-    for (let qi = 0; qi < queue.length && goal < 0; qi++) {
-      const cur = queue[qi];
-      const cx = cur % NAV.n, cz = (cur / NAV.n) | 0;
-      for (const [dx, dz] of NAV_DIRS) {
-        const nx2 = cx + dx, nz2 = cz + dz;
-        if (nx2 < 0 || nz2 < 0 || nx2 >= NAV.n || nz2 >= NAV.n) continue;
-        const ni = navIdx(nx2, nz2);
-        if (prev[ni] >= 0 || navBlocked[ni]) continue;
-        // no diagonal corner-cutting through a blocked cell
-        if (dx && dz && (navBlocked[navIdx(nx2, cz)] || navBlocked[navIdx(cx, nz2)])) continue;
-        prev[ni] = cur;
-        if (loopCellT.has(ni)) { goal = ni; break; }
-        queue.push(ni);
-      }
-    }
-    if (goal < 0) return null; // walled in — the slot is unreachable
-    const pts = [];
-    for (let c = goal; c !== start; c = prev[c]) pts.push({ x: NAV.min + (c % NAV.n) * NAV.cell, z: NAV.min + ((c / NAV.n) | 0) * NAV.cell });
-    pts.push({ x: sx, z: sz }); // exact stand point replaces the start cell
-    const jp = walkPath.pointAt(loopCellT.get(goal));
-    pts[0] = { x: jp.x, z: jp.z }; // exact junction point on the loop
-    // taut rope: keep only the corners a straight walk can't skip
-    const wps = [];
-    let a = 0;
-    while (a < pts.length - 1) {
-      let b = pts.length - 1;
-      while (b > a + 1 && !navLineFree(pts[a].x, pts[a].z, pts[b].x, pts[b].z)) b--;
-      if (b < pts.length - 1) wps.push(new Vector3(pts[b].x, 0, pts[b].z));
-      a = b;
-    }
-    return { t: nearestT(jp.x, jp.z), wps };
-  }
   // reachability prune: a slot a walk can't flow out of is walled in, so no
   // roamer could ever route to it either. The route itself is thrown away —
   // shoppers plan their own from wherever they happen to be standing.
@@ -2929,51 +1472,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   }
 
   // ---------- free-roam routing ----------
-  // Nobody rides a shared rail: every shopper walks their own route between
-  // their own destinations, so no two people trace the same line. Same navgrid,
-  // same BFS, same taut-rope pull as the slot spurs above — only the goal
-  // changes, from "nearest loop cell" to "this exact floor point".
-  function routeBetween(ax, az, bx, bz) {
-    const [six, siz] = navCell(ax, az);
-    const [gix, giz] = navCell(bx, bz);
-    const start = navIdx(six, siz), goalCell = navIdx(gix, giz);
-    if (navBlocked[goalCell]) return null;
-    if (start === goalCell) return [new Vector3(bx, 0, bz)];
-    const prev = new Int32Array(NAV.n * NAV.n).fill(-1);
-    prev[start] = start;
-    const queue = [start];
-    let found = false;
-    for (let qi = 0; qi < queue.length && !found; qi++) {
-      const cur = queue[qi];
-      const cx = cur % NAV.n, cz = (cur / NAV.n) | 0;
-      for (const [dx, dz] of NAV_DIRS) {
-        const nx2 = cx + dx, nz2 = cz + dz;
-        if (nx2 < 0 || nz2 < 0 || nx2 >= NAV.n || nz2 >= NAV.n) continue;
-        const ni = navIdx(nx2, nz2);
-        if (prev[ni] >= 0 || navBlocked[ni]) continue;
-        if (dx && dz && (navBlocked[navIdx(nx2, cz)] || navBlocked[navIdx(cx, nz2)])) continue;
-        prev[ni] = cur;
-        if (ni === goalCell) { found = true; break; }
-        queue.push(ni);
-      }
-    }
-    if (!found) return null;
-    const pts = [];
-    for (let c = goalCell; c !== start; c = prev[c]) pts.push({ x: NAV.min + (c % NAV.n) * NAV.cell, z: NAV.min + ((c / NAV.n) | 0) * NAV.cell });
-    pts.push({ x: ax, z: az });
-    pts.reverse();                          // walk order: here → there
-    pts[pts.length - 1] = { x: bx, z: bz }; // exact destination, not its cell
-    // taut rope: keep only the corners a straight walk can't skip
-    const wps = [];
-    let a = 0;
-    while (a < pts.length - 1) {
-      let b = pts.length - 1;
-      while (b > a + 1 && !navLineFree(pts[a].x, pts[a].z, pts[b].x, pts[b].z)) b--;
-      wps.push(new Vector3(pts[b].x, 0, pts[b].z));
-      a = b;
-    }
-    return wps;
-  }
 
   // door aprons are queue territory — a wanderer parking in one would plug the
   // gate, so both destination pickers steer clear of them
@@ -2982,172 +1480,15 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     Math.hypot(x - pc.exitDoorPoint.x, z - pc.exitDoorPoint.z) < r);
   const ROAM_BOUND = half - 1.2; // keep destinations off the walls
 
-  // an open spot to drift toward, and the route to it. Rolled rather than
-  // authored, so the wander legs never repeat; the elbow-room test keeps
-  // anyone from ending up pressed against a fixture.
-  function randomRoamPoint(fromX, fromZ) {
-    for (let tries = 0; tries < 24; tries++) {
-      const x = (Math.random() * 2 - 1) * ROAM_BOUND;
-      const z = (Math.random() * 2 - 1) * ROAM_BOUND;
-      if (!navFree(x, z)) continue;
-      if (!navFree(x + 0.5, z) || !navFree(x - 0.5, z) ||
-          !navFree(x, z + 0.5) || !navFree(x, z - 0.5)) continue;
-      if (Math.hypot(x - fromX, z - fromZ) < 3) continue; // worth the walk
-      if (nearPortal(x, z, 2.5)) continue;
-      const wps = routeBetween(fromX, fromZ, x, z);
-      if (wps) return wps;
-    }
-    return null;
-  }
-
-  // a fresh stand point every time a slot is taken: slide along the shelf,
-  // lean in or out a touch, and face it slightly off-square — nobody stands
-  // on the exact same mark twice
-  function jitterSlot(i) {
-    const { x: bx, z: bz, ry: bry } = SLOTS[i];
-    // parallel to the shelf — tight enough that hands stay inside the
-    // shopper's own ~1.5m seam gap (±jitter ±pickLat must be < ~0.75)
-    const along = (Math.random() * 2 - 1) * 0.25;
-    const depth = (Math.random() * 2 - 1) * 0.08;  // still within picking reach
-    return {
-      x: bx + Math.cos(bry) * along + Math.sin(bry) * depth,
-      z: bz - Math.sin(bry) * along + Math.cos(bry) * depth,
-      ry: bry + (Math.random() * 2 - 1) * 0.16,
-    };
-  }
   // free = unreserved AND on a shelf that's currently online. The offline check
   // is live (lk.offline flips via setShelfOnline), so an offline shelf never
   // draws an autonomous browser and becomes eligible the instant it comes online.
   const freePickSlots = () => SLOTS.map((_, i) => i)
     .filter((i) => !shoppers.some((p) => p.slot === i) && !lockById.get(SLOTS[i].shelfId).offline);
 
-  // shared session setup: reserve the slot, size the basket, aim the
-  // facing/sideways vectors the pick cycle animates along (the item itself is
-  // re-rolled per gesture by armItem)
-  function beginSession(p, slot, ry) {
-    p.slot = slot;
-    p.picksLeft = 1 + Math.floor(Math.random() * 3); // 1–3 items this visit
-    p.f.set(Math.sin(ry), 0, Math.cos(ry));
-    p.s.set(Math.cos(ry), 0, -Math.sin(ry));
-    p.item.rotation.y = ry;
-    p.reach = SLOTS[slot].reach;
-    if (p.person) p.person.nearShelf = SLOTS[slot].shelfId;
-    p.started = false;
-    p.idling = false;
-    p.pickT = 0;
-    p.nextPick = 0.6; // first gesture lands a beat after the door opens
-  }
-
-  // reserve the slot and route there from wherever the shopper happens to be
-  function startBrowse(p, slot) {
-    endPause(p); // a commanded walkToShelf can land mid window-shop
-    const g = jitterSlot(slot);
-    beginSession(p, slot, g.ry);
-    p.mode = 'toshelf';
-    p.cur = p.cur ?? p.speed;
-    const wps = routeBetween(p.h.position.x, p.h.position.z, g.x, g.z);
-    p.mv = {
-      wps: wps ?? [new Vector3(g.x, 0, g.z)], // walled in: walk it straight
-      wi: 0, targetRy: g.ry, settleT: -1, // -1: still walking the leg
-    };
-  }
-
   // how often a roamer's next destination is a shelf rather than open floor.
   // Persona tilts it: a rusher mostly crosses the store, a browser mostly shops.
   const ROAM_SHELF_BIAS = 0.7;
-  // best-of-two over the free slots, skipping the shelves this shopper just
-  // came from — keeps anyone from ping-ponging the shelf beside them and pulls
-  // the crowd out across the floor instead of clustering at the nearest one
-  function pickShelfSlot(p) {
-    let cands = freePickSlots();
-    const fresh = cands.filter((i) => !p.recentShelves.includes(SLOTS[i].shelfId));
-    if (fresh.length) cands = fresh;
-    if (!cands.length) return null;
-    const a = cands[(Math.random() * cands.length) | 0];
-    const b = cands[(Math.random() * cands.length) | 0];
-    const d = (i) => Math.hypot(SLOTS[i].x - p.h.position.x, SLOTS[i].z - p.h.position.z);
-    return d(a) > d(b) ? a : b;
-  }
-  // next destination: mostly a shelf front to browse, otherwise an open spot to
-  // drift to. API-owned customers never self-select a shelf — their visits are
-  // commanded through the users API — so they only ever wander between orders.
-  function planRoamGoal(p) {
-    // a body that hasn't finished loading can't play the scan/pick gestures —
-    // pickCycle bails on !ready every frame, so sending one to a shelf parks it
-    // there forever holding a slot reservation and a browse-cap place. Let it
-    // keep roaming (which needs no rig) until its character file lands.
-    if (isRandom(p) && p.h.metadata.ready && !p.exit && p.slot < 0 && elapsed > p.cooldown
-        && Math.random() < Math.min(0.9, ROAM_SHELF_BIAS * p.diceMul)) {
-      // Headroom has to match the 70/30 destination split, or the roll gets
-      // rejected most of the time and everyone falls through to wandering: the
-      // old floor(len/2) left a 3-person floor with a cap of ONE, which measured
-      // out at a 5% realized shelf share against the 70% intended.
-      const cap = Math.max(2, Math.ceil(shoppers.length * 0.6));
-      if (browsingCount() < cap) {
-        const slot = pickShelfSlot(p);
-        if (slot !== null) { startBrowse(p, slot); return; }
-      }
-    }
-    const wps = randomRoamPoint(p.h.position.x, p.h.position.z);
-    if (!wps) { p.nextGoalAt = elapsed + 0.5; return; } // boxed in — retry shortly
-    p.mv = { wps, wi: 0, kind: 'wander' };
-  }
-
-  // session over — step back onto the floor and pick a fresh destination. The
-  // slot stays reserved until they have actually cleared it (roamMove drops it)
-  // so nobody dives into the spot they're walking out of.
-  function leaveSlot(p) {
-    const u = p.h.metadata;
-    releaseShelfAccess(p); // walking away — the door may close behind them
-    if (u.groups.Idle) u.groups.Idle.stop();
-    if (u.groups.PickUp) u.groups.PickUp.stop();
-    u.movingState = undefined; // let applyGait start the Walk clip cleanly
-    p.shelfHold = false; p.scanVerdict = null; p.inspect = null; p.inspectQueue = [];
-    p.item.setEnabled(false); p.item.scaling.setAll(1);
-    const shelfId = SLOTS[p.slot]?.shelfId;
-    if (shelfId != null) {
-      p.recentShelves = [shelfId, ...p.recentShelves.filter((s) => s !== shelfId)].slice(0, 2);
-    }
-    p.cooldown = elapsed + 6 + Math.random() * 10; // browse again, but not straight away
-    enterRoam(p);
-    p.cur = 0;
-  }
-
-  // routed walk to a reserved slot ('toshelf'), clear of fixtures. Arrival
-  // settles into facing the shelf, then pickCycle takes over.
-  function shelfLegMove(p, dt) {
-    const m = p.mv;
-    if (m.settleT >= 0) { // arrived: turn to the shelf
-      p.cur += (0 - p.cur) * Math.min(1, dt * 6);
-      m.settleT += dt;
-      p.h.rotation.y = shortestLerp(p.h.rotation.y, m.targetRy, Math.min(1, dt * 8));
-      applyGait(p);
-      if (m.settleT > 0.45) {
-        p.h.rotation.y = m.targetRy;
-        p.mode = 'browse';
-        p.mv = null; // pickCycle takes over: scan in, then pick
-      }
-      return;
-    }
-    const tgt = m.wps[m.wi];
-    const dx = tgt.x - p.h.position.x, dz = tgt.z - p.h.position.z;
-    const dist = Math.hypot(dx, dz);
-    let target = p.speed;
-    if (robotAhead(p.h)) target = 0;
-    p.cur += (target - p.cur) * Math.min(1, dt * 6);
-    const step = p.cur * walkPath.length * dt;
-    if (dist > 0.001) {
-      const k = Math.min(1, step / dist);
-      p.h.position.x += dx * k;
-      p.h.position.z += dz * k;
-      if (p.cur > p.speed * 0.2) p.h.rotation.y = Math.atan2(dx, dz);
-    }
-    if (dist <= Math.max(0.12, step)) {
-      m.wi++;
-      if (m.wi >= m.wps.length) m.settleT = 0;
-    }
-    applyGait(p);
-  }
 
   // starting crowd spawns after the first ready frame (see executeWhenReady):
   // their ~2MB character files would otherwise sit on the boot overlay's
@@ -3181,55 +1522,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const _hipPt = new Vector3(), _fistPt = new Vector3();
   const _aimAxis = new Vector3(), _aimA = new Vector3(), _aimD = new Vector3();
   const _decS = new Vector3(), _decT = new Vector3();
-  function shelfLockOf(p) { return lockById.get(p.person?.nearShelf) ?? shelfLocks[0]; }
-  // hip-pocket anchor, tracked per frame so neither the idle bob nor the
-  // scan's body half-turn detaches it (side taken from the live facing,
-  // not the slot's p.s snapshot)
-  function hipAnchor(p, out) {
-    out.set(Math.cos(p.h.rotation.y), 0, -Math.sin(p.h.rotation.y))
-      .scaleInPlace(0.24).addInPlace(p.h.position);
-    out.y = 0.82;
-    return out;
-  }
 
-  function clampAngle(a, lim) {
-    a = Math.atan2(Math.sin(a), Math.cos(a));
-    return Scalar.Clamp(a, -lim, lim);
-  }
-  // shortest-arc rotation taking world direction a onto d (both unit-length)
-  function arcQuat(a, d) {
-    Vector3.CrossToRef(a, d, _aimAxis);
-    const s = _aimAxis.length(), c = Vector3.Dot(a, d);
-    if (s < 1e-5) return c > 0 ? Quaternion.Identity()
-      : Quaternion.RotationAxis(Math.abs(a.y) < 0.9 ? Vector3.Up() : Vector3.Right(), Math.PI);
-    return Quaternion.RotationAxis(_aimAxis.scaleInPlace(1 / s), Math.atan2(s, c));
-  }
-  // Babylon only recomputes the node you ask for — every bone between it and
-  // the human root keeps last frame's matrix. The aim solve turns the body
-  // first, so the whole chain has to be refreshed or it solves against the
-  // un-turned pose.
-  function forceWorld(node, root) {
-    const chain = [];
-    for (let n = node; n && n !== root; n = n.parent) chain.push(n);
-    root.computeWorldMatrix(true);
-    for (let i = chain.length - 1; i >= 0; i--) chain[i].computeWorldMatrix(true);
-  }
-  // re-express a world-space rotation about the node's own origin as that
-  // node's local rotationQuaternion. Pure matrix algebra so the glTF
-  // __root__ handedness flip cancels out instead of corrupting the pose
-  // (composing quaternions across the mirrored ancestors would not).
-  function localizeRotation(node, rw, out) {
-    const pivot = node.getAbsolutePosition();
-    const rot = new Matrix();
-    rw.toRotationMatrix(rot);
-    node.getWorldMatrix()
-      .multiply(Matrix.Translation(-pivot.x, -pivot.y, -pivot.z))
-      .multiply(rot)
-      .multiply(Matrix.Translation(pivot.x, pivot.y, pivot.z))
-      .multiply(node.parent.getWorldMatrix().clone().invert())
-      .decompose(_decS, out, _decT);
-    return out;
-  }
   // ---- two-bone arm IK (shared by scan + pick/return) ----
   // Bend UpperArm.R (shoulder) and LowerArm.R (elbow) so Fist.R reaches
   // `target`, the elbow riding a "down + slightly outward" pole so the pose
@@ -3246,49 +1539,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // last stretch onto the shelf (it already animates hand↔shelfPt). The torso
   // lean below advances the shoulder, so the item's gap stays modest.
   const ARM_REACH_FACTOR = 0.8;
-  function solveArmIK(p, target) {
-    const u = p.h.metadata;
-    const fist = u.fist;
-    const lower = fist?.parent, upper = lower?.parent;
-    if (!upper?.rotationQuaternion || !lower?.rotationQuaternion) return false;
-    forceWorld(fist, p.h);
-    _ikS.copyFrom(upper.getAbsolutePosition());
-    // bone lengths are rigid (pose-independent) — measure once and cache
-    if (u.armL1 === undefined) {
-      u.armL1 = Vector3.Distance(_ikS, lower.getAbsolutePosition());
-      u.armL2 = Vector3.Distance(lower.getAbsolutePosition(), fist.getAbsolutePosition());
-    }
-    const L1 = u.armL1, L2 = u.armL2, eps = 1e-3;
-    _ikDir.copyFrom(target).subtractInPlace(_ikS);
-    const D = Scalar.Clamp(_ikDir.length(), Math.abs(L1 - L2) + eps, (L1 + L2) * ARM_REACH_FACTOR);
-    _ikDir.normalize();
-    // elbow: cosine-rule projection along the reach line, then offset toward
-    // the pole by the triangle height (folds the arm the natural way)
-    const x = (L1 * L1 - L2 * L2 + D * D) / (2 * D);
-    const h = Math.sqrt(Math.max(0, L1 * L1 - x * x));
-    _ikPole.set(p.s.x * 0.4, -1, p.s.z * 0.4); // down, a touch outward along the seam
-    _ikPerp.copyFrom(_ikPole).subtractInPlace(
-      _ikTmp.copyFrom(_ikDir).scaleInPlace(Vector3.Dot(_ikPole, _ikDir)));
-    if (_ikPerp.lengthSquared() < 1e-6) { // pole parallel to reach — any perpendicular
-      _ikPerp.copyFrom(Math.abs(_ikDir.y) < 0.9 ? Vector3.Up() : Vector3.Right());
-      _ikPerp.subtractInPlace(_ikTmp.copyFrom(_ikDir).scaleInPlace(Vector3.Dot(_ikPerp, _ikDir)));
-    }
-    _ikPerp.normalize();
-    _ikElbow.copyFrom(_ikS)
-      .addInPlace(_ikTmp.copyFrom(_ikDir).scaleInPlace(x))
-      .addInPlace(_ikTmp.copyFrom(_ikPerp).scaleInPlace(h));
-    // 1) swing + bend the shoulder so the elbow lands at _ikElbow
-    _ikA.copyFrom(lower.getAbsolutePosition()).subtractInPlace(_ikS).normalize();
-    _ikB.copyFrom(_ikElbow).subtractInPlace(_ikS).normalize();
-    localizeRotation(upper, arcQuat(_ikA, _ikB), upper.rotationQuaternion);
-    forceWorld(fist, p.h); // elbow now at ~_ikElbow, hand swung rigidly with it
-    // 2) bend the elbow so the hand lands on the target
-    _ikS.copyFrom(lower.getAbsolutePosition()); // reuse _ikS as the elbow pivot
-    _ikA.copyFrom(fist.getAbsolutePosition()).subtractInPlace(_ikS).normalize();
-    _ikB.copyFrom(target).subtractInPlace(_ikS).normalize();
-    localizeRotation(lower, arcQuat(_ikA, _ikB), lower.rotationQuaternion);
-    return true;
-  }
 
   // torso lean, solved once per gesture: tip the upper body forward from the
   // waist (Abdomen) toward the shelf and add a small twist that brings the
@@ -3299,63 +1549,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const TORSO_LEAN = 0.21;  // ~12° forward pitch from the waist
   const TORSO_TWIST = 0.14; // ~8° twist bringing the right shoulder forward
   const _leanAxis = new Vector3();
-  function solveTorsoLean(p) {
-    const u = p.h.metadata;
-    if (u.spine === undefined) // Shoulder.R → Torso → Abdomen (waist) → Hips
-      u.spine = p.h.getDescendants(false).find((n) => (n.name === 'Abdomen' || n.name === 'mixamorig_Spine') && n.rotationQuaternion) ?? null;
-    if (!u.spine) return { spine: null, qSpine: null };
-    forceWorld(u.spine, p.h);
-    Vector3.CrossToRef(Vector3.Up(), p.f, _leanAxis); // horizontal axis ⟂ facing; +angle tips forward
-    _leanAxis.normalize();
-    const qDelta = Quaternion.RotationAxis(Vector3.Up(), TORSO_TWIST)
-      .multiply(Quaternion.RotationAxis(_leanAxis, TORSO_LEAN));
-    return { spine: u.spine, qSpine: localizeRotation(u.spine, qDelta, new Quaternion()) };
-  }
-
-  // aim solve, once per scan start: fixes the body half-turn toward the reader,
-  // the phone yaw/pitch and the head glance. The arm itself is driven every
-  // frame by solveArmIK toward `target` (the QR plate) in the blend loop below.
-  // Returns null → gesture degrades to the phone travel alone.
-  function solveScanAim(p) {
-    const u = p.h.metadata;
-    const lower = u.fist?.parent ?? null, upper = lower?.parent ?? null; // Fist.R → LowerArm.R → UpperArm.R
-    const plate = SLOTS[p.slot]?.plate;
-    if (!upper?.rotationQuaternion || !lower?.rotationQuaternion || !plate) return null;
-    if (u.head === undefined)
-      u.head = p.h.getDescendants(false).find((n) => /head/i.test(n.name) && n.rotationQuaternion) ?? null;
-    const fy = Math.atan2(p.f.x, p.f.z); // facing the shelf (beginSession set p.f from the slot ry)
-    const raw = clampAngle(
-      Math.atan2(plate.x - p.h.position.x, plate.z - p.h.position.z) - fy, Math.PI);
-    const bodyYaw = clampAngle(raw, SCAN_BODY_YAW);
-    // head target solved against the pose it'll blend over — the half-turned
-    // body — so turn it, solve, turn it back
-    p.h.rotation.y = fy + bodyYaw;
-    forceWorld(u.fist, p.h);
-    const pivot = upper.getAbsolutePosition().clone();
-    const yaw = fy + bodyYaw + clampAngle(raw - bodyYaw, SCAN_ARM_YAW); // phone screen yaw toward the plate
-    const pitch = Scalar.Clamp(
-      Math.atan2(plate.y - pivot.y, Math.hypot(plate.x - pivot.x, plate.z - pivot.z)), -0.35, 0.45);
-    let qHead = null;
-    if (u.head) {
-      forceWorld(u.head, p.h);
-      const hy = fy + bodyYaw + clampAngle(raw - bodyYaw, SCAN_HEAD_YAW);
-      _aimA.set(Math.sin(fy + bodyYaw), 0, Math.cos(fy + bodyYaw));
-      _aimD.set(Math.sin(hy), 0, Math.cos(hy));
-      qHead = localizeRotation(u.head, arcQuat(_aimA, _aimD), new Quaternion());
-    }
-    p.h.rotation.y = fy;
-    p.h.computeWorldMatrix(true);
-    const { spine, qSpine } = solveTorsoLean(p);
-    return { upper, lower, head: qHead ? u.head : null, qHead, yaw, pitch, fy, bodyYaw, target: plate.clone(), spine, qSpine };
-  }
-
-  function startShelfScan(p) {
-    const u = p.h.metadata;
-    p.shelfScan = { t: 0, done: false, k: 0, aim: solveScanAim(p) };
-    p.idling = true; // the body stays on the Idle loop; only the arm/head get overridden
-    const gi = u.groups.Idle;
-    if (gi && !gi.isPlaying) gi.start(true, 1.0, gi.from, gi.to);
-  }
 
   // animation groups evaluate inside scene.render(), AFTER the per-frame
   // update — the reach pose has to land post-animate or Idle would stomp it.
@@ -3389,108 +1582,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     }
   });
 
-  function updateShelfScan(p, dt) {
-    const s = p.shelfScan;
-    s.t += dt;
-    const u = p.h.metadata;
-    const lk = shelfLockOf(p);
-    const plate = SLOTS[p.slot]?.plate;
-    // one blend factor drives the phone travel, the phone turn and the
-    // arm/head reach (applied post-animation above): up, hold, down
-    const k = s.t < SCAN_RAISE ? easeInOutCubic(s.t / SCAN_RAISE)
-      : s.t < SCAN_RAISE + SCAN_BEAM ? 1
-        : 1 - easeInOutCubic(Math.min(1, (s.t - SCAN_RAISE - SCAN_BEAM) / SCAN_LOWER));
-    s.k = k;
-    if (s.aim) p.h.rotation.y = s.aim.fy + s.aim.bodyYaw * k; // half-turn toward the reader
-    if (u.fist) {
-      p.phone.setEnabled(true);
-      hipAnchor(p, _hipPt);
-      _fistPt.copyFrom(u.fist.getAbsolutePosition());
-      Vector3.LerpToRef(_hipPt, _fistPt, k, p.phone.position); // pocket ↔ the reaching hand
-      const fy = Math.atan2(p.f.x, p.f.z);
-      p.phone.rotation.y = shortestLerp(fy, s.aim?.yaw ?? fy, k); // screen swings to face the plate
-      p.phone.rotation.x = 0.7 * (1 - k) - (s.aim?.pitch ?? 0) * k; // pocket tilt → square to the plate
-    }
-    const beamOn = s.t >= SCAN_RAISE && s.t < SCAN_RAISE + SCAN_BEAM && plate && u.fist;
-    p.beam.setEnabled(!!beamOn);
-    if (beamOn) {
-      lk.scanStamp = elapsed; // LED shows the cyan "scanning" pulse this frame
-      _beamTo.copyFrom(plate);
-      const d = Vector3.Distance(p.phone.position, _beamTo);
-      Vector3.LerpToRef(p.phone.position, _beamTo, 0.5, p.beam.position);
-      p.beam.scaling.set(1, 1, Math.max(0.1, d));
-      p.beam.lookAt(_beamTo);
-      phoneBeamMat.alpha = 0.4 + 0.3 * Math.abs(Math.sin(elapsed * 16));
-    }
-    if (!s.done && s.t >= SCAN_UNLOCK_AT) { // scan reads → the verdict lands
-      s.done = true;
-      // ambient shoppers always pass; a commanded session (shelfHold) obeys
-      // the API's scanQR verdict — fail shows the badge and opens nothing,
-      // the shopper stays at the reader for the next verdict
-      const pass = p.shelfHold ? p.scanVerdict === 'pass' : true;
-      p.scanVerdict = null;
-      if (p.shelfHold) showShelfVerdict(p, pass);
-      if (pass) {
-        p.ringT = 0;
-        p.ring.position.set(p.h.position.x, 0.07, p.h.position.z);
-        p.ring.setEnabled(true);
-        takeAccess(p);
-      }
-    }
-    if (s.t < SCAN_SECS) return;
-    // phone pocketed → Idle is still looping; let the pick cycle take over
-    p.shelfScan = null;
-    p.phone.setEnabled(false);
-    p.idling = true;
-    const gi = u.groups.Idle;
-    if (gi && !gi.isPlaying) gi.start(true, 1.0, gi.from, gi.to);
-    if (!p.shelfHold) // commanded picks arrive as inspectItem events instead
-      p.pickT = PICK_PERIOD - 0.8 - Math.random() * 1.4; // first pick lands shortly after the door opens
-  }
-
-  // take the seam: every scan opens the scanner's own door pair. Shelf-level
-  // events stay coarse for the dashboard — 'unlocked' only when the shelf goes
-  // from fully shut to its first open seam, 'scan_ok' for every scan after.
-  function takeAccess(p) {
-    const lk = shelfLockOf(p);
-    const sm = SLOTS[p.slot]?.seam;
-    p.access = lk.id;
-    p.accessSeam = sm;
-    const wasOpen = lk.masterOpen || lk.heldSeams > 0;
-    if (sm && ++sm.holders === 1) lk.heldSeams++;
-    lk.flash = 1.3;
-    lk.tagT = 0; // "UNLOCKED" hologram pops over every successful scanner
-    lk.tag.position.set(p.h.position.x, 3.1, p.h.position.z);
-    lk.tag.isVisible = true;
-    lk.tagMat.alpha = 1;
-    if (!wasOpen && !lk.offline) {
-      lk.locked = false;
-      emitShelfEvent(lk.id, 'unlocked');
-    } else {
-      emitShelfEvent(lk.id, 'scan_ok');
-    }
-  }
-
-  function releaseShelfAccess(p) {
-    if (p.shelfScan) { // pulled away mid-scan — drop the fx, no access was held
-      p.shelfScan = null;
-      p.phone?.setEnabled(false);
-      p.beam?.setEnabled(false);
-    }
-    if (p.access) {
-      const lk = lockById.get(p.access);
-      const sm = p.accessSeam;
-      // their door glides shut behind them (unless the dashboard master holds it)
-      if (sm && sm.holders > 0 && --sm.holders === 0) lk.heldSeams = Math.max(0, lk.heldSeams - 1);
-      if (lk.heldSeams === 0 && !lk.masterOpen && !lk.locked) {
-        lk.locked = true;
-        emitShelfEvent(lk.id, 'relocked');
-      }
-      p.access = null;
-      p.accessSeam = null;
-    }
-  }
-
   const _shelfPt = new Vector3(), _handPt = new Vector3();
 
   // ---------- commanded shelf session (API shelf sub-machine) ----------
@@ -3507,206 +1598,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const INSPECT_REACH = 0.3, INSPECT_HOLD = 0.8, INSPECT_RETRACT = 0.3;
   const INSPECT_SECS = INSPECT_REACH + INSPECT_HOLD + INSPECT_RETRACT;
   const INSPECT_HEAD_YAW = 0.3; // just a glance toward the reach — no body turn, item is nearly straight ahead
-  // aim solve, once per gesture start: fix the head glance and hand back an
-  // aim record. `target` is refreshed every frame by updateInspect and fed to
-  // solveArmIK in the blend loop — no body half-turn (the pick point sits
-  // close to dead-ahead, unlike the scan pedestal).
-  function solveInspectAim(p) {
-    const u = p.h.metadata;
-    const lower = u.fist?.parent ?? null, upper = lower?.parent ?? null; // Fist.R → LowerArm.R → UpperArm.R
-    if (!upper?.rotationQuaternion || !lower?.rotationQuaternion) return null;
-    if (u.head === undefined)
-      u.head = p.h.getDescendants(false).find((n) => /head/i.test(n.name) && n.rotationQuaternion) ?? null;
-    _shelfPt.copyFrom(p.f).scaleInPlace(p.reach).addInPlace(p.h.position)
-      .addInPlace(_handPt.copyFrom(p.s).scaleInPlace(p.pickLat));
-    _shelfPt.y = 1.3;
-    let qHead = null;
-    if (u.head) {
-      forceWorld(u.head, p.h);
-      const fy = Math.atan2(p.f.x, p.f.z);
-      const raw = clampAngle(Math.atan2(_shelfPt.x - p.h.position.x, _shelfPt.z - p.h.position.z) - fy, Math.PI);
-      const hy = fy + clampAngle(raw, INSPECT_HEAD_YAW);
-      _aimA.set(Math.sin(fy), 0, Math.cos(fy));
-      _aimD.set(Math.sin(hy), 0, Math.cos(hy));
-      qHead = localizeRotation(u.head, arcQuat(_aimA, _aimD), new Quaternion());
-    }
-    const { spine, qSpine } = solveTorsoLean(p);
-    return { upper, lower, head: qHead ? u.head : null, qHead, target: _shelfPt.clone(), spine, qSpine };
-  }
-  // re-roll the held prop for one gesture: one of the four small-goods
-  // shapes, tinted from the host shelf's own catalogue colors
-  function armItem(p) {
-    const pick = p.itemShapes[Math.floor(Math.random() * p.itemShapes.length)];
-    for (const s of p.itemShapes) s.setEnabled(s === pick);
-    const pal = SLOTS[p.slot]?.palette ?? productColors;
-    p.itemMat.albedoColor = C3(pal[Math.floor(Math.random() * pal.length)]);
-  }
-  function startInspect(p, result) {
-    const u = p.h.metadata;
-    p.pickLat = (Math.random() - 0.5) * 0.8; // stay inside the shopper's own seam gap — set before the aim solve, which reaches for this offset
-    armItem(p);
-    p.inspect = { t: 0, k: 0, result, counted: false, aim: solveInspectAim(p) };
-    p.idling = true; // body stays on the Idle loop; only the arm/head get overridden
-    const gi = u.groups.Idle;
-    if (gi && !gi.isPlaying) gi.start(true, 1.0, gi.from, gi.to);
-  }
-  function updateInspect(p, dt) {
-    const it = p.inspect;
-    it.t += dt;
-    const t = it.t;
-    // one blend factor drives the arm/head reach (applied post-animation,
-    // shared with the scan gesture's loop): out, hold, back
-    it.k = t < INSPECT_REACH ? easeInOutCubic(t / INSPECT_REACH)
-      : t < INSPECT_REACH + INSPECT_HOLD ? 1
-        : 1 - easeInOutCubic(Math.min(1, (t - INSPECT_REACH - INSPECT_HOLD) / INSPECT_RETRACT));
-    _shelfPt.copyFrom(p.f).scaleInPlace(p.reach).addInPlace(p.h.position)
-      .addInPlace(_handPt.copyFrom(p.s).scaleInPlace(p.pickLat));
-    _shelfPt.y = 1.3;
-    if (it.aim) it.aim.target.copyFrom(_shelfPt); // solveArmIK reaches the hand here each frame
-    const u = p.h.metadata;
-    if (u.fist) {
-      _handPt.copyFrom(u.fist.getAbsolutePosition());
-      if (it.result === 'return') { // pop into the hand → set back on the shelf
-        if (t < 0.3) {
-          p.item.setEnabled(true);
-          p.item.scaling.setAll(easeInOutCubic(t / 0.3));
-          p.item.position.copyFrom(_handPt);
-        } else if (t < 1.1) {
-          p.item.scaling.setAll(1);
-          Vector3.LerpToRef(_handPt, _shelfPt, easeInOutCubic((t - 0.3) / 0.8), p.item.position);
-        } else {
-          p.item.setEnabled(false);
-        }
-      } else if (t >= 0.3) { // keep: empty-hand reach, then shelf → hand, then it vanishes at once
-        if (t < 0.7) {
-          p.item.setEnabled(true);
-          p.item.scaling.setAll(1);
-          Vector3.LerpToRef(_shelfPt, _handPt, easeInOutCubic((t - 0.3) / 0.4), p.item.position);
-        } else {
-          if (!it.counted) { it.counted = true; if (p.person) p.person.picks++; } // feeds "Items picked"
-          const k = Math.min(1, (t - 0.7) / 0.4);
-          p.item.position.copyFrom(_handPt);
-          p.item.scaling.setAll(1 - k);
-          if (k >= 1) p.item.setEnabled(false);
-        }
-      }
-    }
-    if (t >= INSPECT_SECS) { // cycle over — ready for the next command
-      p.item.setEnabled(false);
-      p.item.scaling.setAll(1);
-      p.inspect = null;
-    }
-  }
-  function heldShelfCycle(p, dt) {
-    const u = p.h.metadata;
-    if (!p.started) { // arrived at the reader: stand by until commanded
-      p.started = true;
-      p.idling = true;
-      const gi = u.groups.Idle;
-      if (gi) gi.start(true, 1.0, gi.from, gi.to);
-    }
-    if (p.shelfScan) { updateShelfScan(p, dt); return; }
-    if (!p.access) {
-      // holding for a verdict — one queued (possibly while still walking
-      // here) starts the phone gesture; updateShelfScan consumes it
-      if (p.scanVerdict != null) startShelfScan(p);
-      return;
-    }
-    // access granted but their own door still gliding open → hold Idle
-    if (Math.max(shelfLockOf(p).masterAmt, p.accessSeam?.openAmt ?? 0) < 0.7) return;
-    if (!p.inspect && p.inspectQueue.length) startInspect(p, p.inspectQueue.shift());
-    if (p.inspect) updateInspect(p, dt);
-  }
-
-  function pickCycle(p, dt) {
-    const u = p.h.metadata;
-    if (!u.ready) return;
-    if (p.shelfHold) { heldShelfCycle(p, dt); return; } // commanded session — no self-drive
-    if (!p.started) { // first frame at the shelf — everyone scans, no freebies
-      p.started = true;
-      startShelfScan(p);
-    }
-    if (p.shelfScan) { updateShelfScan(p, dt); return; }
-    // access granted but their own door still gliding open → hold Idle, no picking
-    if (Math.max(shelfLockOf(p).masterAmt, p.accessSeam?.openAmt ?? 0) < 0.7) return;
-    p.pickT += dt;
-    if (p.inspect) { updateInspect(p, dt); return; }
-    // basket done and the last gesture settled → walk off
-    if (p.picksLeft <= 0) { leaveSlot(p); return; }
-    if (p.pickT >= p.nextPick) { // roll the next gesture: grab-and-bag or put one back
-      p.picksLeft--;
-      p.nextPick = p.pickT + PICK_PERIOD;
-      startInspect(p, Math.random() < 0.5 ? 'keep' : 'return');
-      updateInspect(p, dt);
-    }
-  }
 
   // ---------- service robot ----------
-  function makeRobot() {
-    const g = group('robot');
-    const shell = pbr('robotShell', { color: 0xdfe7f2, roughness: 0.35, metalness: 0.4 });
-    const dark = pbr('robotDark', { color: 0x223150, roughness: 0.5, metalness: 0.5 });
-    const glow = basic('robotGlow', { color: 0x35c3ff });
-
-    box(1.1, 0.35, 1.4, dark, 0, 0, 0).parent = g;
-    const wheels = [];
-    for (const [wx, wz] of [[-0.5, 0.45], [0.5, 0.45], [-0.5, -0.45], [0.5, -0.45]]) {
-      const w = MeshBuilder.CreateCylinder('rwheel', { diameter: 0.44, height: 0.12, tessellation: 16 }, scene);
-      w.material = mat.tire;
-      w.rotation.z = Math.PI / 2;
-      w.position.set(wx, 0.22, wz);
-      w.isPickable = false;
-      shadowGen.addShadowCaster(w);
-      w.parent = g;
-      wheels.push(w);
-    }
-    const torso = MeshBuilder.CreateCapsule('torso', { radius: 0.5, height: 1.9, tessellation: 16 }, scene);
-    torso.material = shell;
-    torso.position.set(0, 1.25, 0);
-    torso.isPickable = false;
-    shadowGen.addShadowCaster(torso);
-    torso.parent = g;
-    const screen = MeshBuilder.CreatePlane('rscreen', { width: 0.6, height: 0.5 }, scene);
-    const screenMat = basic('rscreenMat', { color: 0x35c3ff, alpha: 0.85 });
-    screen.material = screenMat;
-    screen.position.set(0, 1.35, 0.5);
-    screen.isPickable = false;
-    screen.parent = g;
-
-    const headPivot = group('headPivot');
-    headPivot.position.set(0, 1.95, 0);
-    headPivot.parent = g;
-    const head = box(0.7, 0.45, 0.6, shell, 0, 0, 0);
-    head.position.set(0, 0.2 + 0.225, 0);
-    head.parent = headPivot;
-    const visor = MeshBuilder.CreatePlane('visor', { width: 0.6, height: 0.28 }, scene);
-    visor.material = basic('visorMat', { color: 0x0a1830 });
-    visor.position.set(0, 0.22, 0.31);
-    visor.isPickable = false;
-    visor.parent = headPivot;
-    const eyes = [];
-    for (const ex of [-0.13, 0.13]) {
-      const e = MeshBuilder.CreateSphere('eye', { diameter: 0.12, segments: 10 }, scene);
-      e.material = glow;
-      e.position.set(ex, 0.22, 0.33);
-      e.isPickable = false;
-      e.parent = headPivot;
-      eyes.push(e);
-    }
-    const ant = MeshBuilder.CreateCylinder('ant', { diameter: 0.04, height: 0.3, tessellation: 8 }, scene);
-    ant.material = dark;
-    ant.position.set(0, 0.55, 0);
-    ant.isPickable = false;
-    ant.parent = headPivot;
-    const beacon = MeshBuilder.CreateSphere('beacon', { diameter: 0.14, segments: 10 }, scene);
-    beacon.material = glow;
-    beacon.position.set(0, 0.72, 0);
-    beacon.isPickable = false;
-    beacon.parent = headPivot;
-
-    g.metadata = { wheels, headPivot, eyes, beacon, screenMat };
-    return g;
-  }
 
   // ---------- robot navigation network ----------
   // fixed architecture, hoisted to module scope so validateShelfLayout can
@@ -3718,7 +1611,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
 
   const adj = NODES.map(() => []);
   EDGES.forEach(([a, b], ei) => { adj[a].push({ to: b, edge: ei }); adj[b].push({ to: a, edge: ei }); });
-  function edgeBetween(a, b) { for (const e of adj[a]) if (e.to === b) return e.edge; return -1; }
 
   const edgeObjs = EDGES.map(([a, b]) => {
     const va = new Vector3(NODES[a][0], EDGE_Y, NODES[a][1]);
@@ -3768,21 +1660,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   scanBeam.position.set(0, 0.22 - 0.55, 2.0); // apex at the head, cone opening outward
   scanBeam.parent = robot.g.metadata.headPivot;
 
-  function nodeVec(i, out) { return out.set(NODES[i][0], 0, NODES[i][1]); }
-  function headingYaw(from, to) { return Math.atan2(NODES[to][0] - NODES[from][0], NODES[to][1] - NODES[from][1]); }
-  function shortestLerp(a, b, t) {
-    let d = (b - a) % (Math.PI * 2);
-    if (d > Math.PI) d -= Math.PI * 2;
-    if (d < -Math.PI) d += Math.PI * 2;
-    return a + d * t;
-  }
-  function chooseNext(at, cameFrom) {
-    let cand = adj[at].filter((o) => o.to !== cameFrom);
-    if (cand.length === 0) cand = adj[at];
-    cand.sort((p, q) => edgeObjs[p.edge].lastVisited - edgeObjs[q.edge].lastVisited);
-    return cand[0].to;
-  }
-
   const TURN_TIME = 0.32;
   const nav = { from: 0, to: 1, u: 0, mode: 'travel', next: 1, yaw: headingYaw(0, 1), startYaw: 0, targetYaw: 0, turnT: 0, lastFastRev: -99 };
   robot.g.rotation.y = nav.yaw;
@@ -3817,139 +1694,18 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // reads. The robot is another matter: it is big and people give way to it.
   const ROBOT_BRAKE = 2.4;  // person stops when the robot is this close ahead
 
-  // shared brake: only an actively driving robot holds people up — one that
-  // is itself yielding (waiting or turning) is passable. People then never
-  // wait on a robot that is waiting on people, so no wait cycle can form;
-  // a crowd pinning the robot from both sides used to freeze the whole loop
-  function robotAhead(h) {
-    if (!robot.advancing) return false;
-    const rx = robot.g.position.x - h.position.x;
-    const rz = robot.g.position.z - h.position.z;
-    const rd = Math.hypot(rx, rz);
-    return rd < ROBOT_BRAKE &&
-      (rx * Math.sin(h.rotation.y) + rz * Math.cos(h.rotation.y)) / (rd || 1) > 0.15;
-  }
-
   // stride comes from the GLB Walk clip; swap to Idle while held up. "Moving"
   // is measured from real per-frame translation, not the target speed, so a
   // shopper parked at a gate — queued behind it, or held under the scanner
   // waiting on an API verdict — settles into Idle instead of running in place.
   let frameDt = 0.016; // last frame's dt, published by the frame loop below
   const GAIT_MIN_VEL = 0.4; // world-units/sec: above lateral-ease jitter, below any real walk
-  function applyGait(p) {
-    const u = p.h.metadata;
-    if (!u.ready) return;
-    const pos = p.h.position;
-    let vel = 0;
-    if (p.prevPos) {
-      vel = Math.hypot(pos.x - p.prevPos.x, pos.z - p.prevPos.z) / Math.max(frameDt, 1e-4);
-      p.prevPos.copyFrom(pos);
-    } else {
-      p.prevPos = pos.clone(); // seed on first use — spawns/teleports read as still
-    }
-    const moving = vel > GAIT_MIN_VEL;
-    if (u.movingState !== moving) {
-      u.movingState = moving;
-      const on = moving ? u.groups.Walk : u.groups.Idle;
-      const off = moving ? u.groups.Idle : u.groups.Walk;
-      if (off) off.stop();
-      if (on) on.start(true, 1.0, on.from, on.to);
-    }
-    if (moving && u.groups.Walk) u.groups.Walk.speedRatio = p.cur * 45;
-  }
-
-  // exit-queue rank: 0 owns the scanner next, n waits n slots behind the gate.
-  // Ranks are per-portal — the two doorways queue independently.
-  function gateRank(p) {
-    let r = 0;
-    for (const q of shoppers) {
-      if (q !== p && q.pc === p.pc && q.mode === 'exitwalk' && q.wp === 0 && q.exitSeq < p.exitSeq) r++;
-    }
-    return r;
-  }
-  // entry-queue rank: mirror of gateRank; slots stretch back toward the door
-  function entryRank(p) {
-    let r = 0;
-    for (const q of shoppers) {
-      if (q !== p && q.pc === p.pc && q.mode === 'enter' && q.wp === 0 && q.enterSeq < p.enterSeq) r++;
-    }
-    return r;
-  }
 
   // spurs: straight walks between the loop junctions and the two doors.
   // enter waypoints: 0 = entry gate (queue single-file behind it, back out
   // the door), 1 = merge point → loop. exitwalk waypoints: 0 = scan gate
   // (queue single-file behind it), 1 = exit door, 2 = outside → despawn.
   const _spurTgt = new Vector3();
-  function spurMove(p, dt) {
-    const pc = p.pc;
-    if (p.mode === 'enter') {
-      if (p.retreat) _spurTgt.set(pc.retreat.x, 0, pc.retreat.z); // turned away → back outside
-      else if (p.wp === 0) {
-        const s = pc.entrySlot(entryRank(p));
-        _spurTgt.set(s.x, 0, s.z);
-      }
-      else _spurTgt.copyFrom(pc.mergePoint);
-    }
-    else if (p.wp === 0) { const s = pc.exitSlot(gateRank(p)); _spurTgt.set(s.x, 0, s.z); }
-    else { const s = p.wp === 1 ? pc.exitDoorPoint : pc.exitOutPoint; _spurTgt.set(s.x, 0, s.z); }
-    const dx = _spurTgt.x - p.h.position.x, dz = _spurTgt.z - p.h.position.z;
-    const dist = Math.hypot(dx, dz);
-    let target = p.speed;
-    // arriving: wait by the junction if the loop is congested right there
-    if (p.mode === 'enter' && p.wp === 1 && dist < 1.6) {
-      const busy = shoppers.some((q) => q !== p && q.mode === 'roam' &&
-        Math.hypot(q.h.position.x - pc.mergePoint.x, q.h.position.z - pc.mergePoint.z) < 1.3);
-      if (busy) target = 0;
-    }
-    if (p.scan !== undefined) target = 0; // held between the gate posts mid-scan
-    p.cur = (p.cur ?? p.speed) + (target - (p.cur ?? p.speed)) * Math.min(1, dt * 6);
-    const step = p.cur * walkPath.length * dt;
-    if (dist > 0.001) {
-      const k = Math.min(1, step / dist);
-      p.h.position.x += dx * k;
-      p.h.position.z += dz * k;
-      if (p.cur > p.speed * 0.2) p.h.rotation.y = Math.atan2(dx, dz);
-    }
-    if (dist <= Math.max(0.12, step)) {
-      if (p.mode === 'enter') {
-        if (p.retreat) p.done = true; // out the door and gone
-        else if (p.wp === 0) {
-          // head of the entry queue claims the scanner; the sweep runs in the
-          // frame loop and advances wp to 1 (→ merge point) once verified
-          if (!pc.entryGate.user && p.scan === undefined && entryRank(p) === 0) {
-            pc.entryGate.user = p; p.verifying = true;
-            if (p.gateHold) {
-              // check-in customers hold under the reticle for the API verdict;
-              // a verdict that arrived while they queued applies right away
-              if (p.verdict) applyVerdict(p, p.verdict);
-            } else {
-              p.scan = 0;
-              p.verifyFail = Math.random() < 0.15; // first sweep rejected → rescan
-            }
-          }
-        } else enterRoam(p); // through the door — off to wherever they fancy
-      }
-      else if (p.wp === 0) {
-        // reached the exit gate line.
-        // head of the queue claims the scanner as soon as it frees up; the
-        // scan itself runs in the frame loop and advances wp when paid
-        if (!pc.gate.user && p.scan === undefined && gateRank(p) === 0) {
-          pc.gate.user = p; p.paying = true;
-          if (p.payHold) {
-            // API-leave customers hold under the reticle for a pay
-            // verdict; one that arrived while they queued applies right away
-            if (p.payVerdict) applyPay(p, p.payVerdict);
-          } else {
-            p.scan = 0; // auto exiters pay themselves out…
-            p.payFail = p.pc.key === 'right' && Math.random() < 0.3; // …but random ones may get DECLINED first
-          }
-        }
-      } else if (p.wp === 1) p.wp = 2;
-      else p.done = true; // out the door and gone — collected after the update
-    }
-    applyGait(p);
-  }
 
   // ---------- window-shopping pauses ----------
   // a roamer occasionally just… stops: eyes the nearest shelf, or pulls the
@@ -3958,40 +1714,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // browse reservation. Commands landing mid-pause cancel it — roamMove on the
   // next frame for exit flags, startBrowse() on the spot.
   const PAUSE_PORTAL_CLEAR = 2.6; // world units kept clear around the doors
-  function tryStartPause(p) {
-    const retry = () => { p.nextPause = elapsed + 3 + Math.random() * 4; };
-    if (p.exit || p.slot >= 0 || !p.mv || p.mv.kind === 'exit') return retry();
-    if (nearPortal(p.h.position.x, p.h.position.z, PAUSE_PORTAL_CLEAR)) return retry();
-    // something to look at? face the nearest shelf stand — otherwise (or 40%
-    // of the time regardless) it's a phone check
-    let best = Infinity, bx = 0, bz = 0;
-    for (const s of SLOTS) {
-      const d = Math.hypot(s.x - p.h.position.x, s.z - p.h.position.z);
-      if (d < best) { best = d; bx = s.x; bz = s.z; }
-    }
-    const phone = best > 4 || Math.random() < 0.4;
-    p.pauseYaw = phone
-      ? p.h.rotation.y + (Math.random() - 0.5) * 0.8
-      : Math.atan2(bx - p.h.position.x, bz - p.h.position.z);
-    p.pause = { until: elapsed + (1.5 + Math.random() * 2.5) * p.pauseDurMul, phone };
-  }
-  function endPause(p) {
-    if (!p.pause) return;
-    if (p.pause.phone) p.phone.setEnabled(false);
-    p.pause = null;
-    p.nextPause = elapsed + (10 + Math.random() * 15) * p.pauseMul;
-  }
-  // phone held at the chest, screen back toward the face — world-parented
-  // exactly like the shelf-scan pose, so nothing new touches the skeleton
-  function posePausePhone(p) {
-    p.phone.setEnabled(true);
-    const fy = p.h.rotation.y;
-    p.phone.position.set(
-      p.h.position.x + Math.sin(fy) * 0.26, 1.22,
-      p.h.position.z + Math.cos(fy) * 0.26);
-    p.phone.rotation.y = fy + Math.PI;
-    p.phone.rotation.x = 0.55;
-  }
 
   // ---------- free roam ----------
   // p.rp is the spine position the route is walked along; the personal weave
@@ -4001,111 +1723,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // a pure function of t.
   const ROAM_WEAVE_CLAMP = 0.18; // tighter than the loop's 0.3 — routed paths
                                  // round shelf ends with less room to spare
-  function enterRoam(p) {
-    p.mode = 'roam';
-    p.mv = null;
-    p.rp = p.h.position.clone();
-    p.roamYaw = p.h.rotation.y;
-    p.nextGoalAt = 0;
-    p.pauseOff = null;
-    p.latEase = 0; // fade the personal offset in rather than snapping sideways
-  }
-  // flagged to leave → route to this portal's exit junction, where the gate
-  // queue takes over exactly as it did when people turned off the loop
-  function planExitLeg(p) {
-    const jp = walkPath.pointAt(p.pc.tExit);
-    const wps = routeBetween(p.h.position.x, p.h.position.z, jp.x, jp.z);
-    p.mv = { wps: wps ?? [new Vector3(jp.x, 0, jp.z)], wi: 0, kind: 'exit' };
-  }
-
-  function roamMove(p, dt) {
-    if (!p.rp) { p.rp = p.h.position.clone(); p.roamYaw = p.h.rotation.y; }
-    // far enough from the stand point we just left → release the reservation
-    if (p.slot >= 0 && SLOTS[p.slot]) {
-      const s = SLOTS[p.slot];
-      if (Math.hypot(p.h.position.x - s.x, p.h.position.z - s.z) > 1.3) p.slot = -1;
-    }
-    // an exit flag trumps whatever they were heading for
-    if (p.exit && p.mv?.kind !== 'exit') { endPause(p); planExitLeg(p); }
-
-    // window-shopping pause: run it down, or roll for a new one. An exit flag
-    // (API leave or the auto flagger) or a DELETE fade trumps the daydream
-    // immediately — a fading body must not re-enable the phone, which is
-    // world-parented and would float at full opacity
-    if (p.pause && (p.exit || p.fadeStart != null || elapsed > p.pause.until)) endPause(p);
-    else if (!p.pause && p.fadeStart == null && elapsed >= p.nextPause) tryStartPause(p);
-
-    if (!p.mv) { // arrived, between destinations: stand a beat, then pick again
-      p.cur = (p.cur ?? 0) * Math.max(0, 1 - dt * 6);
-      if (elapsed >= p.nextGoalAt) {
-        planRoamGoal(p);
-        if (p.mode !== 'roam') return; // the planner dived at a shelf
-      }
-      applyGait(p);
-      return;
-    }
-
-    const m = p.mv;
-    const tgt = m.wps[m.wi];
-    const dx = tgt.x - p.rp.x, dz = tgt.z - p.rp.z;
-    const dist = Math.hypot(dx, dz);
-    // pace breathes around the persona's base so nobody metronomes
-    let target = p.pause ? 0
-      : p.speed * (1 + p.driftAmp * Math.sin(elapsed * p.driftFreq + p.driftPhase));
-    if (robotAhead(p.h)) target = 0;
-    p.cur = (p.cur ?? p.speed) + (target - (p.cur ?? p.speed)) * Math.min(1, dt * 6);
-    const step = p.cur * walkPath.length * dt;
-    if (dist > 0.001) {
-      const k = Math.min(1, step / dist);
-      p.rp.x += dx * k;
-      p.rp.z += dz * k;
-    }
-    // heading eased toward the leg so corners round off instead of snapping —
-    // it also carries the weave's perpendicular, which would jolt on a hard turn
-    if (p.cur > p.speed * 0.2 && dist > 0.001) {
-      p.roamYaw = shortestLerp(p.roamYaw, Math.atan2(dx, dz), Math.min(1, dt * 4));
-    }
-
-    // personal walking line, laid perpendicular to the current heading: a lane
-    // preference that itself wanders, plus a two-octave weave
-    p.latEase = Math.min(1, p.latEase + dt * 0.5);
-    const weave = p.lat
-      + Math.sin(elapsed * p.latDriftFreq + p.latDriftPhase) * 0.1
-      + Math.sin(elapsed * p.wobFreq + p.wobPhase) * 0.08
-      + Math.sin(elapsed * p.wobFreq * 2.7 + p.wobPhase * 1.7) * 0.05;
-    // freeze the weave mid-stance while stopped — a time-driven offset would
-    // skate an Idle body sideways at up to ~0.15 u/s
-    p.pauseBlend = Math.max(0, Math.min(1, p.pauseBlend + (p.pause ? dt * 3 : -dt * 3)));
-    if (p.pause && p.pauseOff == null) p.pauseOff = weave;
-    else if (!p.pause && p.pauseBlend <= 0) p.pauseOff = null;
-    const mixed = p.pauseOff == null ? weave : weave + (p.pauseOff - weave) * p.pauseBlend;
-    let off = Math.max(-ROAM_WEAVE_CLAMP, Math.min(ROAM_WEAVE_CLAMP, mixed)) * p.latEase;
-    const nx = Math.cos(p.roamYaw), nz = -Math.sin(p.roamYaw); // left of the heading
-    // routes hug shelf ends — never let the sway push a body into a fixture
-    if (!navFree(p.rp.x + nx * off, p.rp.z + nz * off)) off *= 0.5;
-    if (!navFree(p.rp.x + nx * off, p.rp.z + nz * off)) off = 0;
-    p.h.position.x = p.rp.x + nx * off;
-    p.h.position.z = p.rp.z + nz * off;
-    // paused shoppers turn to whatever caught their eye and back again;
-    // pauseBlend eases the handoff so neither end of the stop snaps
-    p.h.rotation.y = p.pauseBlend > 0
-      ? shortestLerp(p.roamYaw, p.pauseYaw, p.pauseBlend) : p.roamYaw;
-    if (p.pause?.phone) posePausePhone(p);
-
-    if (dist <= Math.max(0.12, step)) {
-      m.wi++;
-      if (m.wi >= m.wps.length) {
-        if (m.kind === 'exit') { p.mode = 'exitwalk'; p.wp = 0; p.exitSeq = ++exitSeq; p.mv = null; }
-        else { p.mv = null; p.nextGoalAt = elapsed + 0.3 + Math.random() * 1.4; }
-      }
-    }
-    applyGait(p);
-  }
-
-  function walk(p, dt) {
-    if (p.mode === 'roam') roamMove(p, dt);
-    else spurMove(p, dt);
-  }
 
   // Reveal order: first real frame (shaders/textures compiled) → every character
   // file in → spawn the opening crowd → one more frame → onReady. The crowd used
@@ -4732,18 +2349,496 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   ro.observe(container);
 
   // ---------- cleanup ----------
-  function dispose() {
-    engine.stopRenderLoop();
-    if (window.cancelIdleCallback) window.cancelIdleCallback(warmIdle);
-    clearTimeout(warmIdle); // harmless if warmIdle was an idle handle
-    ro.disconnect();
-    window.removeEventListener('resize', onResize);
-    canvas.removeEventListener('wheel', onWheel);
-    canvas.removeEventListener('pointerleave', onPointerLeave);
-    scene.onPointerObservable.remove(pointerObs);
-    scene.dispose();
-    engine.dispose();
-    if (canvas.parentNode === container) container.removeChild(canvas);
+
+
+  // ---------- 01 · materials & primitives ----------
+
+  // lit PBR ≈ MeshStandardMaterial({color, roughness, metalness, emissive, emissiveIntensity})
+  function pbr(name, o) {
+    const m = new PBRMaterial(name, scene);
+    m.albedoColor = C3(o.color);
+    m.metallic = o.metalness ?? 0;
+    m.roughness = o.roughness ?? 1;
+    m.ambientColor = Color3.White();
+    if (o.emissive !== undefined) m.emissiveColor = C3(o.emissive).scale(o.emissiveIntensity ?? 1);
+    if (o.alpha !== undefined && o.alpha < 1) { m.alpha = o.alpha; }
+    m.environmentIntensity = 0.35;
+    return m;
+  }
+
+  // unlit ≈ MeshBasicMaterial({color, transparent, opacity})
+  function basic(name, o) {
+    const m = new StandardMaterial(name, scene);
+    m.disableLighting = true;
+    m.emissiveColor = C3(o.color);
+    m.diffuseColor = Color3.Black();
+    m.specularColor = Color3.Black();
+    if (o.alpha !== undefined && o.alpha < 1) m.alpha = o.alpha;
+    m.backFaceCulling = false;
+    return m;
+  }
+
+  function box(w, h, d, material, x = 0, y = 0, z = 0) {
+    const m = MeshBuilder.CreateBox('b' + _id++, { width: w, height: h, depth: d }, scene);
+    m.position.set(x, y + h / 2, z);
+    m.material = material;
+    m.receiveShadows = true;
+    m.isPickable = false;
+    shadowGen.addShadowCaster(m);
+    return m;
+  }
+
+  function group(name) { return new TransformNode(name, scene); }
+
+  function makeScanRingMat() {
+    const m = new StandardMaterial('scanRingMat', scene);
+    m.disableLighting = true;
+    m.emissiveColor = LOCK_GREEN.scale(1.4);
+    m.alpha = 0;
+    m.alphaMode = Engine.ALPHA_ADD;
+    m.disableDepthWrite = true;
+    m.backFaceCulling = false;
+    return m;
+  }
+
+  function unitBounds(node) {
+    let min = new Vector3(Infinity, Infinity, Infinity);
+    let max = new Vector3(-Infinity, -Infinity, -Infinity);
+    node.getChildMeshes().forEach((m) => {
+      m.computeWorldMatrix(true);
+      const bb = m.getBoundingInfo().boundingBox;
+      min = Vector3.Minimize(min, bb.minimumWorld);
+      max = Vector3.Maximize(max, bb.maximumWorld);
+    });
+    return { min, max, center: min.add(max).scale(0.5), size: max.subtract(min) };
+  }
+
+  // 12-edge wireframe of a unit cube as a reusable scalable line box
+  function makeLineBox(name, color, alpha) {
+    const s = 0.5;
+    const corners = [
+      [-s, -s, -s], [s, -s, -s], [s, -s, s], [-s, -s, s],
+      [-s, s, -s], [s, s, -s], [s, s, s], [-s, s, s],
+    ].map((c) => new Vector3(c[0], c[1], c[2]));
+    const E = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]];
+    const lines = E.map(([a, b]) => [corners[a], corners[b]]);
+    const m = MeshBuilder.CreateLineSystem(name, { lines }, scene);
+    m.color = color;
+    m.alpha = alpha;
+    m.isPickable = false;
+    m.isVisible = false;
+    m.parent = world;
+    return m;
+  }
+
+  function frameOutline(outline, unit, pad) {
+    const b = unitBounds(unit);
+    outline.scaling.set(b.size.x + pad, b.size.y + pad, b.size.z + pad);
+    outline.position.copyFrom(b.center);
+    outline.isVisible = true;
+  }
+
+  // ---------- 02 · store structure ----------
+
+  function wall(len, rotY, x, z) {
+    const w = box(len, WALL_H, 0.4, mat.wall, 0, 0, 0);
+    w.position.set(x, WALL_H / 2, z);
+    w.rotation.y = rotY;
+    w.parent = world;
+    return w;
+  }
+
+  function wallBand(len, rotY, x, z) {
+    const b = box(len, 0.5, 0.1, bandMat, 0, 0, 0);
+    b.position.set(x, WALL_H - 1.4, z);
+    b.rotation.y = rotY;
+    b.parent = world;
+    return b;
+  }
+
+  function gondola(x, z, length, rotY = 0, colors = productColors) {
+    const g = group('gondola');
+    const depth = 1.5, gheight = 3.6;
+    box(length, gheight, 0.18, mat.shelfDk, 0, 0, 0).parent = g;
+    box(length, 0.35, depth, mat.shelf, 0, 0, 0).parent = g;
+    const levels = [1.0, 2.0, 3.0];
+    for (const ly of levels) {
+      box(length, 0.1, depth, mat.shelf, 0, ly - 0.05, 0).parent = g;
+      for (let side = -1; side <= 1; side += 2) {
+        const pz = side * (depth / 2 - 0.32);
+        let prev = -1; // last colour placed in this row — kept distinct from the next
+        for (let i = 0; i < length - 1; i++) {
+          if (Math.random() < 0.1) continue;
+          const px = -length / 2 + 0.75 + i;
+          const ph = 0.5 + Math.random() * 0.4;
+          const col = pickColor(colors, prev);
+          prev = col;
+          box(0.62, ph, 0.55, prodMat(col), px, ly, pz).parent = g;
+        }
+        box(length, 0.16, 0.04, mat.label, 0, ly + 0.08, side * (depth / 2 + 0.02)).parent = g;
+      }
+    }
+    box(0.16, gheight, depth, mat.metal, -length / 2, 0, 0).parent = g;
+    box(0.16, gheight, depth, mat.metal, length / 2, 0, 0).parent = g;
+    g.position.set(x, 0, z);
+    g.rotation.y = rotY;
+    g.parent = world;
+    return g;
+  }
+
+  function wallShelf(length, rotY, x, z, colors = productColors) {
+    const g = group('wallShelf');
+    const depth = 1.3, gheight = 6.5;
+    box(length, gheight, 0.15, mat.shelfDk, 0, 0, -depth / 2).parent = g;
+    const levels = [1.0, 2.3, 3.6, 4.9];
+    for (const ly of levels) {
+      box(length, 0.1, depth, mat.shelf, 0, ly - 0.05, 0).parent = g;
+      let prev = -1; // last colour placed in this row — kept distinct from the next
+      for (let i = 0; i < length - 1; i++) {
+        if (Math.random() < 0.08) continue;
+        const px = -length / 2 + 0.7 + i;
+        const ph = 0.55 + Math.random() * 0.45;
+        const col = pickColor(colors, prev);
+        prev = col;
+        box(0.6, ph, 0.5, prodMat(col), px, ly, 0.1).parent = g;
+      }
+      box(length, 0.16, 0.04, mat.label, 0, ly + 0.08, depth / 2 - 0.02).parent = g;
+    }
+    g.position.set(x, 0, z);
+    g.rotation.y = rotY;
+    g.parent = world;
+    return g;
+  }
+
+  function checkout(x, z, rotY = 0) {
+    const g = group('checkout');
+    box(5.5, 1.1, 2.4, mat.counter, 0, 0, 0).parent = g;
+    box(5.5, 0.18, 2.6, mat.metal, 0, 1.1, 0).parent = g;
+    box(0.9, 0.7, 0.6, mat.metal, -1.8, 1.28, 0).parent = g;
+    const screen = MeshBuilder.CreatePlane('pos', { width: 0.8, height: 0.5 }, scene);
+    screen.material = mat.screen;
+    screen.position.set(-1.8, 1.95, 0.31);
+    screen.isPickable = false;
+    screen.parent = g;
+    box(5.5, 0.12, 0.05, pbr('costrip', { color: 0x0c1730, emissive: 0x35c3ff, emissiveIntensity: 1.6, roughness: 0.4 }), 0, 0.45, 1.22).parent = g;
+    g.position.set(x, 0, z);
+    g.rotation.y = rotY;
+    g.parent = world;
+    return g;
+  }
+
+  function makeBadge(num) {
+    const size = 256;
+    const tex = new DynamicTexture('badge' + num, { width: size, height: size }, scene, true);
+    tex.hasAlpha = true;
+    const ctx = tex.getContext();
+    ctx.clearRect(0, 0, size, size);
+    // Soft navy backdrop halo: a radial gradient whose core is nearly opaque —
+    // enough to mute whatever is behind the badge (e.g. the emissive wall band)
+    // so it reads as a circle instead of a rectangular strip framing the number
+    // — then feathers to full transparency at the rim, so the edge glows softly
+    // rather than cutting a hard opaque disc.
+    const cx = size / 2, cy = size / 2;
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, size / 2 - 4);
+    grad.addColorStop(0.0, 'rgba(11,22,44,0.95)');
+    grad.addColorStop(0.6, 'rgba(11,22,44,0.9)');
+    grad.addColorStop(0.86, 'rgba(11,22,44,0.45)');
+    grad.addColorStop(1.0, 'rgba(11,22,44,0.0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, size / 2 - 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx, cy, 102, 0, Math.PI * 2);
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = '#35c3ff';
+    ctx.shadowColor = '#35c3ff';
+    ctx.shadowBlur = 42;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#eaf6ff';
+    ctx.font = 'bold 104px ui-sans-serif, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(num, size / 2, size / 2 + 4);
+    tex.update();
+    tex.hasAlpha = true;
+    tex.uScale = -1; tex.uOffset = 1; // un-mirror text under right-handed billboard
+
+    // Unlit textured badge: diffuseTexture carries the base color + circular
+    // alpha (disableLighting forces it full-bright), emissiveTexture adds the
+    // neon glow on the bright ring/number so they bloom while the navy disc
+    // stays dark. (emissiveTexture alone renders the disc blown-out white.)
+    const m = new StandardMaterial('badgeMat' + num, scene);
+    m.disableLighting = true;
+    m.diffuseTexture = tex;
+    m.useAlphaFromDiffuseTexture = true;
+    m.emissiveTexture = tex;
+    m.emissiveColor = Color3.White();
+    m.diffuseColor = Color3.White();
+    m.specularColor = Color3.Black();
+    m.disableDepthWrite = true;
+    m.backFaceCulling = false;
+
+    const plane = MeshBuilder.CreatePlane('badge', { size: 2.8 }, scene);
+    plane.material = m;
+    plane.billboardMode = TransformNode.BILLBOARDMODE_ALL;
+    plane.renderingGroupId = 1;
+    plane.isPickable = false;
+    return plane;
+  }
+
+  function escalator(x, z, rotY, dir) {
+    const g = group('escalator');
+    g.position.set(x, 0, z);
+    g.rotation.y = rotY;
+    g.parent = world;
+
+    const rise = FLOOR_RISE, run = 10;
+    const L = Math.hypot(run, rise), ang = Math.atan2(rise, run), w = 1.5;
+
+    // flat landings — bottom on Floor 1, top level with Floor 2
+    box(2, 0.3, w + 0.4, mat.metal, -0.6, 0, 0).parent = g;
+    box(2, 0.3, w + 0.4, mat.metal, run + 0.6, rise - 0.3, 0).parent = g;
+
+    // tilted spine everything rides on (local +x runs up the slope)
+    const inc = group('inc');
+    inc.parent = g;
+    inc.rotation.z = ang;
+    box(L, 0.5, w, mat.shelfDk, L / 2, -0.35, 0).parent = inc; // truss underside
+    for (const s of [-1, 1]) {
+      box(L, 1.1, 0.1, escGlass, L / 2, 0.55, (s * w) / 2).parent = inc;  // balustrade glass
+      box(L, 0.18, 0.34, mat.metal, L / 2, 1.15, (s * w) / 2).parent = inc; // handrail cap
+    }
+
+    // moving step treads
+    const nT = 16, gap = L / nT, treads = [], rail = [];
+    for (let i = 0; i < nT; i++) {
+      const t = box(gap * 0.62, 0.18, w * 0.86, escTread, 0, 0.02, 0);
+      t.parent = inc;
+      t.position.x = i * gap;
+      treads.push(t);
+    }
+    // moving handrail nubs, so the rail visibly travels with the steps
+    for (const s of [-1, 1]) {
+      for (let i = 0; i < nT; i++) {
+        const r = box(0.3, 0.1, 0.14, mat.metal, 0, 1.3, (s * w) / 2);
+        r.parent = inc;
+        r.position.x = i * gap;
+        rail.push(r);
+      }
+    }
+    escParts.push({ treads, rail, L, speed: 2.4, dir });
+  }
+
+  function sensor(x, z) {
+    const g = group('sensor');
+    box(0.6, 0.3, 0.6, mat.metal, 0, 8.4, 0).parent = g;
+    const lens = MeshBuilder.CreateSphere('lens', { diameter: 0.36, segments: 16 }, scene);
+    lens.material = basic('lensMat', { color: 0x9fe6ff });
+    lens.position.set(0, 8.4, 0);
+    lens.isPickable = false;
+    lens.parent = g;
+    g.position.set(x, 0, z);
+    g.parent = world;
+    g.metadata = { lens, t: Math.random() * 6 };
+    sensors.push(g);
+  }
+
+  // build one gated doorway on the right wall. kind: 'entry' | 'exit'
+  function makeRightDoorway(centerZ, kind) {
+    const rig = R_RIG[kind];
+    const H = 2.5;
+    // world point: a = along the wall (+z), d = depth inward (+ = into store)
+    const W = (a, d) => ({ x: half - d, z: centerZ + a });
+    const facing = -Math.PI / 2; // face −x, into the store
+    // a wall box spanning `wa` along z (world depth) and `tn` through x (world
+    // width), floor-anchored at (a, d), optional y lift
+    const wput = (wa, h, tn, a, d, m, y = 0) => {
+      const p = W(a, d);
+      const mesh = box(tn, h, wa, m, p.x, y, p.z);
+      mesh.parent = world;
+      return mesh;
+    };
+    wput(0.16, H, 0.16, -1.28, 0, mat.metal);
+    wput(0.16, H, 0.16, 1.28, 0, mat.metal);
+    for (const [pw, pa] of rig.panes) wput(pw, H - 0.1, 0.06, pa, 0, glassMat);
+    wput(rig.header[0], 0.22, 0.2, rig.header[1], 0, mat.metal, H);
+    wput(rig.header[0], 0.06, 0.22, rig.header[1], 0, trimMat, H + 0.22);
+    wput(3.4, 0.04, 2.6, 0, -1.35, mat.counter); // pad outside
+    wput(3.4, 0.02, 0.14, 0, -0.35, trimMat, 0.04); // cyan strip on the pad
+    const panels = [-1, 1].map((s) => {
+      const p0 = W(s * 0.62, 0.14);
+      // box() floor-anchors its y param — 0.02 puts the panel centre at 1.19,
+      // matching the front doors (which set the centre absolutely)
+      const panel = box(0.07, 2.34, 1.24, doorGlassMat, p0.x, 0.02, p0.z);
+      box(0.08, 2.34, 0.1, trimMat, 0, -1.17, 0).parent = panel;
+      panel.parent = world;
+      return { mesh: panel, side: s, closedZ: p0.z };
+    });
+    const lampMats = [];
+    for (const s of [-1, 1]) {
+      const gp = W(s * 0.8, rig.gateD);
+      box(0.18, 1.18, 0.18, mat.metal, gp.x, 0, gp.z).parent = world;
+      const cam = box(0.3, 0.13, 0.13, mat.shelfDk, gp.x, 1.18, gp.z);
+      cam.rotation.y = facing; cam.rotation.x = 0.32;
+      cam.parent = world;
+      const lm = basic(`rGateLamp${kind}${s}`, { color: 0x35c3ff, alpha: 0.95 });
+      lampMats.push(lm);
+      box(0.2, 0.05, 0.2, lm, gp.x, 1.33, gp.z).parent = world;
+    }
+    const gw = W(0, rig.gateD);
+    const beam = MeshBuilder.CreateBox(`rGateBeam${kind}`, { width: 0.7, height: 0.05, depth: 1.42 }, scene);
+    beam.material = gateBeamMat; beam.isPickable = false; beam.isVisible = false;
+    beam.position.set(gw.x, 1, gw.z); beam.parent = world;
+    // floating verdict tag over the gate
+    const mkTag = (draw, tw = 384, pw = 1.9) => {
+      const key = `${kind}${centerZ}${Math.random()}`;
+      const tex = new DynamicTexture(`rTagTex${key}`, { width: tw, height: 144 }, scene, true);
+      tex.hasAlpha = true; tex.uScale = -1; tex.uOffset = 1;
+      const m = new StandardMaterial(`rTagMat${key}`, scene);
+      m.disableLighting = true; m.emissiveTexture = tex; m.opacityTexture = tex; m.backFaceCulling = false;
+      const plane = MeshBuilder.CreatePlane(`rTagPl${key}`, { width: pw, height: 0.71 }, scene);
+      plane.material = m; plane.billboardMode = TransformNode.BILLBOARDMODE_ALL;
+      plane.isPickable = false; plane.isVisible = false;
+      plane.position.set(gw.x, 2.1, gw.z); plane.parent = world;
+      if (draw) draw(tex.getContext());
+      tex.update();
+      return { plane, mat: m, tex };
+    };
+    const doorAnchor = { x: W(0, 0).x, z: centerZ };
+    const reticle = makeFaceReticle(`rReticle${kind}${centerZ}`);
+    return { panels, lampMats, beam, gateWorld: gw, doorAnchor, reticle, mkTag, openAmt: 0 };
+  }
+
+  // ---------- 03 · floor 2 ----------
+
+  function buildFloor2() {
+    if (floor2) return;
+    floor2 = new TransformNode('floor2', scene);
+    floor2.position.y = FLOOR_RISE;
+    for (const src of l1Roots) {
+      if (src.name === 'floor') continue; // Floor 2 gets a decked floor with a stairwell well instead
+      const c = src.clone(src.name + '_f2', floor2);
+      if (!c) continue;
+      for (const m of [c, ...c.getChildMeshes(false)]) {
+        m.isPickable = false;   // Floor 2 is decor — it never picks or dims as a target
+        m.metadata = null;
+        m.visibility = 0;
+        if (m.getClassName?.() === 'LinesMesh') { floor2Lines.push({ m, base: m.alpha }); m.alpha = 0; }
+        if (m.getTotalVertices && m.getTotalVertices() > 0) floor2Meshes.push(m);
+      }
+    }
+    buildFloor2Deck();
+    floor2.setEnabled(false);
+  }
+
+  // Floor-2 floor: the room minus a rectangular stairwell (tiled as strips so we
+  // dodge a CSG boolean on a fading clone), ringed on its open sides by an emissive lip.
+  function buildFloor2Deck() {
+    const R = ROOM / 2;
+    const panel = (cx, cz, w, d) => {
+      if (w <= 0.01 || d <= 0.01) return;
+      const p = MeshBuilder.CreatePlane('deckF2', { width: w, height: d }, scene);
+      p.rotation.x = Math.PI / 2;
+      p.position.set(cx, 0, cz);
+      p.material = mat.floor;
+      p.isPickable = false;
+      p.visibility = 0;
+      // mid-fade the deck joins the alpha-blend queue (visibility<1); draw it
+      // before the always-alpha grid/edge lines so it can't paint over them
+      p.alphaIndex = 0;
+      p.parent = floor2;
+      floor2Meshes.push(p);
+    };
+    panel(0, (WELL.z1 + R) / 2, ROOM, R - WELL.z1);                                   // in front of the well
+    panel(0, (-R + WELL.z0) / 2, ROOM, WELL.z0 + R);                                  // behind the well
+    panel((WELL.x1 + R) / 2, (WELL.z0 + WELL.z1) / 2, R - WELL.x1, WELL.z1 - WELL.z0); // right of the well
+    // emissive lip around the three open sides (the fourth hugs the wall)
+    const cx = (WELL.x0 + WELL.x1) / 2, cz = (WELL.z0 + WELL.z1) / 2;
+    const lip = (w, d, x, z) => {
+      const b = box(w, 0.35, d, bandMat, x, 0.02, z);
+      b.parent = floor2;
+      b.visibility = 0;
+      floor2Meshes.push(b);
+    };
+    lip(WELL.x1 - WELL.x0, 0.12, cx, WELL.z1); // front edge
+    lip(WELL.x1 - WELL.x0, 0.12, cx, WELL.z0); // back edge
+    lip(0.12, WELL.z1 - WELL.z0, WELL.x1, cz); // right edge
+  }
+
+  function setFloor2(show) {
+    if (show) buildFloor2();
+    if (!floor2) return;
+    if (show) floor2.setEnabled(true); // enable up-front so the fade-in is visible
+    floor2Anim.from = floor2Anim.value;
+    floor2Anim.to = show ? 1 : 0;
+    floor2Anim.dur = show ? FLOOR2_FADE_IN : FLY_DUR;
+    floor2Anim.t = 0;
+    floor2Anim.active = true;
+  }
+
+  // FLOOR PLAN buttons route here. Only Floor 2 (index 1) stacks a storey;
+  // Floor 1 and the not-yet-built Floor 3 both collapse back to a single storey.
+  function setFloor(i) {
+    const show = i === 1;
+    setFloor2(show);
+    if (show) {
+      if (!floorHome) floorHome = { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone(), zoom };
+      // keep the user's orbit, lift the aim to mid-building and zoom to frame both
+      // storeys. 0.95 crops the outermost wall-top corners slightly (~30px at the
+      // default orbit) — chosen deliberately for a tighter, closer look.
+      flyTo({ alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: new Vector3(0, FLOOR_RISE - 1, 0), zoom: 0.95 });
+    } else if (floorHome) {
+      flyTo(floorHome);
+      floorHome = null;
+    }
+  }
+
+  // ---------- 04 · shelf lock rigs & LEDs ----------
+
+  function buildShelfLockRig(lk, unit, { length, zFront, faces, hBase, hTop, nseg: nsegOpt }) {
+    const led = basic('lockLed' + lk.id, { color: 0xe04848 });
+    lk.ledMats.push(led);
+    const H = hTop - hBase;
+    const nseg = nsegOpt ?? Math.max(2, Math.round(length / 4));
+    const segW = length / nseg;
+    // interior seams: openable units — each owns the two panes flanking it
+    // (their glide toward segment centers parts the glass at the seam). The
+    // anchor is the seam's world position; localX lets the slot generator put
+    // a browse stand + QR pedestal on every seam.
+    for (let si = 0; si < nseg - 1; si++) {
+      const sx = -length / 2 + segW * (si + 1);
+      const anchor = Vector3.TransformCoordinates(
+        new Vector3(sx, 0, zFront * faces[0]), unit.computeWorldMatrix(true));
+      lk.seams.push({ openAmt: 0, holders: 0, anchor, localX: sx });
+    }
+    for (const face of faces) { // 1 / -1 → the unit's local ±z front
+      for (let si = 0; si < nseg; si++) {
+        const cx = -length / 2 + segW * (si + 0.5);
+        for (const dir of [-1, 1]) {
+          // the two panes of a segment ride separate tracks so they can stack
+          const zo = (zFront + (dir > 0 ? 0.05 : 0)) * face;
+          const panel = box(segW / 2 - 0.03, H, 0.05, lockGlassMat, cx + dir * (segW / 4), hBase, zo);
+          shadowGen.removeShadowCaster(panel);
+          const trim = box(0.06, H, 0.07, lockTrimMat, dir * (segW / 4 - 0.04), -H / 2, 0);
+          shadowGen.removeShadowCaster(trim); // bright leading edge
+          trim.parent = panel;
+          panel.parent = unit;
+          panel.metadata = { shelfId: lk.id };
+          panel.isPickable = true;
+          // a dir=+1 pane retreats from the seam on its right (index si), a
+          // dir=-1 pane from the seam on its left (si-1); end panes at the
+          // shelf edges have no seam and only move on a master unlock
+          const seam = lk.seams[dir > 0 ? si : si - 1] ?? null;
+          lk.panels.push({ mesh: panel, closedX: cx + dir * (segW / 4), dir, slide: (segW / 4) * 0.94, seam });
+        }
+      }
+      const strip = box(length, 0.1, 0.08, led, 0, hTop + 0.02, (zFront + 0.03) * face);
+      shadowGen.removeShadowCaster(strip);
+      strip.parent = unit;
+      strip.metadata = { shelfId: lk.id };
+    }
   }
 
   // MQTT loadcell status heartbeat (via /shelfs/events → Dashboard): flip a
@@ -4757,6 +2852,2063 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     if (!lk) return false;
     lk.offline = !online;
     return true;
+  }
+
+  // ---------- 05 · camera ----------
+
+  function applyOrtho() {
+    const aspect = engine.getRenderWidth() / Math.max(1, engine.getRenderHeight());
+    const fz = frustum / zoom;
+    camera.orthoLeft = -fz * aspect;
+    camera.orthoRight = fz * aspect;
+    camera.orthoTop = fz;
+    camera.orthoBottom = -fz;
+  }
+
+  function landingPoseFor(id) {
+    const zn = zoneById.get(id);
+    const b = unitBounds(zn.unit);
+    const center = b.center;
+    const pos = center.add(zn.face.scale(zn.dist)).add(new Vector3(0, zn.height, 0));
+    const pose = poseFromOffset(pos.subtract(center));
+    return { ...pose, target: center.clone(), zoom: zn.focusZoom ?? 1.8 };
+  }
+
+  function personFocusPoseFor(e) {
+    const s = SLOTS[e.ref.slot];
+    const away = new Vector3(-Math.sin(s.ry), 0, -Math.cos(s.ry)); // slot ry faces the shelf
+    const along = new Vector3(away.z, 0, -away.x);
+    const c = unitBounds(zoneById.get(s.shelfId).unit).center;
+    const side = (e.h.position.x - c.x) * along.x + (e.h.position.z - c.z) * along.z >= 0 ? 1 : -1;
+    const dir = away.scale(Math.cos(PFOCUS.yaw)).add(along.scale(side * Math.sin(PFOCUS.yaw)));
+    const pose = poseFromOffset(dir.scale(PFOCUS.dist).add(new Vector3(0, PFOCUS.height, 0)));
+    return {
+      ...pose,
+      target: new Vector3(e.h.position.x, PFOCUS.targetY, e.h.position.z),
+      zoom: PFOCUS.zoom,
+    };
+  }
+
+  function shortestAngle(from, to) {
+    let d = (to - from) % (Math.PI * 2);
+    if (d > Math.PI) d -= Math.PI * 2;
+    if (d < -Math.PI) d += Math.PI * 2;
+    return from + d;
+  }
+
+  function flyTo(pose) {
+    fly.fromAlpha = camera.alpha;
+    fly.toAlpha = shortestAngle(camera.alpha, pose.alpha);
+    fly.fromBeta = camera.beta;
+    fly.toBeta = pose.beta;
+    fly.fromRadius = camera.radius;
+    fly.toRadius = pose.radius;
+    fly.fromTarget.copyFrom(camera.target);
+    fly.toTarget.copyFrom(pose.target);
+    fly.fromZoom = zoom;
+    fly.toZoom = pose.zoom;
+    fly.t = 0;
+    fly.active = true;
+    camera.detachControl();
+    // radius is locked for orbit; relax the lock so the tween can move it
+    camera.lowerRadiusLimit = camera.upperRadiusLimit = null;
+  }
+
+  // ---------- 06 · picking & selection ----------
+
+  function zoneIdOf(mesh) {
+    for (let p = mesh; p; p = p.parent) {
+      if (p.metadata && p.metadata.shelfId !== undefined) return p.metadata.shelfId;
+    }
+    return 0;
+  }
+
+  function applyDim(v) {
+    for (const e of dimReg) {
+      const f = e.zoneId !== dimFocus ? 1 - (1 - DIM_FLOOR) * v : 1;
+      if (e.albedo) e.m.albedoColor.copyFrom(e.albedo).scaleInPlace(f);
+      if (e.emissive) e.m.emissiveColor.copyFrom(e.emissive).scaleInPlace(f);
+    }
+  }
+
+  function setDim(focusId) {
+    if (focusId) dimFocus = focusId;
+    dim.from = dim.value;
+    dim.to = focusId ? 1 : 0;
+    dim.t = 0;
+    dim.active = true;
+  }
+
+  function selectShelf(id) {
+    const pf = pendingFocusPose; // dbl-click pose rides one round-trip, then dies
+    pendingFocusPose = null;
+    const prev = selectedId;
+    selectedId = id || null;
+    if (!selectedId) {
+      selOutline.isVisible = false;
+      setDim(null);
+      if (homePose) { flyTo(homePose); homePose = null; }
+      return;
+    }
+    if (!zoneById.has(selectedId)) { selectedId = prev; return; } // unknown id — leave the camera alone
+    if (!prev && !homePose) {
+      homePose = { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone(), zoom };
+    }
+    frameOutline(selOutline, zoneById.get(selectedId).unit, 0.5);
+    setDim(selectedId);
+    flyTo(pf && pf.id === selectedId ? pf.pose : landingPoseFor(selectedId));
+  }
+
+  function pickTarget() {
+    const allowPerson = selectedId == null; // design rule: shelf focus locks people out
+    const hit = scene.pick(scene.pointerX, scene.pointerY, (m) => {
+      if (!m.isPickable || !m.metadata) return false;
+      if (m.metadata.shelfId !== undefined) return true;
+      // person capsules become pickable once the async model is actually visible
+      return allowPerson && m.metadata.personId !== undefined && !!m.parent?.metadata?.ready;
+    });
+    if (!hit || !hit.hit || !hit.pickedMesh) return null;
+    const md = hit.pickedMesh.metadata;
+    return md.personId !== undefined
+      ? { type: 'person', id: md.personId }
+      : { type: 'shelf', id: md.shelfId };
+  }
+
+  function setHoverGlow(id) {
+    hoverId = id;
+    const zn = zoneById.get(id);
+    if (!zn) return;
+    const b = unitBounds(zn.unit);
+    const pad = 0.35;
+    const ud = hoverGlow.metadata;
+    ud.sx = b.size.x + pad; ud.sy = b.size.y + pad; ud.sz = b.size.z + pad;
+    ud.cx = b.center.x; ud.cy = b.center.y; ud.cz = b.center.z;
+  }
+
+  // React <-> scene sync (mirror of selectShelf, for people)
+  function selectPerson(id) {
+    if (id && !persons.has(id)) { onSelectPerson?.(null); return; } // despawned between click and sync
+    selectedPersonId = id || null;
+    if (hoverPersonId === selectedPersonId) hoverPersonId = null;
+  }
+
+  function getPersonData(id) {
+    const e = persons.get(id);
+    if (!e) return null;
+    let status, near, picks = null;
+    const nearestZone = () => {
+      let best = Infinity, nz = zones[0]?.id ?? 1;
+      zones.forEach((zn) => {
+        const d = (zn.pos.x - e.h.position.x) ** 2 + (zn.pos.z - e.h.position.z) ** 2;
+        if (d < best) { best = d; nz = zn.id; }
+      });
+      return nz;
+    };
+    if (e.ref.mode === 'browse') {
+      // commanded sessions (API shelf sub-machine): scanning until the door
+      // opens; ambient self-scanners only flash 'scanning' during the gesture
+      status = e.ref.shelfHold
+        ? (e.ref.access ? 'browsing' : 'scanning')
+        : e.ref.shelfScan ? 'scanning' : 'browsing';
+      near = e.nearShelf;
+    } else {
+      status = e.ref.verifying ? 'verifying'
+        : e.ref.paying ? 'paying'
+        : (e.ref.exit || e.ref.retreat || e.ref.mode === 'exitwalk') ? 'leaving' : 'walking';
+      near = nearestZone();
+    }
+    picks = e.picks; // cumulative across every browse session this visit
+    return {
+      id, custNo: e.custNo, name: e.name, initials: e.initials, color: e.color,
+      avatarUrl: e.avatarUrl, email: e.email,
+      kind: e.kind, status, near, picks, api: e.apiId != null, apiId: e.apiId ?? null,
+      inStoreSec: Math.max(0, Math.floor(elapsed - e.spawnT)),
+    };
+  }
+
+  function bindCard(el) {
+    cardEl = el;
+    if (cardEl) cardEl.style.visibility = 'hidden'; // revealed on the first tracked frame
+  }
+
+  // ---------- 07 · character loading & bodies ----------
+
+  // Bind-pose height of a just-loaded container, read straight off the vertex
+  // positions. Bounding boxes are unusable for this: Babylon refreshes a skinned
+  // mesh's box lazily, so measuring a *clone* right after instantiation catches a
+  // half-built box — three consecutive spawns of one file measured 3.05, 1.33 and
+  // 2.99, and the 1.33 turned TARGET_H/raw into a 2× giant (a shopper taller than
+  // the store's own doorway). refreshBoundingInfo({ applySkeleton: true }) is no
+  // better; it fixed some clones and broke others. Vertices are the geometry
+  // itself, so one measurement per file is exact and every clone of that file
+  // lands on the same scale.
+  function measureBindHeight(container) {
+    const root = container.rootNodes[0];
+    const toLocal = root ? Matrix.Invert(root.computeWorldMatrix(true)) : Matrix.Identity();
+    const v = new Vector3();
+    let minY = Infinity, maxY = -Infinity;
+    for (const m of container.meshes) {
+      const pos = m.getVerticesData('position');
+      if (!pos) continue;
+      const toRoot = m.computeWorldMatrix(true).multiply(toLocal);
+      for (let i = 0; i < pos.length; i += 3) {
+        Vector3.TransformCoordinatesFromFloatsToRef(pos[i], pos[i + 1], pos[i + 2], toRoot, v);
+        if (v.y < minY) minY = v.y;
+        if (v.y > maxY) maxY = v.y;
+      }
+    }
+    return maxY - minY;
+  }
+
+  function loadCharContainer(file) {
+    if (!charCache.has(file)) {
+      const p = SceneLoader.LoadAssetContainerAsync('/models/', file + '.glb', scene)
+        .then(async (container) => {
+          // a model that ships no clips (e.g. a Mixamo rig) borrows the crowd's
+          // Idle/Walk/PickUp, retargeted from the donor onto its own skeleton so
+          // it moves in lock-step with everyone else instead of standing frozen
+          if (container.animationGroups.length === 0 && file !== DONOR_FILE) {
+            const donor = await loadCharContainer(DONOR_FILE);
+            try { retargetClips(donor, container, scene); }
+            catch (e) { console.error('[retarget] failed for', file, e); }
+          }
+          const rawH = measureBindHeight(container);
+          charScale.set(file, rawH > 0.01 ? TARGET_H / rawH : CHAR_SCALE);
+          return container;
+        });
+      charCache.set(file, p);
+    }
+    return charCache.get(file);
+  }
+
+  function poseFromOffset(offset) {
+    const radius = offset.length();
+    const beta = Math.acos(Scalar.Clamp(offset.y / radius, -1, 1));
+    const alpha = Math.atan2(offset.z, offset.x);
+    return { alpha, beta, radius };
+  }
+
+  function buildLook(file) {
+    const i = ++lookSeq;
+    const pick = (arr, stride) => arr[(i * stride) % arr.length];
+    // 'Skin' is the whole body (head/neck/arms/hands); 'Face' is the thin
+    // eye/brow band at the front of the head — skin tone on the body, a dark
+    // colour on the band so the eyes read against the skin instead of vanishing
+    const skin = pick(SKIN_TONES, 3);
+    const look = { Skin: skin, Face: EYE_DARK };
+    if (file === 'Suit_Male') {
+      look.Black = pick(SUITS, 3); // 'Black' is the jacket+trousers material
+      look.Shirt = pick(DRESS_SHIRTS, 2);
+    } else {
+      look.Shirt = pick(SHIRTS, 7);
+      look.Pants = pick(PANTS, 5);
+    }
+    if (file === 'OldClassy_Female') look.Hair = pick(HAIR_GREY, 3);
+    else if (i % 7 === 5) look.Hair = HAIR_FASHION[i % HAIR_FASHION.length];
+    else look.Hair = pick(HAIR_NATURAL, 5); // stride 5: coprime with 6
+    // card avatar echoes the torso garment so the UI ties back to the 3D body
+    look.torso = look.Black || look.Shirt;
+    return look;
+  }
+
+  function makeHuman(file) {
+    const h = group('human');
+    const u = { ready: false, groups: {}, fist: null, entries: null, look: buildLook(file), mats: null };
+    h.metadata = u;
+    loadCharContainer(file).then((container) => {
+      if (h.isDisposed()) return; // removed while still loading
+      // cloneMaterials + doNotInstantiate: instanced meshes silently keep the
+      // shared material (assetContainer skips the swap on InstancedMesh), so
+      // real clones are required for the per-person tints
+      const entries = container.instantiateModelsToScene((n) => n, true, { doNotInstantiate: true });
+      const root = entries.rootNodes[0];
+      root.parent = h;
+      // normalize to a common height (see TARGET_H) rather than a fixed scale,
+      // so models authored in different units land the same size in the crowd.
+      // The scale was measured once when the file loaded (measureBindHeight) —
+      // never re-measure per clone, the clone's bounding box lies.
+      root.scaling.setAll(charScale.get(file) ?? CHAR_SCALE);
+      const mats = new Set();
+      root.getChildMeshes().forEach((m) => {
+        m.isPickable = false;
+        shadowGen.addShadowCaster(m);
+        if (m.material) {
+          mats.add(m.material);
+          const hex = u.look[m.material.name];
+          if (hex) m.material.albedoColor = Color3.FromHexString(hex).toLinearSpace();
+          // emissive lift: the blue light rig reflects nothing off warm tones,
+          // so let every body part glow its own albedo a little. body skin
+          // ('Skin') gets a stronger lift so warm tones still read under the
+          // blue rig instead of crushing to black; the 'Face' eye band gets no
+          // lift so the eyes stay dark against the skin.
+          const name = m.material.name;
+          const lift = name === 'Skin' ? 0.5 : name === 'Face' ? 0 : 0.3;
+          // textured models (e.g. the Mixamo character) have no flat albedoColor
+          // to glow, so drive the lift from their albedo texture instead
+          if (m.material.albedoTexture) {
+            m.material.emissiveTexture = m.material.albedoTexture;
+            m.material.emissiveColor = new Color3(lift, lift, lift);
+          } else {
+            m.material.emissiveColor = m.material.albedoColor.scale(lift);
+          }
+        }
+      });
+      u.mats = [...mats];
+      entries.animationGroups.forEach((g) => { g.stop(); u.groups[g.name] = g; });
+      u.fist = root.getDescendants().find((n) => n.name === 'Fist.R' || n.name === 'mixamorig_RightHand') || null;
+      u.entries = entries;
+      u.ready = true;
+    }).catch((e) => console.error('character load failed:', file, e));
+    return h;
+  }
+
+  function disposeHuman(h) {
+    unregisterPerson(h); // closes the detail card if this was the followed shopper
+    const u = h.metadata || {};
+    if (u.entries) {
+      u.entries.animationGroups.forEach((g) => g.dispose());
+      u.entries.skeletons.forEach((s) => s.dispose());
+    }
+    if (u.mats) u.mats.forEach((m) => m.dispose()); // per-person tint clones
+    h.dispose(false, false); // recursively disposes the clone's meshes
+  }
+
+  // invisible pick proxy — rides along and is disposed with the person's body
+  function makePickCap(personId, h) {
+    const cap = MeshBuilder.CreateCapsule('personCap' + personId, { radius: 0.5, height: 2.6, tessellation: 8 }, scene);
+    cap.position.y = 1.3;
+    cap.visibility = 0;
+    cap.isPickable = true;
+    cap.metadata = { personId };
+    cap.parent = h;
+    return cap;
+  }
+
+  // body swap: keep the sim object and the person entry (custNo, picks, the
+  // followed card), replace only the 3D body. Mid-browse swaps first snap the
+  // shopper back onto the loop — a pick sequence can't survive losing its arms.
+  function respawnBody(p, female) {
+    const e = p.person;
+    snapToRoam(p);
+    const old = p.h;
+    const nh = makeHuman(nextCharFile(female));
+    nh.parent = world;
+    nh.position.copyFrom(old.position);
+    nh.rotation.y = old.rotation.y;
+    p.h = nh;
+    p.started = false; // any browse session died with the old body
+    p.headNode = null; // cached bones point into the old skeleton — re-resolve
+    e.h = nh; // re-point the entry BEFORE disposing — unregisterPerson then no-ops
+    e.color = cardColor(nh.metadata.look.torso);
+    makePickCap(e.id, nh);
+    disposeHuman(old);
+  }
+
+  // ---------- 08 · identity & person registry ----------
+
+  // a freshly minted (apiId-less) walk-in identity — the random crowd. Never
+  // touches the roster, so these stay off the users API entirely.
+  function genIdentity() {
+    const id = ++identSeq;
+    const female = id % 2 === 0; // walk-ins alternate so both wardrobes stay in play
+    const firsts = female ? FIRST_F : FIRST_M;
+    const first = firsts[(id * 3 + (female ? 1 : 0)) % firsts.length];
+    const last = LAST[(id * 7 + 3) % LAST.length]; // stride coprime with 10 → all 10 surnames cycle
+    return { custNo: String(id).padStart(2, '0'), name: `${first} ${last}`, female };
+  }
+
+  function nextIdentity() {
+    // only customers the API says are inside may be seeded onto the floor;
+    // outside/waiting ones arrive through enter, never as ambient fill
+    while (rosterIdx < users.length && users[rosterIdx].status && users[rosterIdx].status !== 'inside') rosterIdx++;
+    if (rosterIdx < users.length) return identFromUser(users[rosterIdx++]);
+    return genIdentity();
+  }
+
+  // first + last word of the name (roster names are free text, may be one word)
+  function initialsOf(name) {
+    const w = name.trim().split(/\s+/);
+    return w[0].charAt(0) + (w.length > 1 ? w[w.length - 1].charAt(0) : '');
+  }
+
+  // avatar chip = the shopper's torso tint, lifted toward mid-brightness so
+  // the white initials stay readable (suits are near-black otherwise)
+  function cardColor(hex) {
+    const c = Color3.FromHexString(hex);
+    const lum = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+    const w = lum < 0.35 ? 0.35 : 0.1;
+    const f = (v) => Math.round((v + (1 - v) * w) * 255).toString(16).padStart(2, '0');
+    return '#' + f(c.r) + f(c.g) + f(c.b);
+  }
+
+  function registerPerson(h, kind, ident, ref) {
+    const id = ++personSeq;
+    makePickCap(id, h);
+    const entry = {
+      id, h, kind, ref, // ref: the shopper sim object (mode/exit/slot live there)
+      custNo: ident.custNo,
+      name: ident.name,
+      initials: initialsOf(ident.name),
+      female: ident.female,
+      apiId: ident.apiId ?? null, // set for roster/API customers, null for walk-ins
+      avatarUrl: ident.avatarUrl ?? '', // '' for walk-ins → card falls back to chip
+      email: ident.email ?? '', // '' for walk-ins → card hides the email
+      color: cardColor(h.metadata.look.torso),
+      spawnT: elapsed,
+      picks: 0,
+      nearShelf: zones[0]?.id ?? 1, // set when a browse session starts; walking: computed live in getPersonData
+    };
+    persons.set(id, entry);
+    return entry;
+  }
+
+  function unregisterPerson(h) {
+    for (const [id, e] of persons) {
+      if (e.h !== h) continue;
+      persons.delete(id);
+      if (hoverPersonId === id) hoverPersonId = null;
+      if (selectedPersonId === id) { selectedPersonId = null; onSelectPerson?.(null); }
+      break;
+    }
+  }
+
+  // The users API owns the customer roster; these hooks make its mutations
+  // visible in the running store. Sim walk-ins/outs and the crowd stepper
+  // never write back — the roster is who is *known*, not who is inside.
+  function shopperByApiId(apiId) {
+    for (const p of shoppers) if (p.person?.apiId === apiId) return p;
+    return null;
+  }
+
+  // ---------- 09 · overhead tags & effects ----------
+
+  // verify/pay-pass image bubble: React hands over its wrapper el (bindFlash)
+  // and arms a pending flash (armFlash) on the SSE pass. The bubble only
+  // reveals once the in-scene scan beam sweeps that customer through — see
+  // notifyScanPass, fired from the entry/exit gate sweep-complete. Shared by
+  // both verify and pay. The frame loop writes the follow transform, mirroring
+  // the person-card track above.
+  function bindFlash(el) {
+    flashEl = el;
+    if (flashEl) flashEl.style.visibility = 'hidden'; // revealed on the first tracked frame
+    else flashApiId = null;                            // React unmounted it → stop tracking
+  }
+
+  // arm on the SSE pass; hold until the scan beam clears this customer. No body
+  // in the scene means no sweep will ever come, so drop it right away.
+  function armFlash(apiId, onReveal) {
+    if (!shopperByApiId(apiId)) { onReveal?.(false); return; }
+    flashPending = { apiId, onReveal };
+  }
+
+  // the gate sweep just cleared this shopper (green flash / ID or paid tag) — if
+  // a flash was armed for them, reveal it now and start React's 3s clock.
+  function notifyScanPass(p) {
+    const id = p?.person?.apiId;
+    if (id == null || !flashPending || flashPending.apiId !== id) return;
+    flashApiId = id;
+    const cb = flashPending.onReveal; flashPending = null;
+    cb?.(true);
+  }
+
+  // selection / hover rings under the feet (RTS style). Shared meshes that
+  // chase the current target each frame — parenting them to the person would
+  // get them disposed together with the human on despawn.
+  function personRing(name, alpha) {
+    const r = MeshBuilder.CreateTorus(name, { diameter: 1.5, thickness: 0.07, tessellation: 40 }, scene);
+    const m = new StandardMaterial(name + 'Mat', scene);
+    m.disableLighting = true;
+    m.emissiveColor = ACCENT.scale(1.2);
+    m.alpha = alpha;
+    m.alphaMode = Engine.ALPHA_ADD;
+    m.disableDepthWrite = true;
+    m.backFaceCulling = false;
+    r.material = m;
+    r.isPickable = false;
+    r.isVisible = false;
+    r.parent = world;
+    return r;
+  }
+
+  function showPaidTag() {
+    // shoppers carry no real basket (picked items vanish into an imaginary
+    // bag at the shelf), so the charged amount is decorative
+    const amt = 60 + Math.floor(Math.random() * 560);
+    drawVerdictTag(paidTex.getContext(), `฿${amt} ✓`, '#4caf72');
+    paidTex.update();
+    paidTagT = 0;
+    paidTag.isVisible = true;
+  }
+
+  function showDeclinedTag() {
+    drawVerdictTag(declinedTex.getContext(), 'DECLINED ✗', '#e2574c', 480);
+    declinedTex.update();
+    declinedTagT = 0;
+    declinedTag.isVisible = true;
+  }
+
+  function showIdTag() {
+    idTagT = 0;
+    idTag.isVisible = true;
+  }
+
+  function makeFaceReticle(name) {
+    const rMat = new StandardMaterial(name + 'Mat', scene);
+    rMat.disableLighting = true;
+    rMat.emissiveColor = ACCENT.clone();
+    rMat.emissiveTexture = reticleTex;
+    rMat.opacityTexture = reticleTex;
+    rMat.backFaceCulling = false;
+    const plane = MeshBuilder.CreatePlane(name, { size: 0.55 }, scene);
+    plane.material = rMat;
+    plane.billboardMode = TransformNode.BILLBOARDMODE_ALL;
+    plane.isPickable = false;
+    plane.isVisible = false;
+    plane.parent = world;
+    const r = { target: null, t: 0, hold: 0, seed: Math.random() * 10 };
+    r.start = (p) => { r.target = p; r.t = 0; r.hold = 0; rMat.alpha = 1; plane.isVisible = true; };
+    r.succeed = () => { r.hold = 0.6; }; // green hold, then fade out
+    r.step = (dt, denied) => {
+      const p = r.target;
+      if (!p) return;
+      if (p.h.isDisposed()) { r.target = null; plane.isVisible = false; return; }
+      r.t += dt;
+      // follow the rig's head node when it has one (rides the idle bob);
+      // fixed height above the root otherwise
+      if (!p.headNode && p.h.metadata?.ready) {
+        p.headNode = p.h.getDescendants(false).find((n) => /head/i.test(n.name)) || 'none';
+      }
+      if (p.headNode && p.headNode !== 'none') {
+        _headPos.copyFrom(p.headNode.getAbsolutePosition());
+      } else {
+        _headPos.copyFrom(p.h.getAbsolutePosition());
+        _headPos.y += 1.55;
+      }
+      if (r.t > 0.25 && r.hold <= 0) { // tracking jitter once locked
+        _headPos.x += Math.sin(elapsed * 21 + r.seed) * 0.008;
+        _headPos.y += Math.cos(elapsed * 17 + r.seed) * 0.008;
+      }
+      plane.setAbsolutePosition(_headPos);
+      // lock-on: open at 1.8× and snap down onto the face
+      plane.scaling.setAll(1 + Math.max(0, (0.25 - r.t) / 0.25) * 0.8);
+      if (r.hold > 0) { // verified — green, hold, fade out while they walk on
+        r.hold -= dt;
+        rMat.emissiveColor.copyFrom(LAMP_GREEN);
+        rMat.alpha = Math.min(1, r.hold / 0.35);
+        if (r.hold <= 0) { r.target = null; plane.isVisible = false; rMat.alpha = 1; }
+      } else if (denied) { // entry rescan — blink red with the post lamps
+        const blink = Math.sin(elapsed * 16) > 0 ? 1 : 0.3;
+        rMat.emissiveColor.copyFrom(LAMP_RED).scaleInPlace(blink);
+      } else {
+        rMat.emissiveColor.copyFrom(ACCENT);
+      }
+    };
+    return r;
+  }
+
+  // walkToShelf / scanQR / inspectItem / walkAway arrive over SSE like the
+  // gate verdicts above; shelfClose is the API's own 30s browse timer firing.
+  // API-owned shoppers never roll the junction dice, so every shelf visit
+  // below is the only way they get one. Events for shoppers in the wrong
+  // phase are dropped, mirroring how the other API hooks tolerate skew.
+  function showShelfVerdict(p, pass) {
+    const tex = pass ? shelfPassTex : shelfFailTex;
+    p.vtagMat.emissiveTexture = tex;
+    p.vtagMat.opacityTexture = tex;
+    p.vtagMat.alpha = 1;
+    p.vtag.position.set(p.h.position.x, 2.15, p.h.position.z);
+    p.vtag.isVisible = true;
+    p.vtagT = 0;
+  }
+
+  // ---------- 10 · API user commands ----------
+
+  // POST /users → a brand-new customer (status `waiting`) appears at the
+  // storefront and HOLDS at the scanner for a verify verdict, exactly like
+  // enter — not a walk-straight-in. They queue behind any existing line and
+  // don't count toward MAX_PEOPLE until verify-pass admits them. Delegates to
+  // the enter spawn so both paths stay identical.
+  function apiAddUser(u) {
+    apiEnterUser(u);
+  }
+
+  // DELETE /users/:id → fade out in place (no walk-out); customers still in a
+  // queue (gate or unconsumed roster) just never materialise
+  function apiRemoveUser(id) {
+    pendingReenters.delete(id); // parked entry never materialises (old body, if any, fades below)
+    const qi = pendingApiEntries.findIndex((i) => i.apiId === id);
+    if (qi >= 0) { pendingApiEntries.splice(qi, 1); return; }
+    for (let i = rosterIdx; i < users.length; i++) {
+      if (users[i].id === id) { users.splice(i, 1); return; }
+    }
+    const p = shopperByApiId(id);
+    if (!p || p.fadeStart != null) return;
+    p.fadeStart = elapsed;
+    if (entryGate.user === p) entryGate.user = null; // don't wedge the scanner
+    p.item.setEnabled(false); p.phone.setEnabled(false);
+    p.beam.setEnabled(false); p.ring.setEnabled(false);
+  }
+
+  // PATCH /users/:id → names refresh live; a gender change respawns the same
+  // customer in place with a new gender-matched body
+  function apiUpdateUser(u) {
+    const pend = pendingReenters.get(u.id);
+    if (pend) pend.u = u; // parked entry spawns with the fresh identity; the old body below still refreshes too
+    const q = pendingApiEntries.find((i) => i.apiId === u.id);
+    if (q) { Object.assign(q, identFromUser(u)); return; }
+    for (let i = rosterIdx; i < users.length; i++) {
+      if (users[i].id === u.id) { users[i] = u; return; }
+    }
+    const p = shopperByApiId(u.id);
+    if (!p || p.fadeStart != null) return;
+    const e = p.person;
+    e.name = u.name;
+    e.initials = initialsOf(u.name);
+    e.avatarUrl = u.avatar_url ?? ''; // PATCH reflects live in the cards, like name
+    e.email = u.email ?? '';
+    const female = u.gender === 'female';
+    if (female !== e.female) { e.female = female; respawnBody(p, female); }
+  }
+
+  // abandon any shelf business mid-flight and start roaming from where they
+  // stand — used when an API command needs the shopper walkable NOW (body
+  // swaps, forced leave). No-op for people already on a walkable leg.
+  function snapToRoam(p) {
+    if (p.mode === 'roam' || p.mode === 'enter' || p.mode === 'exitwalk') return;
+    releaseShelfAccess(p);
+    p.slot = -1; p.mv = null; p.idling = false; p.shelfScan = null;
+    p.picksLeft = 0; p.ringT = Infinity;
+    p.shelfHold = false; p.scanVerdict = null; p.inspect = null; p.inspectQueue = [];
+    p.item.setEnabled(false); p.item.scaling.setAll(1); p.phone.setEnabled(false);
+    p.beam.setEnabled(false); p.ring.setEnabled(false);
+    enterRoam(p);
+  }
+
+  // users API "leave" action → drop everything, walk to the exit gate at a
+  // normal pace, and HOLD there to pay (payHold) instead of scanning out on
+  // their own — the exit-side mirror of gateHold. Ordinary loop traffic rules
+  // apply the whole way (braking, robot stop, single-file gate queue).
+  // Release comes from apiPayUser.
+  function apiLeaveUser(id) {
+    const qi = pendingApiEntries.findIndex((i) => i.apiId === id);
+    if (qi >= 0) { pendingApiEntries.splice(qi, 1); return; } // never arrived
+    for (let i = rosterIdx; i < users.length; i++) {
+      if (users[i].id === id) { users.splice(i, 1); return; }
+    }
+    const p = shopperByApiId(id);
+    if (!p || p.fadeStart != null || p.done) return;
+    snapToRoam(p);
+    p.payHold = true;
+    p.exit = true;
+  }
+
+  // users API "pay" action → verdict for a payHold customer at the exit fare
+  // gate. pass: the beam sweeps them, they pay and walk out. fail: red deny
+  // blink + DECLINED tag, they stay put to try again — the one asymmetry with
+  // verify (a failed entry turns you away; a failed pay just holds you).
+  function applyPay(p, result) {
+    p.payVerdict = undefined;
+    if (result === 'pass') {
+      p.scan = 0; // hand over to the normal sweep; success clears payHold
+      p.payHold = false;
+    } else {
+      gate.deny = 0.9;
+      showDeclinedTag();
+    }
+  }
+
+  function apiPayUser(id, result) {
+    const p = shopperByApiId(id);
+    if (!p || !p.payHold || p.fadeStart != null || p.done) return;
+    if (gate.user === p) applyPay(p, result);
+    else p.payVerdict = result; // applies the moment they reach the scanner
+  }
+
+  // users API "enter" action → the customer shows up outside and joins the
+  // entry line, holding at the scanner (gateHold) until a verify verdict
+  // arrives — no self-scan like ambient walk-ins. Long lines stack visibly
+  // out the door: each spawn starts behind the current tail.
+  function apiEnterUser(u) {
+    if (shopperByApiId(u.id)) { pendingReenters.set(u.id, { u }); return; } // old body still leaving — respawn on despawn
+    for (let i = rosterIdx; i < users.length; i++) {
+      if (users[i].id === u.id) { users.splice(i, 1); break; } // no double life
+    }
+    const queueLen = shoppers.filter((q) => q.mode === 'enter' && q.wp === 0).length;
+    const p = makeShopper('enter', identFromUser(u));
+    p.gateHold = true;
+    // appear one slot beyond the current tail of the sideways line
+    const s = queueSlot(queueLen + 1);
+    p.h.position.set(Math.max(s.x - ENTRY_GATE.spacing, Q_LINE.minX), 0, Q_LINE.z);
+    p.h.rotation.y = Math.PI / 2; // facing along the line toward the door
+    p.cur = 0;
+  }
+
+  // users API "verify" action → verdict for a gateHold customer. pass: the beam
+  // sweeps them like any shopper and they walk in. fail: red deny blink, they
+  // turn around and leave (despawn outside) — enter can bring them back.
+  function applyVerdict(p, result) {
+    p.verdict = undefined;
+    if (result === 'pass') {
+      p.scan = 0; // hand over to the normal sweep; success path clears gateHold
+      p.verifyFail = false;
+    } else {
+      p.gateHold = false;
+      p.verifying = false;
+      p.retreat = true;
+      if (entryGate.user === p) { entryGate.user = null; entryGate.deny = 0.9; }
+    }
+  }
+
+  function apiVerifyUser(id, result) {
+    const pend = pendingReenters.get(id);
+    if (pend) {
+      // verdict landed before the parked entry ever spawned: fail turns them
+      // away sight-unseen, pass rides along and pre-approves the spawn
+      if (result === 'fail') pendingReenters.delete(id);
+      else pend.verdict = result;
+      return;
+    }
+    const p = shopperByApiId(id);
+    if (!p || !p.gateHold || p.fadeStart != null || p.done) return;
+    if (entryGate.user === p) applyVerdict(p, result);
+    else if (result === 'fail') applyVerdict(p, result); // turned away from anywhere in line
+    else p.verdict = result; // pre-approved: sweeps the moment they reach the scanner
+  }
+
+  // walk to a free reader slot on the shelf and hold there (no self-scan)
+  function apiWalkToShelfUser(id, shelfId) {
+    const p = shopperByApiId(id);
+    if (!p || p.fadeStart != null || p.done) return;
+    if (p.mode !== 'roam') return; // at a gate or already at a shelf — not walkable
+    if (p.slot >= 0) {
+      // still stepping away from a just-closed visit — shelfClose is instant on
+      // the API side but the walk-out is a real animation here. Same shelf: the
+      // slot is still theirs, so turn straight back in. Different shelf: drop
+      // the reservation and re-route from wherever they got to.
+      if (SLOTS[p.slot]?.shelfId === shelfId) { redirectToShelf(p); return; }
+      p.slot = -1;
+    }
+    const free = [];
+    for (let i = 0; i < SLOTS.length; i++) {
+      if (SLOTS[i].shelfId === shelfId && !shoppers.some((q) => q.slot === i)) free.push(i);
+    }
+    if (free.length === 0) return; // every seam taken — the mock drops the event
+    startBrowse(p, free[Math.floor(Math.random() * free.length)]);
+    p.shelfHold = true; // commanded session: heldShelfCycle owns them at the shelf
+  }
+
+  // cancel an in-flight walk-away and turn straight back into the still-
+  // reserved slot, re-routed from wherever they got to
+  function redirectToShelf(p) {
+    startBrowse(p, p.slot);
+    p.shelfHold = true;
+  }
+
+  // scanQR verdict — queued if they're still walking up; the phone gesture
+  // plays on arrival and pass/fail lands mid-beam (see updateShelfScan)
+  function apiScanShelfUser(id, result) {
+    const p = shopperByApiId(id);
+    if (!p || !p.shelfHold || p.access || p.fadeStart != null || p.done) return;
+    p.scanVerdict = result;
+  }
+
+  // one commanded pick: keep pockets it, return puts it back. Queued FIFO —
+  // even before the door is open (commands can outrun the walk + scan
+  // gesture); heldShelfCycle plays the queue only once access is granted
+  function apiInspectItemUser(id, result) {
+    const p = shopperByApiId(id);
+    if (!p || !p.shelfHold || p.fadeStart != null || p.done) return;
+    p.inspectQueue.push(result);
+  }
+
+  // gave up waiting for a verdict → rejoin the loop
+  function apiWalkAwayUser(id) {
+    const p = shopperByApiId(id);
+    if (!p || !p.shelfHold || p.fadeStart != null || p.done) return;
+    if (p.mode === 'browse') leaveSlot(p);
+    else snapToRoam(p); // still walking up — bail back onto the floor
+  }
+
+  // the API's 30s browse timer fired: their seam glides shut behind them
+  // (releaseShelfAccess inside leaveSlot); an item mid-inspect goes with them
+  function apiShelfCloseUser(id) {
+    const p = shopperByApiId(id);
+    if (!p || !p.shelfHold || p.fadeStart != null || p.done) return;
+    if (p.mode === 'browse') leaveSlot(p);
+    else snapToRoam(p);
+  }
+
+  // ---------- 11 · crowd management ----------
+
+  // walking temperament, rolled once per shopper: rusher barrels through and
+  // rarely stops, stroller ambles and window-shops, browser is the shelf
+  // magnet. Applies to API customers too — it's visual life only; commands
+  // cancel a pause on arrival and the junction dice still never rolls for them.
+  function rollPersona() {
+    const r = Math.random();
+    if (r < 0.25) return { speed: 0.042 + Math.random() * 0.013, pauseMul: 3.5, pauseDurMul: 0.6, diceMul: 0.4 }; // rusher
+    if (r < 0.6) return { speed: 0.026 + Math.random() * 0.010, pauseMul: 0.7, pauseDurMul: 1.0, diceMul: 1.0 }; // stroller
+    return { speed: 0.032 + Math.random() * 0.014, pauseMul: 1.0, pauseDurMul: 1.0, diceMul: 1.6 }; // browser
+  }
+
+  function makeShopper(mode, identOverride, pc = frontPC) {
+    const ident = identOverride ?? nextIdentity();
+    const persona = rollPersona();
+    const h = makeHuman(nextCharFile(ident.female));
+    // browse kit, disabled until a shelf visit: a hand-sized item (one of
+    // four small-goods shapes — can / bottle / snack bag / packet — re-rolled
+    // per gesture by armItem), phone + beam for the QR scan, green access
+    // ring for the feet
+    const itemMat = pbr('pickItemM', { color: productColors[0], roughness: 0.7 });
+    const item = new TransformNode('pickItem', scene);
+    item.parent = world;
+    const shape = (mesh) => {
+      mesh.material = itemMat;
+      mesh.isPickable = false;
+      shadowGen.addShadowCaster(mesh);
+      mesh.parent = item;
+      return mesh;
+    };
+    const itemShapes = [
+      shape(MeshBuilder.CreateCylinder('itCan', { diameter: 0.09, height: 0.13, tessellation: 12 }, scene)),
+      shape(MeshBuilder.CreateCylinder('itBottle', { diameter: 0.075, height: 0.19, tessellation: 12 }, scene)),
+      shape(MeshBuilder.CreateBox('itBag', { width: 0.16, height: 0.2, depth: 0.055 }, scene)),
+      shape(MeshBuilder.CreateBox('itPacket', { width: 0.13, height: 0.09, depth: 0.035 }, scene)),
+    ];
+    // bottle neck rides the bottle body so a shape swap stays one setEnabled
+    const neck = MeshBuilder.CreateCylinder('itNeck', { diameter: 0.035, height: 0.05, tessellation: 8 }, scene);
+    neck.material = itemMat;
+    neck.isPickable = false;
+    neck.position.y = 0.12;
+    neck.parent = itemShapes[1];
+    item.setEnabled(false);
+    const phone = MeshBuilder.CreateBox('phone', { width: 0.1, height: 0.18, depth: 0.026 }, scene);
+    phone.material = phoneBodyMat;
+    const scr = MeshBuilder.CreateBox('phoneScr', { width: 0.084, height: 0.15, depth: 0.006 }, scene);
+    scr.material = phoneScreenMat;
+    scr.position.z = 0.014;
+    scr.isPickable = false;
+    scr.parent = phone;
+    phone.isPickable = false;
+    phone.setEnabled(false);
+    phone.parent = world;
+    const beam = MeshBuilder.CreateBox('phoneBeam', { width: 0.05, height: 0.05, depth: 1 }, scene);
+    beam.material = phoneBeamMat;
+    beam.isPickable = false;
+    beam.setEnabled(false);
+    beam.parent = world;
+    const ringMat = makeScanRingMat();
+    const ring = MeshBuilder.CreateTorus('scanRing', { diameter: 1.5, thickness: 0.06, tessellation: 48 }, scene);
+    ring.material = ringMat;
+    ring.isPickable = false;
+    ring.setEnabled(false);
+    ring.parent = world;
+    // PASS/FAILED verdict billboard over the head — texture swapped per
+    // verdict from the shared shelfPassTex/shelfFailTex pair
+    const vtagMat = new StandardMaterial('shelfVtagMat', scene);
+    vtagMat.disableLighting = true;
+    vtagMat.backFaceCulling = false;
+    const vtag = MeshBuilder.CreatePlane('shelfVtag', { width: 1.35, height: 0.5 }, scene);
+    vtag.material = vtagMat;
+    vtag.billboardMode = TransformNode.BILLBOARDMODE_ALL;
+    vtag.isPickable = false;
+    vtag.isVisible = false;
+    vtag.parent = world;
+    const p = {
+      h,
+      pc, // portal config: front (API) or right (random) doorway
+      mode, // 'enter' | 'roam' | 'exitwalk' | 'toshelf' | 'browse'
+      wp: 0,
+      exit: false,
+      speed: persona.speed,
+      pauseMul: persona.pauseMul, pauseDurMul: persona.pauseDurMul, diceMul: persona.diceMul,
+      // pace breathes around the base over ~7–15s so the crowd never
+      // metronomes in lockstep
+      driftAmp: 0.12 + Math.random() * 0.06,
+      driftFreq: (Math.PI * 2) / (7 + Math.random() * 8),
+      driftPhase: Math.random() * Math.PI * 2,
+      // free-roam state: rp is the spine position the route is walked along
+      // (the weave rides on top of it), mv holds the current routed leg
+      rp: null, roamYaw: 0, nextGoalAt: 0,
+      recentShelves: [], // last two browsed — never revisited back to back
+      // personal walking line: a lane preference that itself wanders slowly,
+      // plus a two-octave weave, applied perpendicular to the heading so
+      // nobody treads the exact same line twice
+      lat: (Math.random() * 2 - 1) * 0.2,
+      latDriftFreq: (Math.PI * 2) / (20 + Math.random() * 20),
+      latDriftPhase: Math.random() * Math.PI * 2,
+      wobPhase: Math.random() * Math.PI * 2,
+      wobFreq: 0.25 + Math.random() * 0.3,
+      // window-shopping: an occasional dead stop to eye a shelf or check the
+      // phone. nextPause gates the roll; pause holds the live stop
+      pause: null, pauseBlend: 0, pauseYaw: 0, pauseOff: null,
+      nextPause: elapsed + (10 + Math.random() * 15) * persona.pauseMul,
+      latEase: 0, // door entries fade the personal offset in once inside
+      // shelf-visit state (slot >= 0 reserves the browse spot from the moment
+      // the destination is picked until they have stepped clear of it again)
+      slot: -1, mv: null,
+      cooldown: elapsed + 3 + Math.random() * 9, // no diving at a shelf right away
+      item, itemShapes, itemMat, phone, beam, ring, ringMat, ringT: Infinity,
+      vtag, vtagMat, vtagT: Infinity,
+      shelfScan: null, access: null, accessSeam: null, idling: false, started: false,
+      picksLeft: 0, pickT: 0, nextPick: 0, pickLat: 0, reach: 1,
+      // commanded shelf session (API shelf sub-machine): shelfHold suppresses
+      // the self-scan/auto-pick loop; the verdict and picks arrive as events
+      shelfHold: false, scanVerdict: null, inspect: null, inspectQueue: [],
+      f: new Vector3(0, 0, 1), s: new Vector3(1, 0, 0),
+    };
+    if (mode === 'enter') p.enterSeq = ++enterSeq;
+    p.h.parent = world;
+    p.person = registerPerson(p.h, 'shopper', ident, p);
+    shoppers.push(p);
+    return p;
+  }
+
+  function disposeShopper(p) {
+    releaseShelfAccess(p); // last one out re-locks the shelf
+    p.item.dispose(); p.itemMat.dispose();
+    p.phone.dispose(); p.beam.dispose(); p.ring.dispose(); p.ringMat.dispose();
+    p.vtag.dispose(); p.vtagMat.dispose();
+    disposeHuman(p.h);
+  }
+
+  // initial shoppers only: they were "already in the store" when the dashboard
+  // opened, so they start scattered on the floor instead of walking in
+  function spawnOnFloor(identOverride, pc = frontPC) {
+    let spot = null;
+    for (let tries = 0; tries < 30 && !spot; tries++) {
+      const x = (Math.random() * 2 - 1) * ROAM_BOUND;
+      const z = (Math.random() * 2 - 1) * ROAM_BOUND;
+      if (!navFree(x, z) || nearPortal(x, z, 2.5)) continue;
+      if (shoppers.some((q) => Math.hypot(q.h.position.x - x, q.h.position.z - z) < 2)) continue;
+      spot = { x, z };
+    }
+    const p = makeShopper('roam', identOverride, pc);
+    if (spot) p.h.position.set(spot.x, 0, spot.z);
+    p.h.rotation.y = Math.random() * Math.PI * 2;
+    enterRoam(p);
+    p.latEase = 1; // already "in the store" — no slide-in
+  }
+
+  function addPerson() {
+    if (totalPeople() < MAX_PEOPLE) pendingEntries++;
+    return totalPeople();
+  }
+
+  // gate queue cap: beyond 3 the tail slots stretch back over the robot
+  // lane (node 5) and the loop's checkout stretch, so hold further exits
+  // until it drains. Flagged shoppers still walking the loop count too —
+  // they are queue members already in flight.
+  function exitQueueLoad() {
+    let n = 0;
+    for (const w of shoppers) if (w.exit && (w.mode !== 'exitwalk' || w.wp === 0)) n++;
+    return n;
+  }
+
+  // nearest to the exit junction walks out first. Only people actually
+  // walking are candidates — browsers are never yanked out of a session; a
+  // pending removal waits in pendingRemovals until someone starts roaming.
+  // API-owned customers (apiId set) are never picked: the users API is the
+  // sole authority over their exits (leave / verify fail / delete), which
+  // is what keeps its status field truthful.
+  function flagExit() {
+    if (exitQueueLoad() >= 3) return false;
+    let pick = null, best = Infinity;
+    for (const w of shoppers) {
+      if (w.exit || w.slot >= 0 || w.person?.apiId != null) continue;
+      if (w.mode !== 'roam' && w.mode !== 'enter') continue;
+      const jp = walkPath.pointAt(w.pc.tExit);
+      const d = w.mode === 'roam'
+        ? Math.hypot(w.h.position.x - jp.x, w.h.position.z - jp.z)
+        : 40; // still queueing at the door — last resort
+      if (d < best) { best = d; pick = w; }
+    }
+    if (pick) pick.exit = true;
+    return !!pick;
+  }
+
+  function setCrowdTarget(n) {
+    crowdTarget = Math.max(0, Math.min(CROWD_MAX, Math.round(n)));
+    // before the opening crowd is seeded onto the loop, just record the target
+    // (boot spawns exactly crowdTarget on the loop); reconciling here would
+    // double-count against a floor that isn't populated yet
+    if (!booted) return crowdTarget;
+    let live = randomLive();
+    while (live < crowdTarget) { pendingEntries++; live++; }   // queue the deficit at the right door
+    while (live > crowdTarget && flagExit()) live--;           // send the surplus out the right door
+    return crowdTarget;
+  }
+
+  function removePerson() {
+    if (pendingEntries > 0) pendingEntries--;
+    else if (!flagExit()) pendingRemovals++; // everyone busy → leave when free
+    return totalPeople();
+  }
+
+  // ---------- 12 · routing & nav ----------
+
+  // arc-length sampled path (≈ Three CatmullRomCurve3 getPointAt/getTangentAt)
+  function makePath(points, closed) {
+    const curve = Curve3.CreateCatmullRomSpline(points, 16, closed);
+    const pts = curve.getPoints();
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Vector3.Distance(pts[i - 1], pts[i]));
+    const total = cum[cum.length - 1] || 1;
+    function pointAt(t) {
+      const d = ((t % 1) + 1) % 1 * total;
+      let i = 1;
+      while (i < cum.length && cum[i] < d) i++;
+      const i0 = i - 1, i1 = Math.min(i, pts.length - 1);
+      const seg = (cum[i1] - cum[i0]) || 1;
+      return Vector3.Lerp(pts[i0], pts[i1], (d - cum[i0]) / seg);
+    }
+    function tangentAt(t) { return pointAt(t + 0.002).subtract(pointAt(t - 0.002)).normalize(); }
+    return { pointAt, tangentAt, length: total };
+  }
+
+  function nearWalkPath(x, z, r) {
+    for (const q of walkPathPts) {
+      const dx = q.x - x, dz = q.z - z;
+      if (dx * dx + dz * dz < r * r) return true;
+    }
+    return false;
+  }
+
+  // Sampled well below a cell: at half-cell steps a diagonal leg can pass clean
+  // through the corner of a blocked cell without any sample landing on it, and
+  // the taut rope would then happily pull a walk straight through a shelf end.
+  // Routes are planned once per destination, so the finer sweep costs nothing.
+  function navLineFree(ax, az, bx, bz) {
+    const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / (NAV.cell * 0.2)));
+    for (let s = 0; s <= steps; s++) {
+      const k = s / steps;
+      if (!navFree(ax + (bx - ax) * k, az + (bz - az) * k)) return false;
+    }
+    return true;
+  }
+
+  function nearestT(x, z) {
+    let best = Infinity, bt = 0;
+    for (let i = 0; i < 400; i++) {
+      const pt = walkPath.pointAt(i / 400);
+      const d = (pt.x - x) ** 2 + (pt.z - z) ** 2;
+      if (d < best) { best = d; bt = i / 400; }
+    }
+    return bt;
+  }
+
+  function routeFromLoop(sx, sz) {
+    const [six, siz] = navCell(sx, sz);
+    const start = navIdx(six, siz);
+    const prev = new Int32Array(NAV.n * NAV.n).fill(-1);
+    prev[start] = start;
+    const queue = [start];
+    let goal = -1;
+    for (let qi = 0; qi < queue.length && goal < 0; qi++) {
+      const cur = queue[qi];
+      const cx = cur % NAV.n, cz = (cur / NAV.n) | 0;
+      for (const [dx, dz] of NAV_DIRS) {
+        const nx2 = cx + dx, nz2 = cz + dz;
+        if (nx2 < 0 || nz2 < 0 || nx2 >= NAV.n || nz2 >= NAV.n) continue;
+        const ni = navIdx(nx2, nz2);
+        if (prev[ni] >= 0 || navBlocked[ni]) continue;
+        // no diagonal corner-cutting through a blocked cell
+        if (dx && dz && (navBlocked[navIdx(nx2, cz)] || navBlocked[navIdx(cx, nz2)])) continue;
+        prev[ni] = cur;
+        if (loopCellT.has(ni)) { goal = ni; break; }
+        queue.push(ni);
+      }
+    }
+    if (goal < 0) return null; // walled in — the slot is unreachable
+    const pts = [];
+    for (let c = goal; c !== start; c = prev[c]) pts.push({ x: NAV.min + (c % NAV.n) * NAV.cell, z: NAV.min + ((c / NAV.n) | 0) * NAV.cell });
+    pts.push({ x: sx, z: sz }); // exact stand point replaces the start cell
+    const jp = walkPath.pointAt(loopCellT.get(goal));
+    pts[0] = { x: jp.x, z: jp.z }; // exact junction point on the loop
+    // taut rope: keep only the corners a straight walk can't skip
+    const wps = [];
+    let a = 0;
+    while (a < pts.length - 1) {
+      let b = pts.length - 1;
+      while (b > a + 1 && !navLineFree(pts[a].x, pts[a].z, pts[b].x, pts[b].z)) b--;
+      if (b < pts.length - 1) wps.push(new Vector3(pts[b].x, 0, pts[b].z));
+      a = b;
+    }
+    return { t: nearestT(jp.x, jp.z), wps };
+  }
+
+  // Nobody rides a shared rail: every shopper walks their own route between
+  // their own destinations, so no two people trace the same line. Same navgrid,
+  // same BFS, same taut-rope pull as the slot spurs above — only the goal
+  // changes, from "nearest loop cell" to "this exact floor point".
+  function routeBetween(ax, az, bx, bz) {
+    const [six, siz] = navCell(ax, az);
+    const [gix, giz] = navCell(bx, bz);
+    const start = navIdx(six, siz), goalCell = navIdx(gix, giz);
+    if (navBlocked[goalCell]) return null;
+    if (start === goalCell) return [new Vector3(bx, 0, bz)];
+    const prev = new Int32Array(NAV.n * NAV.n).fill(-1);
+    prev[start] = start;
+    const queue = [start];
+    let found = false;
+    for (let qi = 0; qi < queue.length && !found; qi++) {
+      const cur = queue[qi];
+      const cx = cur % NAV.n, cz = (cur / NAV.n) | 0;
+      for (const [dx, dz] of NAV_DIRS) {
+        const nx2 = cx + dx, nz2 = cz + dz;
+        if (nx2 < 0 || nz2 < 0 || nx2 >= NAV.n || nz2 >= NAV.n) continue;
+        const ni = navIdx(nx2, nz2);
+        if (prev[ni] >= 0 || navBlocked[ni]) continue;
+        if (dx && dz && (navBlocked[navIdx(nx2, cz)] || navBlocked[navIdx(cx, nz2)])) continue;
+        prev[ni] = cur;
+        if (ni === goalCell) { found = true; break; }
+        queue.push(ni);
+      }
+    }
+    if (!found) return null;
+    const pts = [];
+    for (let c = goalCell; c !== start; c = prev[c]) pts.push({ x: NAV.min + (c % NAV.n) * NAV.cell, z: NAV.min + ((c / NAV.n) | 0) * NAV.cell });
+    pts.push({ x: ax, z: az });
+    pts.reverse();                          // walk order: here → there
+    pts[pts.length - 1] = { x: bx, z: bz }; // exact destination, not its cell
+    // taut rope: keep only the corners a straight walk can't skip
+    const wps = [];
+    let a = 0;
+    while (a < pts.length - 1) {
+      let b = pts.length - 1;
+      while (b > a + 1 && !navLineFree(pts[a].x, pts[a].z, pts[b].x, pts[b].z)) b--;
+      wps.push(new Vector3(pts[b].x, 0, pts[b].z));
+      a = b;
+    }
+    return wps;
+  }
+
+  // an open spot to drift toward, and the route to it. Rolled rather than
+  // authored, so the wander legs never repeat; the elbow-room test keeps
+  // anyone from ending up pressed against a fixture.
+  function randomRoamPoint(fromX, fromZ) {
+    for (let tries = 0; tries < 24; tries++) {
+      const x = (Math.random() * 2 - 1) * ROAM_BOUND;
+      const z = (Math.random() * 2 - 1) * ROAM_BOUND;
+      if (!navFree(x, z)) continue;
+      if (!navFree(x + 0.5, z) || !navFree(x - 0.5, z) ||
+          !navFree(x, z + 0.5) || !navFree(x, z - 0.5)) continue;
+      if (Math.hypot(x - fromX, z - fromZ) < 3) continue; // worth the walk
+      if (nearPortal(x, z, 2.5)) continue;
+      const wps = routeBetween(fromX, fromZ, x, z);
+      if (wps) return wps;
+    }
+    return null;
+  }
+
+  // a fresh stand point every time a slot is taken: slide along the shelf,
+  // lean in or out a touch, and face it slightly off-square — nobody stands
+  // on the exact same mark twice
+  function jitterSlot(i) {
+    const { x: bx, z: bz, ry: bry } = SLOTS[i];
+    // parallel to the shelf — tight enough that hands stay inside the
+    // shopper's own ~1.5m seam gap (±jitter ±pickLat must be < ~0.75)
+    const along = (Math.random() * 2 - 1) * 0.25;
+    const depth = (Math.random() * 2 - 1) * 0.08;  // still within picking reach
+    return {
+      x: bx + Math.cos(bry) * along + Math.sin(bry) * depth,
+      z: bz - Math.sin(bry) * along + Math.cos(bry) * depth,
+      ry: bry + (Math.random() * 2 - 1) * 0.16,
+    };
+  }
+
+  // next destination: mostly a shelf front to browse, otherwise an open spot to
+  // drift to. API-owned customers never self-select a shelf — their visits are
+  // commanded through the users API — so they only ever wander between orders.
+  function planRoamGoal(p) {
+    // a body that hasn't finished loading can't play the scan/pick gestures —
+    // pickCycle bails on !ready every frame, so sending one to a shelf parks it
+    // there forever holding a slot reservation and a browse-cap place. Let it
+    // keep roaming (which needs no rig) until its character file lands.
+    if (isRandom(p) && p.h.metadata.ready && !p.exit && p.slot < 0 && elapsed > p.cooldown
+        && Math.random() < Math.min(0.9, ROAM_SHELF_BIAS * p.diceMul)) {
+      // Headroom has to match the 70/30 destination split, or the roll gets
+      // rejected most of the time and everyone falls through to wandering: the
+      // old floor(len/2) left a 3-person floor with a cap of ONE, which measured
+      // out at a 5% realized shelf share against the 70% intended.
+      const cap = Math.max(2, Math.ceil(shoppers.length * 0.6));
+      if (browsingCount() < cap) {
+        const slot = pickShelfSlot(p);
+        if (slot !== null) { startBrowse(p, slot); return; }
+      }
+    }
+    const wps = randomRoamPoint(p.h.position.x, p.h.position.z);
+    if (!wps) { p.nextGoalAt = elapsed + 0.5; return; } // boxed in — retry shortly
+    p.mv = { wps, wi: 0, kind: 'wander' };
+  }
+
+  // ---------- 13 · shelf sessions & gestures/IK ----------
+
+  // shared session setup: reserve the slot, size the basket, aim the
+  // facing/sideways vectors the pick cycle animates along (the item itself is
+  // re-rolled per gesture by armItem)
+  function beginSession(p, slot, ry) {
+    p.slot = slot;
+    p.picksLeft = 1 + Math.floor(Math.random() * 3); // 1–3 items this visit
+    p.f.set(Math.sin(ry), 0, Math.cos(ry));
+    p.s.set(Math.cos(ry), 0, -Math.sin(ry));
+    p.item.rotation.y = ry;
+    p.reach = SLOTS[slot].reach;
+    if (p.person) p.person.nearShelf = SLOTS[slot].shelfId;
+    p.started = false;
+    p.idling = false;
+    p.pickT = 0;
+    p.nextPick = 0.6; // first gesture lands a beat after the door opens
+  }
+
+  // reserve the slot and route there from wherever the shopper happens to be
+  function startBrowse(p, slot) {
+    endPause(p); // a commanded walkToShelf can land mid window-shop
+    const g = jitterSlot(slot);
+    beginSession(p, slot, g.ry);
+    p.mode = 'toshelf';
+    p.cur = p.cur ?? p.speed;
+    const wps = routeBetween(p.h.position.x, p.h.position.z, g.x, g.z);
+    p.mv = {
+      wps: wps ?? [new Vector3(g.x, 0, g.z)], // walled in: walk it straight
+      wi: 0, targetRy: g.ry, settleT: -1, // -1: still walking the leg
+    };
+  }
+
+  // best-of-two over the free slots, skipping the shelves this shopper just
+  // came from — keeps anyone from ping-ponging the shelf beside them and pulls
+  // the crowd out across the floor instead of clustering at the nearest one
+  function pickShelfSlot(p) {
+    let cands = freePickSlots();
+    const fresh = cands.filter((i) => !p.recentShelves.includes(SLOTS[i].shelfId));
+    if (fresh.length) cands = fresh;
+    if (!cands.length) return null;
+    const a = cands[(Math.random() * cands.length) | 0];
+    const b = cands[(Math.random() * cands.length) | 0];
+    const d = (i) => Math.hypot(SLOTS[i].x - p.h.position.x, SLOTS[i].z - p.h.position.z);
+    return d(a) > d(b) ? a : b;
+  }
+
+  // session over — step back onto the floor and pick a fresh destination. The
+  // slot stays reserved until they have actually cleared it (roamMove drops it)
+  // so nobody dives into the spot they're walking out of.
+  function leaveSlot(p) {
+    const u = p.h.metadata;
+    releaseShelfAccess(p); // walking away — the door may close behind them
+    if (u.groups.Idle) u.groups.Idle.stop();
+    if (u.groups.PickUp) u.groups.PickUp.stop();
+    u.movingState = undefined; // let applyGait start the Walk clip cleanly
+    p.shelfHold = false; p.scanVerdict = null; p.inspect = null; p.inspectQueue = [];
+    p.item.setEnabled(false); p.item.scaling.setAll(1);
+    const shelfId = SLOTS[p.slot]?.shelfId;
+    if (shelfId != null) {
+      p.recentShelves = [shelfId, ...p.recentShelves.filter((s) => s !== shelfId)].slice(0, 2);
+    }
+    p.cooldown = elapsed + 6 + Math.random() * 10; // browse again, but not straight away
+    enterRoam(p);
+    p.cur = 0;
+  }
+
+  // routed walk to a reserved slot ('toshelf'), clear of fixtures. Arrival
+  // settles into facing the shelf, then pickCycle takes over.
+  function shelfLegMove(p, dt) {
+    const m = p.mv;
+    if (m.settleT >= 0) { // arrived: turn to the shelf
+      p.cur += (0 - p.cur) * Math.min(1, dt * 6);
+      m.settleT += dt;
+      p.h.rotation.y = shortestLerp(p.h.rotation.y, m.targetRy, Math.min(1, dt * 8));
+      applyGait(p);
+      if (m.settleT > 0.45) {
+        p.h.rotation.y = m.targetRy;
+        p.mode = 'browse';
+        p.mv = null; // pickCycle takes over: scan in, then pick
+      }
+      return;
+    }
+    const tgt = m.wps[m.wi];
+    const dx = tgt.x - p.h.position.x, dz = tgt.z - p.h.position.z;
+    const dist = Math.hypot(dx, dz);
+    let target = p.speed;
+    if (robotAhead(p.h)) target = 0;
+    p.cur += (target - p.cur) * Math.min(1, dt * 6);
+    const step = p.cur * walkPath.length * dt;
+    if (dist > 0.001) {
+      const k = Math.min(1, step / dist);
+      p.h.position.x += dx * k;
+      p.h.position.z += dz * k;
+      if (p.cur > p.speed * 0.2) p.h.rotation.y = Math.atan2(dx, dz);
+    }
+    if (dist <= Math.max(0.12, step)) {
+      m.wi++;
+      if (m.wi >= m.wps.length) m.settleT = 0;
+    }
+    applyGait(p);
+  }
+
+  function shelfLockOf(p) { return lockById.get(p.person?.nearShelf) ?? shelfLocks[0]; }
+
+  // hip-pocket anchor, tracked per frame so neither the idle bob nor the
+  // scan's body half-turn detaches it (side taken from the live facing,
+  // not the slot's p.s snapshot)
+  function hipAnchor(p, out) {
+    out.set(Math.cos(p.h.rotation.y), 0, -Math.sin(p.h.rotation.y))
+      .scaleInPlace(0.24).addInPlace(p.h.position);
+    out.y = 0.82;
+    return out;
+  }
+
+  function clampAngle(a, lim) {
+    a = Math.atan2(Math.sin(a), Math.cos(a));
+    return Scalar.Clamp(a, -lim, lim);
+  }
+
+  // shortest-arc rotation taking world direction a onto d (both unit-length)
+  function arcQuat(a, d) {
+    Vector3.CrossToRef(a, d, _aimAxis);
+    const s = _aimAxis.length(), c = Vector3.Dot(a, d);
+    if (s < 1e-5) return c > 0 ? Quaternion.Identity()
+      : Quaternion.RotationAxis(Math.abs(a.y) < 0.9 ? Vector3.Up() : Vector3.Right(), Math.PI);
+    return Quaternion.RotationAxis(_aimAxis.scaleInPlace(1 / s), Math.atan2(s, c));
+  }
+
+  // Babylon only recomputes the node you ask for — every bone between it and
+  // the human root keeps last frame's matrix. The aim solve turns the body
+  // first, so the whole chain has to be refreshed or it solves against the
+  // un-turned pose.
+  function forceWorld(node, root) {
+    const chain = [];
+    for (let n = node; n && n !== root; n = n.parent) chain.push(n);
+    root.computeWorldMatrix(true);
+    for (let i = chain.length - 1; i >= 0; i--) chain[i].computeWorldMatrix(true);
+  }
+
+  // re-express a world-space rotation about the node's own origin as that
+  // node's local rotationQuaternion. Pure matrix algebra so the glTF
+  // __root__ handedness flip cancels out instead of corrupting the pose
+  // (composing quaternions across the mirrored ancestors would not).
+  function localizeRotation(node, rw, out) {
+    const pivot = node.getAbsolutePosition();
+    const rot = new Matrix();
+    rw.toRotationMatrix(rot);
+    node.getWorldMatrix()
+      .multiply(Matrix.Translation(-pivot.x, -pivot.y, -pivot.z))
+      .multiply(rot)
+      .multiply(Matrix.Translation(pivot.x, pivot.y, pivot.z))
+      .multiply(node.parent.getWorldMatrix().clone().invert())
+      .decompose(_decS, out, _decT);
+    return out;
+  }
+
+  function solveArmIK(p, target) {
+    const u = p.h.metadata;
+    const fist = u.fist;
+    const lower = fist?.parent, upper = lower?.parent;
+    if (!upper?.rotationQuaternion || !lower?.rotationQuaternion) return false;
+    forceWorld(fist, p.h);
+    _ikS.copyFrom(upper.getAbsolutePosition());
+    // bone lengths are rigid (pose-independent) — measure once and cache
+    if (u.armL1 === undefined) {
+      u.armL1 = Vector3.Distance(_ikS, lower.getAbsolutePosition());
+      u.armL2 = Vector3.Distance(lower.getAbsolutePosition(), fist.getAbsolutePosition());
+    }
+    const L1 = u.armL1, L2 = u.armL2, eps = 1e-3;
+    _ikDir.copyFrom(target).subtractInPlace(_ikS);
+    const D = Scalar.Clamp(_ikDir.length(), Math.abs(L1 - L2) + eps, (L1 + L2) * ARM_REACH_FACTOR);
+    _ikDir.normalize();
+    // elbow: cosine-rule projection along the reach line, then offset toward
+    // the pole by the triangle height (folds the arm the natural way)
+    const x = (L1 * L1 - L2 * L2 + D * D) / (2 * D);
+    const h = Math.sqrt(Math.max(0, L1 * L1 - x * x));
+    _ikPole.set(p.s.x * 0.4, -1, p.s.z * 0.4); // down, a touch outward along the seam
+    _ikPerp.copyFrom(_ikPole).subtractInPlace(
+      _ikTmp.copyFrom(_ikDir).scaleInPlace(Vector3.Dot(_ikPole, _ikDir)));
+    if (_ikPerp.lengthSquared() < 1e-6) { // pole parallel to reach — any perpendicular
+      _ikPerp.copyFrom(Math.abs(_ikDir.y) < 0.9 ? Vector3.Up() : Vector3.Right());
+      _ikPerp.subtractInPlace(_ikTmp.copyFrom(_ikDir).scaleInPlace(Vector3.Dot(_ikPerp, _ikDir)));
+    }
+    _ikPerp.normalize();
+    _ikElbow.copyFrom(_ikS)
+      .addInPlace(_ikTmp.copyFrom(_ikDir).scaleInPlace(x))
+      .addInPlace(_ikTmp.copyFrom(_ikPerp).scaleInPlace(h));
+    // 1) swing + bend the shoulder so the elbow lands at _ikElbow
+    _ikA.copyFrom(lower.getAbsolutePosition()).subtractInPlace(_ikS).normalize();
+    _ikB.copyFrom(_ikElbow).subtractInPlace(_ikS).normalize();
+    localizeRotation(upper, arcQuat(_ikA, _ikB), upper.rotationQuaternion);
+    forceWorld(fist, p.h); // elbow now at ~_ikElbow, hand swung rigidly with it
+    // 2) bend the elbow so the hand lands on the target
+    _ikS.copyFrom(lower.getAbsolutePosition()); // reuse _ikS as the elbow pivot
+    _ikA.copyFrom(fist.getAbsolutePosition()).subtractInPlace(_ikS).normalize();
+    _ikB.copyFrom(target).subtractInPlace(_ikS).normalize();
+    localizeRotation(lower, arcQuat(_ikA, _ikB), lower.rotationQuaternion);
+    return true;
+  }
+
+  function solveTorsoLean(p) {
+    const u = p.h.metadata;
+    if (u.spine === undefined) // Shoulder.R → Torso → Abdomen (waist) → Hips
+      u.spine = p.h.getDescendants(false).find((n) => (n.name === 'Abdomen' || n.name === 'mixamorig_Spine') && n.rotationQuaternion) ?? null;
+    if (!u.spine) return { spine: null, qSpine: null };
+    forceWorld(u.spine, p.h);
+    Vector3.CrossToRef(Vector3.Up(), p.f, _leanAxis); // horizontal axis ⟂ facing; +angle tips forward
+    _leanAxis.normalize();
+    const qDelta = Quaternion.RotationAxis(Vector3.Up(), TORSO_TWIST)
+      .multiply(Quaternion.RotationAxis(_leanAxis, TORSO_LEAN));
+    return { spine: u.spine, qSpine: localizeRotation(u.spine, qDelta, new Quaternion()) };
+  }
+
+  // aim solve, once per scan start: fixes the body half-turn toward the reader,
+  // the phone yaw/pitch and the head glance. The arm itself is driven every
+  // frame by solveArmIK toward `target` (the QR plate) in the blend loop below.
+  // Returns null → gesture degrades to the phone travel alone.
+  function solveScanAim(p) {
+    const u = p.h.metadata;
+    const lower = u.fist?.parent ?? null, upper = lower?.parent ?? null; // Fist.R → LowerArm.R → UpperArm.R
+    const plate = SLOTS[p.slot]?.plate;
+    if (!upper?.rotationQuaternion || !lower?.rotationQuaternion || !plate) return null;
+    if (u.head === undefined)
+      u.head = p.h.getDescendants(false).find((n) => /head/i.test(n.name) && n.rotationQuaternion) ?? null;
+    const fy = Math.atan2(p.f.x, p.f.z); // facing the shelf (beginSession set p.f from the slot ry)
+    const raw = clampAngle(
+      Math.atan2(plate.x - p.h.position.x, plate.z - p.h.position.z) - fy, Math.PI);
+    const bodyYaw = clampAngle(raw, SCAN_BODY_YAW);
+    // head target solved against the pose it'll blend over — the half-turned
+    // body — so turn it, solve, turn it back
+    p.h.rotation.y = fy + bodyYaw;
+    forceWorld(u.fist, p.h);
+    const pivot = upper.getAbsolutePosition().clone();
+    const yaw = fy + bodyYaw + clampAngle(raw - bodyYaw, SCAN_ARM_YAW); // phone screen yaw toward the plate
+    const pitch = Scalar.Clamp(
+      Math.atan2(plate.y - pivot.y, Math.hypot(plate.x - pivot.x, plate.z - pivot.z)), -0.35, 0.45);
+    let qHead = null;
+    if (u.head) {
+      forceWorld(u.head, p.h);
+      const hy = fy + bodyYaw + clampAngle(raw - bodyYaw, SCAN_HEAD_YAW);
+      _aimA.set(Math.sin(fy + bodyYaw), 0, Math.cos(fy + bodyYaw));
+      _aimD.set(Math.sin(hy), 0, Math.cos(hy));
+      qHead = localizeRotation(u.head, arcQuat(_aimA, _aimD), new Quaternion());
+    }
+    p.h.rotation.y = fy;
+    p.h.computeWorldMatrix(true);
+    const { spine, qSpine } = solveTorsoLean(p);
+    return { upper, lower, head: qHead ? u.head : null, qHead, yaw, pitch, fy, bodyYaw, target: plate.clone(), spine, qSpine };
+  }
+
+  function startShelfScan(p) {
+    const u = p.h.metadata;
+    p.shelfScan = { t: 0, done: false, k: 0, aim: solveScanAim(p) };
+    p.idling = true; // the body stays on the Idle loop; only the arm/head get overridden
+    const gi = u.groups.Idle;
+    if (gi && !gi.isPlaying) gi.start(true, 1.0, gi.from, gi.to);
+  }
+
+  function updateShelfScan(p, dt) {
+    const s = p.shelfScan;
+    s.t += dt;
+    const u = p.h.metadata;
+    const lk = shelfLockOf(p);
+    const plate = SLOTS[p.slot]?.plate;
+    // one blend factor drives the phone travel, the phone turn and the
+    // arm/head reach (applied post-animation above): up, hold, down
+    const k = s.t < SCAN_RAISE ? easeInOutCubic(s.t / SCAN_RAISE)
+      : s.t < SCAN_RAISE + SCAN_BEAM ? 1
+        : 1 - easeInOutCubic(Math.min(1, (s.t - SCAN_RAISE - SCAN_BEAM) / SCAN_LOWER));
+    s.k = k;
+    if (s.aim) p.h.rotation.y = s.aim.fy + s.aim.bodyYaw * k; // half-turn toward the reader
+    if (u.fist) {
+      p.phone.setEnabled(true);
+      hipAnchor(p, _hipPt);
+      _fistPt.copyFrom(u.fist.getAbsolutePosition());
+      Vector3.LerpToRef(_hipPt, _fistPt, k, p.phone.position); // pocket ↔ the reaching hand
+      const fy = Math.atan2(p.f.x, p.f.z);
+      p.phone.rotation.y = shortestLerp(fy, s.aim?.yaw ?? fy, k); // screen swings to face the plate
+      p.phone.rotation.x = 0.7 * (1 - k) - (s.aim?.pitch ?? 0) * k; // pocket tilt → square to the plate
+    }
+    const beamOn = s.t >= SCAN_RAISE && s.t < SCAN_RAISE + SCAN_BEAM && plate && u.fist;
+    p.beam.setEnabled(!!beamOn);
+    if (beamOn) {
+      lk.scanStamp = elapsed; // LED shows the cyan "scanning" pulse this frame
+      _beamTo.copyFrom(plate);
+      const d = Vector3.Distance(p.phone.position, _beamTo);
+      Vector3.LerpToRef(p.phone.position, _beamTo, 0.5, p.beam.position);
+      p.beam.scaling.set(1, 1, Math.max(0.1, d));
+      p.beam.lookAt(_beamTo);
+      phoneBeamMat.alpha = 0.4 + 0.3 * Math.abs(Math.sin(elapsed * 16));
+    }
+    if (!s.done && s.t >= SCAN_UNLOCK_AT) { // scan reads → the verdict lands
+      s.done = true;
+      // ambient shoppers always pass; a commanded session (shelfHold) obeys
+      // the API's scanQR verdict — fail shows the badge and opens nothing,
+      // the shopper stays at the reader for the next verdict
+      const pass = p.shelfHold ? p.scanVerdict === 'pass' : true;
+      p.scanVerdict = null;
+      if (p.shelfHold) showShelfVerdict(p, pass);
+      if (pass) {
+        p.ringT = 0;
+        p.ring.position.set(p.h.position.x, 0.07, p.h.position.z);
+        p.ring.setEnabled(true);
+        takeAccess(p);
+      }
+    }
+    if (s.t < SCAN_SECS) return;
+    // phone pocketed → Idle is still looping; let the pick cycle take over
+    p.shelfScan = null;
+    p.phone.setEnabled(false);
+    p.idling = true;
+    const gi = u.groups.Idle;
+    if (gi && !gi.isPlaying) gi.start(true, 1.0, gi.from, gi.to);
+    if (!p.shelfHold) // commanded picks arrive as inspectItem events instead
+      p.pickT = PICK_PERIOD - 0.8 - Math.random() * 1.4; // first pick lands shortly after the door opens
+  }
+
+  // take the seam: every scan opens the scanner's own door pair. Shelf-level
+  // events stay coarse for the dashboard — 'unlocked' only when the shelf goes
+  // from fully shut to its first open seam, 'scan_ok' for every scan after.
+  function takeAccess(p) {
+    const lk = shelfLockOf(p);
+    const sm = SLOTS[p.slot]?.seam;
+    p.access = lk.id;
+    p.accessSeam = sm;
+    const wasOpen = lk.masterOpen || lk.heldSeams > 0;
+    if (sm && ++sm.holders === 1) lk.heldSeams++;
+    lk.flash = 1.3;
+    lk.tagT = 0; // "UNLOCKED" hologram pops over every successful scanner
+    lk.tag.position.set(p.h.position.x, 3.1, p.h.position.z);
+    lk.tag.isVisible = true;
+    lk.tagMat.alpha = 1;
+    if (!wasOpen && !lk.offline) {
+      lk.locked = false;
+      emitShelfEvent(lk.id, 'unlocked');
+    } else {
+      emitShelfEvent(lk.id, 'scan_ok');
+    }
+  }
+
+  function releaseShelfAccess(p) {
+    if (p.shelfScan) { // pulled away mid-scan — drop the fx, no access was held
+      p.shelfScan = null;
+      p.phone?.setEnabled(false);
+      p.beam?.setEnabled(false);
+    }
+    if (p.access) {
+      const lk = lockById.get(p.access);
+      const sm = p.accessSeam;
+      // their door glides shut behind them (unless the dashboard master holds it)
+      if (sm && sm.holders > 0 && --sm.holders === 0) lk.heldSeams = Math.max(0, lk.heldSeams - 1);
+      if (lk.heldSeams === 0 && !lk.masterOpen && !lk.locked) {
+        lk.locked = true;
+        emitShelfEvent(lk.id, 'relocked');
+      }
+      p.access = null;
+      p.accessSeam = null;
+    }
+  }
+
+  // aim solve, once per gesture start: fix the head glance and hand back an
+  // aim record. `target` is refreshed every frame by updateInspect and fed to
+  // solveArmIK in the blend loop — no body half-turn (the pick point sits
+  // close to dead-ahead, unlike the scan pedestal).
+  function solveInspectAim(p) {
+    const u = p.h.metadata;
+    const lower = u.fist?.parent ?? null, upper = lower?.parent ?? null; // Fist.R → LowerArm.R → UpperArm.R
+    if (!upper?.rotationQuaternion || !lower?.rotationQuaternion) return null;
+    if (u.head === undefined)
+      u.head = p.h.getDescendants(false).find((n) => /head/i.test(n.name) && n.rotationQuaternion) ?? null;
+    _shelfPt.copyFrom(p.f).scaleInPlace(p.reach).addInPlace(p.h.position)
+      .addInPlace(_handPt.copyFrom(p.s).scaleInPlace(p.pickLat));
+    _shelfPt.y = 1.3;
+    let qHead = null;
+    if (u.head) {
+      forceWorld(u.head, p.h);
+      const fy = Math.atan2(p.f.x, p.f.z);
+      const raw = clampAngle(Math.atan2(_shelfPt.x - p.h.position.x, _shelfPt.z - p.h.position.z) - fy, Math.PI);
+      const hy = fy + clampAngle(raw, INSPECT_HEAD_YAW);
+      _aimA.set(Math.sin(fy), 0, Math.cos(fy));
+      _aimD.set(Math.sin(hy), 0, Math.cos(hy));
+      qHead = localizeRotation(u.head, arcQuat(_aimA, _aimD), new Quaternion());
+    }
+    const { spine, qSpine } = solveTorsoLean(p);
+    return { upper, lower, head: qHead ? u.head : null, qHead, target: _shelfPt.clone(), spine, qSpine };
+  }
+
+  // re-roll the held prop for one gesture: one of the four small-goods
+  // shapes, tinted from the host shelf's own catalogue colors
+  function armItem(p) {
+    const pick = p.itemShapes[Math.floor(Math.random() * p.itemShapes.length)];
+    for (const s of p.itemShapes) s.setEnabled(s === pick);
+    const pal = SLOTS[p.slot]?.palette ?? productColors;
+    p.itemMat.albedoColor = C3(pal[Math.floor(Math.random() * pal.length)]);
+  }
+
+  function startInspect(p, result) {
+    const u = p.h.metadata;
+    p.pickLat = (Math.random() - 0.5) * 0.8; // stay inside the shopper's own seam gap — set before the aim solve, which reaches for this offset
+    armItem(p);
+    p.inspect = { t: 0, k: 0, result, counted: false, aim: solveInspectAim(p) };
+    p.idling = true; // body stays on the Idle loop; only the arm/head get overridden
+    const gi = u.groups.Idle;
+    if (gi && !gi.isPlaying) gi.start(true, 1.0, gi.from, gi.to);
+  }
+
+  function updateInspect(p, dt) {
+    const it = p.inspect;
+    it.t += dt;
+    const t = it.t;
+    // one blend factor drives the arm/head reach (applied post-animation,
+    // shared with the scan gesture's loop): out, hold, back
+    it.k = t < INSPECT_REACH ? easeInOutCubic(t / INSPECT_REACH)
+      : t < INSPECT_REACH + INSPECT_HOLD ? 1
+        : 1 - easeInOutCubic(Math.min(1, (t - INSPECT_REACH - INSPECT_HOLD) / INSPECT_RETRACT));
+    _shelfPt.copyFrom(p.f).scaleInPlace(p.reach).addInPlace(p.h.position)
+      .addInPlace(_handPt.copyFrom(p.s).scaleInPlace(p.pickLat));
+    _shelfPt.y = 1.3;
+    if (it.aim) it.aim.target.copyFrom(_shelfPt); // solveArmIK reaches the hand here each frame
+    const u = p.h.metadata;
+    if (u.fist) {
+      _handPt.copyFrom(u.fist.getAbsolutePosition());
+      if (it.result === 'return') { // pop into the hand → set back on the shelf
+        if (t < 0.3) {
+          p.item.setEnabled(true);
+          p.item.scaling.setAll(easeInOutCubic(t / 0.3));
+          p.item.position.copyFrom(_handPt);
+        } else if (t < 1.1) {
+          p.item.scaling.setAll(1);
+          Vector3.LerpToRef(_handPt, _shelfPt, easeInOutCubic((t - 0.3) / 0.8), p.item.position);
+        } else {
+          p.item.setEnabled(false);
+        }
+      } else if (t >= 0.3) { // keep: empty-hand reach, then shelf → hand, then it vanishes at once
+        if (t < 0.7) {
+          p.item.setEnabled(true);
+          p.item.scaling.setAll(1);
+          Vector3.LerpToRef(_shelfPt, _handPt, easeInOutCubic((t - 0.3) / 0.4), p.item.position);
+        } else {
+          if (!it.counted) { it.counted = true; if (p.person) p.person.picks++; } // feeds "Items picked"
+          const k = Math.min(1, (t - 0.7) / 0.4);
+          p.item.position.copyFrom(_handPt);
+          p.item.scaling.setAll(1 - k);
+          if (k >= 1) p.item.setEnabled(false);
+        }
+      }
+    }
+    if (t >= INSPECT_SECS) { // cycle over — ready for the next command
+      p.item.setEnabled(false);
+      p.item.scaling.setAll(1);
+      p.inspect = null;
+    }
+  }
+
+  function heldShelfCycle(p, dt) {
+    const u = p.h.metadata;
+    if (!p.started) { // arrived at the reader: stand by until commanded
+      p.started = true;
+      p.idling = true;
+      const gi = u.groups.Idle;
+      if (gi) gi.start(true, 1.0, gi.from, gi.to);
+    }
+    if (p.shelfScan) { updateShelfScan(p, dt); return; }
+    if (!p.access) {
+      // holding for a verdict — one queued (possibly while still walking
+      // here) starts the phone gesture; updateShelfScan consumes it
+      if (p.scanVerdict != null) startShelfScan(p);
+      return;
+    }
+    // access granted but their own door still gliding open → hold Idle
+    if (Math.max(shelfLockOf(p).masterAmt, p.accessSeam?.openAmt ?? 0) < 0.7) return;
+    if (!p.inspect && p.inspectQueue.length) startInspect(p, p.inspectQueue.shift());
+    if (p.inspect) updateInspect(p, dt);
+  }
+
+  function pickCycle(p, dt) {
+    const u = p.h.metadata;
+    if (!u.ready) return;
+    if (p.shelfHold) { heldShelfCycle(p, dt); return; } // commanded session — no self-drive
+    if (!p.started) { // first frame at the shelf — everyone scans, no freebies
+      p.started = true;
+      startShelfScan(p);
+    }
+    if (p.shelfScan) { updateShelfScan(p, dt); return; }
+    // access granted but their own door still gliding open → hold Idle, no picking
+    if (Math.max(shelfLockOf(p).masterAmt, p.accessSeam?.openAmt ?? 0) < 0.7) return;
+    p.pickT += dt;
+    if (p.inspect) { updateInspect(p, dt); return; }
+    // basket done and the last gesture settled → walk off
+    if (p.picksLeft <= 0) { leaveSlot(p); return; }
+    if (p.pickT >= p.nextPick) { // roll the next gesture: grab-and-bag or put one back
+      p.picksLeft--;
+      p.nextPick = p.pickT + PICK_PERIOD;
+      startInspect(p, Math.random() < 0.5 ? 'keep' : 'return');
+      updateInspect(p, dt);
+    }
+  }
+
+  // ---------- 14 · movement, robot & main loop ----------
+
+  function makeRobot() {
+    const g = group('robot');
+    const shell = pbr('robotShell', { color: 0xdfe7f2, roughness: 0.35, metalness: 0.4 });
+    const dark = pbr('robotDark', { color: 0x223150, roughness: 0.5, metalness: 0.5 });
+    const glow = basic('robotGlow', { color: 0x35c3ff });
+
+    box(1.1, 0.35, 1.4, dark, 0, 0, 0).parent = g;
+    const wheels = [];
+    for (const [wx, wz] of [[-0.5, 0.45], [0.5, 0.45], [-0.5, -0.45], [0.5, -0.45]]) {
+      const w = MeshBuilder.CreateCylinder('rwheel', { diameter: 0.44, height: 0.12, tessellation: 16 }, scene);
+      w.material = mat.tire;
+      w.rotation.z = Math.PI / 2;
+      w.position.set(wx, 0.22, wz);
+      w.isPickable = false;
+      shadowGen.addShadowCaster(w);
+      w.parent = g;
+      wheels.push(w);
+    }
+    const torso = MeshBuilder.CreateCapsule('torso', { radius: 0.5, height: 1.9, tessellation: 16 }, scene);
+    torso.material = shell;
+    torso.position.set(0, 1.25, 0);
+    torso.isPickable = false;
+    shadowGen.addShadowCaster(torso);
+    torso.parent = g;
+    const screen = MeshBuilder.CreatePlane('rscreen', { width: 0.6, height: 0.5 }, scene);
+    const screenMat = basic('rscreenMat', { color: 0x35c3ff, alpha: 0.85 });
+    screen.material = screenMat;
+    screen.position.set(0, 1.35, 0.5);
+    screen.isPickable = false;
+    screen.parent = g;
+
+    const headPivot = group('headPivot');
+    headPivot.position.set(0, 1.95, 0);
+    headPivot.parent = g;
+    const head = box(0.7, 0.45, 0.6, shell, 0, 0, 0);
+    head.position.set(0, 0.2 + 0.225, 0);
+    head.parent = headPivot;
+    const visor = MeshBuilder.CreatePlane('visor', { width: 0.6, height: 0.28 }, scene);
+    visor.material = basic('visorMat', { color: 0x0a1830 });
+    visor.position.set(0, 0.22, 0.31);
+    visor.isPickable = false;
+    visor.parent = headPivot;
+    const eyes = [];
+    for (const ex of [-0.13, 0.13]) {
+      const e = MeshBuilder.CreateSphere('eye', { diameter: 0.12, segments: 10 }, scene);
+      e.material = glow;
+      e.position.set(ex, 0.22, 0.33);
+      e.isPickable = false;
+      e.parent = headPivot;
+      eyes.push(e);
+    }
+    const ant = MeshBuilder.CreateCylinder('ant', { diameter: 0.04, height: 0.3, tessellation: 8 }, scene);
+    ant.material = dark;
+    ant.position.set(0, 0.55, 0);
+    ant.isPickable = false;
+    ant.parent = headPivot;
+    const beacon = MeshBuilder.CreateSphere('beacon', { diameter: 0.14, segments: 10 }, scene);
+    beacon.material = glow;
+    beacon.position.set(0, 0.72, 0);
+    beacon.isPickable = false;
+    beacon.parent = headPivot;
+
+    g.metadata = { wheels, headPivot, eyes, beacon, screenMat };
+    return g;
+  }
+
+  function edgeBetween(a, b) { for (const e of adj[a]) if (e.to === b) return e.edge; return -1; }
+
+  function nodeVec(i, out) { return out.set(NODES[i][0], 0, NODES[i][1]); }
+
+  function headingYaw(from, to) { return Math.atan2(NODES[to][0] - NODES[from][0], NODES[to][1] - NODES[from][1]); }
+
+  function shortestLerp(a, b, t) {
+    let d = (b - a) % (Math.PI * 2);
+    if (d > Math.PI) d -= Math.PI * 2;
+    if (d < -Math.PI) d += Math.PI * 2;
+    return a + d * t;
+  }
+
+  function chooseNext(at, cameFrom) {
+    let cand = adj[at].filter((o) => o.to !== cameFrom);
+    if (cand.length === 0) cand = adj[at];
+    cand.sort((p, q) => edgeObjs[p.edge].lastVisited - edgeObjs[q.edge].lastVisited);
+    return cand[0].to;
+  }
+
+  // shared brake: only an actively driving robot holds people up — one that
+  // is itself yielding (waiting or turning) is passable. People then never
+  // wait on a robot that is waiting on people, so no wait cycle can form;
+  // a crowd pinning the robot from both sides used to freeze the whole loop
+  function robotAhead(h) {
+    if (!robot.advancing) return false;
+    const rx = robot.g.position.x - h.position.x;
+    const rz = robot.g.position.z - h.position.z;
+    const rd = Math.hypot(rx, rz);
+    return rd < ROBOT_BRAKE &&
+      (rx * Math.sin(h.rotation.y) + rz * Math.cos(h.rotation.y)) / (rd || 1) > 0.15;
+  }
+
+  function applyGait(p) {
+    const u = p.h.metadata;
+    if (!u.ready) return;
+    const pos = p.h.position;
+    let vel = 0;
+    if (p.prevPos) {
+      vel = Math.hypot(pos.x - p.prevPos.x, pos.z - p.prevPos.z) / Math.max(frameDt, 1e-4);
+      p.prevPos.copyFrom(pos);
+    } else {
+      p.prevPos = pos.clone(); // seed on first use — spawns/teleports read as still
+    }
+    const moving = vel > GAIT_MIN_VEL;
+    if (u.movingState !== moving) {
+      u.movingState = moving;
+      const on = moving ? u.groups.Walk : u.groups.Idle;
+      const off = moving ? u.groups.Idle : u.groups.Walk;
+      if (off) off.stop();
+      if (on) on.start(true, 1.0, on.from, on.to);
+    }
+    if (moving && u.groups.Walk) u.groups.Walk.speedRatio = p.cur * 45;
+  }
+
+  // exit-queue rank: 0 owns the scanner next, n waits n slots behind the gate.
+  // Ranks are per-portal — the two doorways queue independently.
+  function gateRank(p) {
+    let r = 0;
+    for (const q of shoppers) {
+      if (q !== p && q.pc === p.pc && q.mode === 'exitwalk' && q.wp === 0 && q.exitSeq < p.exitSeq) r++;
+    }
+    return r;
+  }
+
+  // entry-queue rank: mirror of gateRank; slots stretch back toward the door
+  function entryRank(p) {
+    let r = 0;
+    for (const q of shoppers) {
+      if (q !== p && q.pc === p.pc && q.mode === 'enter' && q.wp === 0 && q.enterSeq < p.enterSeq) r++;
+    }
+    return r;
+  }
+
+  function spurMove(p, dt) {
+    const pc = p.pc;
+    if (p.mode === 'enter') {
+      if (p.retreat) _spurTgt.set(pc.retreat.x, 0, pc.retreat.z); // turned away → back outside
+      else if (p.wp === 0) {
+        const s = pc.entrySlot(entryRank(p));
+        _spurTgt.set(s.x, 0, s.z);
+      }
+      else _spurTgt.copyFrom(pc.mergePoint);
+    }
+    else if (p.wp === 0) { const s = pc.exitSlot(gateRank(p)); _spurTgt.set(s.x, 0, s.z); }
+    else { const s = p.wp === 1 ? pc.exitDoorPoint : pc.exitOutPoint; _spurTgt.set(s.x, 0, s.z); }
+    const dx = _spurTgt.x - p.h.position.x, dz = _spurTgt.z - p.h.position.z;
+    const dist = Math.hypot(dx, dz);
+    let target = p.speed;
+    // arriving: wait by the junction if the loop is congested right there
+    if (p.mode === 'enter' && p.wp === 1 && dist < 1.6) {
+      const busy = shoppers.some((q) => q !== p && q.mode === 'roam' &&
+        Math.hypot(q.h.position.x - pc.mergePoint.x, q.h.position.z - pc.mergePoint.z) < 1.3);
+      if (busy) target = 0;
+    }
+    if (p.scan !== undefined) target = 0; // held between the gate posts mid-scan
+    p.cur = (p.cur ?? p.speed) + (target - (p.cur ?? p.speed)) * Math.min(1, dt * 6);
+    const step = p.cur * walkPath.length * dt;
+    if (dist > 0.001) {
+      const k = Math.min(1, step / dist);
+      p.h.position.x += dx * k;
+      p.h.position.z += dz * k;
+      if (p.cur > p.speed * 0.2) p.h.rotation.y = Math.atan2(dx, dz);
+    }
+    if (dist <= Math.max(0.12, step)) {
+      if (p.mode === 'enter') {
+        if (p.retreat) p.done = true; // out the door and gone
+        else if (p.wp === 0) {
+          // head of the entry queue claims the scanner; the sweep runs in the
+          // frame loop and advances wp to 1 (→ merge point) once verified
+          if (!pc.entryGate.user && p.scan === undefined && entryRank(p) === 0) {
+            pc.entryGate.user = p; p.verifying = true;
+            if (p.gateHold) {
+              // check-in customers hold under the reticle for the API verdict;
+              // a verdict that arrived while they queued applies right away
+              if (p.verdict) applyVerdict(p, p.verdict);
+            } else {
+              p.scan = 0;
+              p.verifyFail = Math.random() < 0.15; // first sweep rejected → rescan
+            }
+          }
+        } else enterRoam(p); // through the door — off to wherever they fancy
+      }
+      else if (p.wp === 0) {
+        // reached the exit gate line.
+        // head of the queue claims the scanner as soon as it frees up; the
+        // scan itself runs in the frame loop and advances wp when paid
+        if (!pc.gate.user && p.scan === undefined && gateRank(p) === 0) {
+          pc.gate.user = p; p.paying = true;
+          if (p.payHold) {
+            // API-leave customers hold under the reticle for a pay
+            // verdict; one that arrived while they queued applies right away
+            if (p.payVerdict) applyPay(p, p.payVerdict);
+          } else {
+            p.scan = 0; // auto exiters pay themselves out…
+            p.payFail = p.pc.key === 'right' && Math.random() < 0.3; // …but random ones may get DECLINED first
+          }
+        }
+      } else if (p.wp === 1) p.wp = 2;
+      else p.done = true; // out the door and gone — collected after the update
+    }
+    applyGait(p);
+  }
+
+  function tryStartPause(p) {
+    const retry = () => { p.nextPause = elapsed + 3 + Math.random() * 4; };
+    if (p.exit || p.slot >= 0 || !p.mv || p.mv.kind === 'exit') return retry();
+    if (nearPortal(p.h.position.x, p.h.position.z, PAUSE_PORTAL_CLEAR)) return retry();
+    // something to look at? face the nearest shelf stand — otherwise (or 40%
+    // of the time regardless) it's a phone check
+    let best = Infinity, bx = 0, bz = 0;
+    for (const s of SLOTS) {
+      const d = Math.hypot(s.x - p.h.position.x, s.z - p.h.position.z);
+      if (d < best) { best = d; bx = s.x; bz = s.z; }
+    }
+    const phone = best > 4 || Math.random() < 0.4;
+    p.pauseYaw = phone
+      ? p.h.rotation.y + (Math.random() - 0.5) * 0.8
+      : Math.atan2(bx - p.h.position.x, bz - p.h.position.z);
+    p.pause = { until: elapsed + (1.5 + Math.random() * 2.5) * p.pauseDurMul, phone };
+  }
+
+  function endPause(p) {
+    if (!p.pause) return;
+    if (p.pause.phone) p.phone.setEnabled(false);
+    p.pause = null;
+    p.nextPause = elapsed + (10 + Math.random() * 15) * p.pauseMul;
+  }
+
+  // phone held at the chest, screen back toward the face — world-parented
+  // exactly like the shelf-scan pose, so nothing new touches the skeleton
+  function posePausePhone(p) {
+    p.phone.setEnabled(true);
+    const fy = p.h.rotation.y;
+    p.phone.position.set(
+      p.h.position.x + Math.sin(fy) * 0.26, 1.22,
+      p.h.position.z + Math.cos(fy) * 0.26);
+    p.phone.rotation.y = fy + Math.PI;
+    p.phone.rotation.x = 0.55;
+  }
+
+  function enterRoam(p) {
+    p.mode = 'roam';
+    p.mv = null;
+    p.rp = p.h.position.clone();
+    p.roamYaw = p.h.rotation.y;
+    p.nextGoalAt = 0;
+    p.pauseOff = null;
+    p.latEase = 0; // fade the personal offset in rather than snapping sideways
+  }
+
+  // flagged to leave → route to this portal's exit junction, where the gate
+  // queue takes over exactly as it did when people turned off the loop
+  function planExitLeg(p) {
+    const jp = walkPath.pointAt(p.pc.tExit);
+    const wps = routeBetween(p.h.position.x, p.h.position.z, jp.x, jp.z);
+    p.mv = { wps: wps ?? [new Vector3(jp.x, 0, jp.z)], wi: 0, kind: 'exit' };
+  }
+
+  function roamMove(p, dt) {
+    if (!p.rp) { p.rp = p.h.position.clone(); p.roamYaw = p.h.rotation.y; }
+    // far enough from the stand point we just left → release the reservation
+    if (p.slot >= 0 && SLOTS[p.slot]) {
+      const s = SLOTS[p.slot];
+      if (Math.hypot(p.h.position.x - s.x, p.h.position.z - s.z) > 1.3) p.slot = -1;
+    }
+    // an exit flag trumps whatever they were heading for
+    if (p.exit && p.mv?.kind !== 'exit') { endPause(p); planExitLeg(p); }
+
+    // window-shopping pause: run it down, or roll for a new one. An exit flag
+    // (API leave or the auto flagger) or a DELETE fade trumps the daydream
+    // immediately — a fading body must not re-enable the phone, which is
+    // world-parented and would float at full opacity
+    if (p.pause && (p.exit || p.fadeStart != null || elapsed > p.pause.until)) endPause(p);
+    else if (!p.pause && p.fadeStart == null && elapsed >= p.nextPause) tryStartPause(p);
+
+    if (!p.mv) { // arrived, between destinations: stand a beat, then pick again
+      p.cur = (p.cur ?? 0) * Math.max(0, 1 - dt * 6);
+      if (elapsed >= p.nextGoalAt) {
+        planRoamGoal(p);
+        if (p.mode !== 'roam') return; // the planner dived at a shelf
+      }
+      applyGait(p);
+      return;
+    }
+
+    const m = p.mv;
+    const tgt = m.wps[m.wi];
+    const dx = tgt.x - p.rp.x, dz = tgt.z - p.rp.z;
+    const dist = Math.hypot(dx, dz);
+    // pace breathes around the persona's base so nobody metronomes
+    let target = p.pause ? 0
+      : p.speed * (1 + p.driftAmp * Math.sin(elapsed * p.driftFreq + p.driftPhase));
+    if (robotAhead(p.h)) target = 0;
+    p.cur = (p.cur ?? p.speed) + (target - (p.cur ?? p.speed)) * Math.min(1, dt * 6);
+    const step = p.cur * walkPath.length * dt;
+    if (dist > 0.001) {
+      const k = Math.min(1, step / dist);
+      p.rp.x += dx * k;
+      p.rp.z += dz * k;
+    }
+    // heading eased toward the leg so corners round off instead of snapping —
+    // it also carries the weave's perpendicular, which would jolt on a hard turn
+    if (p.cur > p.speed * 0.2 && dist > 0.001) {
+      p.roamYaw = shortestLerp(p.roamYaw, Math.atan2(dx, dz), Math.min(1, dt * 4));
+    }
+
+    // personal walking line, laid perpendicular to the current heading: a lane
+    // preference that itself wanders, plus a two-octave weave
+    p.latEase = Math.min(1, p.latEase + dt * 0.5);
+    const weave = p.lat
+      + Math.sin(elapsed * p.latDriftFreq + p.latDriftPhase) * 0.1
+      + Math.sin(elapsed * p.wobFreq + p.wobPhase) * 0.08
+      + Math.sin(elapsed * p.wobFreq * 2.7 + p.wobPhase * 1.7) * 0.05;
+    // freeze the weave mid-stance while stopped — a time-driven offset would
+    // skate an Idle body sideways at up to ~0.15 u/s
+    p.pauseBlend = Math.max(0, Math.min(1, p.pauseBlend + (p.pause ? dt * 3 : -dt * 3)));
+    if (p.pause && p.pauseOff == null) p.pauseOff = weave;
+    else if (!p.pause && p.pauseBlend <= 0) p.pauseOff = null;
+    const mixed = p.pauseOff == null ? weave : weave + (p.pauseOff - weave) * p.pauseBlend;
+    let off = Math.max(-ROAM_WEAVE_CLAMP, Math.min(ROAM_WEAVE_CLAMP, mixed)) * p.latEase;
+    const nx = Math.cos(p.roamYaw), nz = -Math.sin(p.roamYaw); // left of the heading
+    // routes hug shelf ends — never let the sway push a body into a fixture
+    if (!navFree(p.rp.x + nx * off, p.rp.z + nz * off)) off *= 0.5;
+    if (!navFree(p.rp.x + nx * off, p.rp.z + nz * off)) off = 0;
+    p.h.position.x = p.rp.x + nx * off;
+    p.h.position.z = p.rp.z + nz * off;
+    // paused shoppers turn to whatever caught their eye and back again;
+    // pauseBlend eases the handoff so neither end of the stop snaps
+    p.h.rotation.y = p.pauseBlend > 0
+      ? shortestLerp(p.roamYaw, p.pauseYaw, p.pauseBlend) : p.roamYaw;
+    if (p.pause?.phone) posePausePhone(p);
+
+    if (dist <= Math.max(0.12, step)) {
+      m.wi++;
+      if (m.wi >= m.wps.length) {
+        if (m.kind === 'exit') { p.mode = 'exitwalk'; p.wp = 0; p.exitSeq = ++exitSeq; p.mv = null; }
+        else { p.mv = null; p.nextGoalAt = elapsed + 0.3 + Math.random() * 1.4; }
+      }
+    }
+    applyGait(p);
+  }
+
+  function walk(p, dt) {
+    if (p.mode === 'roam') roamMove(p, dt);
+    else spurMove(p, dt);
+  }
+
+  function dispose() {
+    engine.stopRenderLoop();
+    if (window.cancelIdleCallback) window.cancelIdleCallback(warmIdle);
+    clearTimeout(warmIdle); // harmless if warmIdle was an idle handle
+    ro.disconnect();
+    window.removeEventListener('resize', onResize);
+    canvas.removeEventListener('wheel', onWheel);
+    canvas.removeEventListener('pointerleave', onPointerLeave);
+    scene.onPointerObservable.remove(pointerObs);
+    scene.dispose();
+    engine.dispose();
+    if (canvas.parentNode === container) container.removeChild(canvas);
   }
 
   // the blocking part of the boot is done — everything past here is callbacks
