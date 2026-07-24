@@ -1,0 +1,17 @@
+**/node_modules
+**/dist
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+**/*.log
+.DS_Store
+.claude
+*.png
+*.jpg
+*.b64
+reference.png
+.preview-check.*
+README.md
+**/api-spec

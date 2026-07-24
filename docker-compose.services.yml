@@ -1,0 +1,58 @@
+# Paste / replace services in /docker/hexdas/atk compose.
+# Host: atk-dashboard.hexdas.cloud
+# `atk-store-mqtt` stays as-is (separate image / pipeline).
+
+  atk-store:
+    image: bunchax/atk-store:latest
+    platform: linux/amd64
+    container_name: atk-store
+    restart: always
+    ports:
+      - "3001:80"
+    extra_hosts:
+      - "atk.hexdas.cloud:host-gateway"
+      - "atk-dashboard.hexdas.cloud:host-gateway"
+      - "shelfbox.hexdas.cloud:host-gateway"
+      - "hexdas.cloud:host-gateway"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=hexdas_proxy"
+      - "traefik.http.routers.atk-store.rule=Host(`atk-dashboard.hexdas.cloud`)"
+      - "traefik.http.routers.atk-store.entrypoints=websecure"
+      - "traefik.http.routers.atk-store.tls=true"
+      - "traefik.http.routers.atk-store.tls.certresolver=mytlschallenge"
+      - "traefik.http.services.atk-store-svc.loadbalancer.server.port=80"
+      - "traefik.http.services.atk-store-svc.loadbalancer.server.scheme=http"
+    depends_on:
+      - atk-store-api
+    networks:
+      - proxy
+
+  atk-store-api:
+    image: bunchax/atk-store-api:latest
+    platform: linux/amd64
+    container_name: atk-store-api
+    restart: always
+    env_file:
+      - ./.env
+      - /root/atk-store-secrets/aws.env
+    ports:
+      - "3004:3004"
+    extra_hosts:
+      - "atk.hexdas.cloud:host-gateway"
+      - "atk-dashboard.hexdas.cloud:host-gateway"
+      - "shelfbox.hexdas.cloud:host-gateway"
+      - "hexdas.cloud:host-gateway"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=hexdas_proxy"
+      - "traefik.http.routers.atk-store-api.rule=Host(`atk-dashboard.hexdas.cloud`) && (PathPrefix(`/users`) || PathPrefix(`/shelfs`) || PathPrefix(`/sessions`) || PathPrefix(`/crowd`) || PathPrefix(`/groups`) || PathPrefix(`/swagger`) || Path(`/health-check`))"
+      - "traefik.http.routers.atk-store-api.entrypoints=websecure"
+      - "traefik.http.routers.atk-store-api.tls=true"
+      - "traefik.http.routers.atk-store-api.tls.certresolver=mytlschallenge"
+      - "traefik.http.routers.atk-store-api.priority=100"
+      - "traefik.http.routers.atk-store-api.service=atk-store-api-svc"
+      - "traefik.http.services.atk-store-api-svc.loadbalancer.server.port=3004"
+      - "traefik.http.services.atk-store-api-svc.loadbalancer.server.scheme=http"
+    networks:
+      - proxy
