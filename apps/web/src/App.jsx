@@ -26,7 +26,7 @@ const VERSIONS = {
   },
   v3: {
     designer: true,
-    title: 'Shelf Designer',
+    title: 'Shelf DesignerXXXX',
     sub: 'Drag products from the palette onto the 3D shelf',
     docTitle: 'Shelf Designer · ATK Store',
   },
