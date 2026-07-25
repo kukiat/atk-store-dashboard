@@ -117,7 +117,7 @@ export default function Backdoor() {
 
   // random ambient crowd (scalar, not roster) — drives the auto shoppers on
   // the right-side doors via /crowd → SSE → scene reconcile
-  const [crowd, setCrowd] = useState({ target: 0, max: 5 });
+  const [crowd, setCrowd] = useState({ target: 0, max: 5, costume: false });
   const [crowdBusy, setCrowdBusy] = useState(false);
 
   // store layout for the walkToShelf picker (read-only, loaded once) and the
@@ -190,6 +190,23 @@ export default function Backdoor() {
     },
     [crowd, pushToast],
   );
+
+  // Costume Mode: same PATCH route, wardrobe instead of head-count. Themed
+  // shoppers join the regular ones (they don't replace them), so the store keeps
+  // reading as a store. Default off — this is for playing, not for demos.
+  const toggleCostume = useCallback(async () => {
+    setCrowdBusy(true);
+    try {
+      const next = !crowd.costume;
+      const d = await apiFetch(CROWD_API_URL, { method: 'PATCH', body: { costume: next } });
+      setCrowd(d);
+      pushToast(next ? 'Costume mode ON — ninjas incoming' : 'Costume mode OFF', 'ok');
+    } catch (e) {
+      pushToast(String(e?.message || e), 'err');
+    } finally {
+      setCrowdBusy(false);
+    }
+  }, [crowd, pushToast]);
 
   // one entry point for every mutation: fire → toast → re-fetch. Buttons are
   // already gated by status, so a failure here is a slipped-through 409/404 or
@@ -367,6 +384,14 @@ export default function Backdoor() {
               +
             </button>
             <span className="bd-crowd-hint">walk in &amp; out automatically — not tracked in the roster</span>
+            <button
+              className={`btn bd-costume${crowd.costume ? ' on' : ''}`}
+              disabled={crowdBusy}
+              onClick={toggleCostume}
+              title="Mix ninja / kimono / viking / knight shoppers into the crowd"
+            >
+              🥷 Costume {crowd.costume ? 'ON' : 'OFF'}
+            </button>
           </div>
         </section>
 

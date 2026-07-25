@@ -206,7 +206,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // bind-pose height once per file at load and scale to TARGET_H so a swapped-in
   // model can't come out giant or tiny. CHAR_SCALE stays only as a fallback.
   const CHAR_SCALE = 0.8;
-  const TARGET_H = 3.325 * CHAR_SCALE; // ≈ 2.66 — the canonical Casual_Male height
+  const TARGET_HEAD = 2.022 * CHAR_SCALE; // ≈ 1.62 — Casual_Male's `Head` bone height
+  const TARGET_H = 3.325 * CHAR_SCALE;    // ≈ 2.66 — fallback: its full silhouette
   const DONOR_FILE = 'Casual_Male'; // ships the Idle/Walk/PickUp clips we retarget
   const CHAR_FILES = [
     'Casual_Male',
@@ -219,6 +220,17 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     'OldClassy_Female',
     'Worker_Male'
   ];
+  // Costume Mode (Backdoor toggle, off by default): a themed sub-crowd that
+  // *joins* the roster above rather than replacing it. Same Quaternius pack as
+  // the regular shoppers — same rig, same Idle/Walk/PickUp clips, same 'Skin'/
+  // 'Face' materials — so nothing here needs special handling. The pack's own
+  // `_Male`/`_Female` suffixes are exactly what the gender split keys on (see
+  // MALE_FILES), so these drop straight into the wardrobe round-robin.
+  // Deliberately NOT preloaded: see setCostumeMode.
+  const COSTUME_FILES = [
+    'Ninja_Male', 'Kimono_Male', 'Viking_Male', 'Knight_Male',
+    'Ninja_Female', 'Kimono_Female', 'Viking_Female', 'Knight_Golden_Female'
+  ];
   // Bind-pose height of a just-loaded container, read straight off the vertex
   // positions. Bounding boxes are unusable for this: Babylon refreshes a skinned
   // mesh's box lazily, so measuring a *clone* right after instantiation catches a
@@ -228,7 +240,16 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // better; it fixed some clones and broke others. Vertices are the geometry
   // itself, so one measurement per file is exact and every clone of that file
   // lands on the same scale.
-  function measureBindHeight(container) {
+  // What we normalize on is the floor -> `Head` bone distance, NOT the floor ->
+  // topmost vertex one. Hats, helmets and horns sit above the head, and forcing
+  // that whole silhouette into a fixed envelope shrinks the *body* to make room:
+  // measured on the shipped crowd, OldClassy_Female's hat put her at scale 0.705
+  // against everyone else's 0.830 — she has been walking the floor 15% short.
+  // The pack rigs every character's Head at the same height, so head-based
+  // normalization lands the crowd's eyeline on one level and lets the headgear
+  // stick up where it belongs. `full` is kept as the fallback for any model that
+  // turns up without a Head bone.
+  function measureBindPose(container) {
     const root = container.rootNodes[0];
     const toLocal = root ? Matrix.Invert(root.computeWorldMatrix(true)) : Matrix.Identity();
     const v = new Vector3();
@@ -243,7 +264,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
         if (v.y > maxY) maxY = v.y;
       }
     }
-    return maxY - minY;
+    const head = (container.transformNodes || []).find((n) => n.name === 'Head');
+    const headY = head
+      ? head.computeWorldMatrix(true).multiply(toLocal).getTranslation().y - minY
+      : 0;
+    return { head: headY, full: maxY - minY };
   }
   const charCache = new Map(); // file -> Promise<AssetContainer>
   const charScale = new Map(); // file -> uniform scale that puts it at TARGET_H
@@ -259,8 +284,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
             try { retargetClips(donor, container, scene); }
             catch (e) { console.error('[retarget] failed for', file, e); }
           }
-          const rawH = measureBindHeight(container);
-          charScale.set(file, rawH > 0.01 ? TARGET_H / rawH : CHAR_SCALE);
+          const size = measureBindPose(container);
+          charScale.set(file, size.head > 0.01 ? TARGET_HEAD / size.head
+            : size.full > 0.01 ? TARGET_H / size.full
+            : CHAR_SCALE);
           return container;
         });
       charCache.set(file, p);
@@ -1352,7 +1379,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       root.parent = h;
       // normalize to a common height (see TARGET_H) rather than a fixed scale,
       // so models authored in different units land the same size in the crowd.
-      // The scale was measured once when the file loaded (measureBindHeight) —
+      // The scale was measured once when the file loaded (measureBindPose) —
       // never re-measure per clone, the clone's bounding box lies.
       root.scaling.setAll(charScale.get(file) ?? CHAR_SCALE);
       const mats = new Set();
@@ -2071,9 +2098,40 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // its user first (roster, then generated) and takes the next character file
   // of that gender. Consecutive same-gender spawns never share a model; a
   // same-model pair on the floor is possible but rare, and tints differ anyway.
-  const MALE_FILES = CHAR_FILES.filter((f) => !f.includes('Female'));
-  const FEMALE_FILES = CHAR_FILES.filter((f) => f.includes('Female'));
+  const isFemaleFile = (f) => f.includes('Female');
+  let MALE_FILES = CHAR_FILES.filter((f) => !isFemaleFile(f));
+  let FEMALE_FILES = CHAR_FILES.filter(isFemaleFile);
   const charSeq = { male: 0, female: 0 };
+
+  // ---------- costume mode ----------
+  // Costume files are kept out of the boot preload on purpose: the splash gates
+  // the reveal on every model it pulls (see "shopper models"), and a mode that
+  // ships off must not tax a boot that will never use it. They download on the
+  // first toggle and join the pools only once they have all landed — handing a
+  // spawn a model that is still in flight would put an invisible walking group
+  // on the floor until it resolves (makeHuman fills the body in on the .then).
+  // The wait is invisible anyway: a new shopper still has to queue, spend
+  // ENTRY_GATE.secs at the scanner and walk in. charCache keeps the containers,
+  // so every toggle after the first one takes effect immediately.
+  let costumeOn = false;
+  let costumeLoad = null;   // Promise — created on the first enable
+  const costumeOk = [];     // files that actually loaded (a failed one is dropped)
+  function rebuildCharPools() {
+    const pool = costumeOn ? CHAR_FILES.concat(costumeOk) : CHAR_FILES;
+    MALE_FILES = pool.filter((f) => !isFemaleFile(f));
+    FEMALE_FILES = pool.filter(isFemaleFile);
+  }
+  function setCostumeMode(on) {
+    costumeOn = !!on;
+    if (!costumeOn) { rebuildCharPools(); return; }
+    if (!costumeLoad) {
+      costumeLoad = Promise.all(COSTUME_FILES.map((file) =>
+        loadCharContainer(file)
+          .then(() => { costumeOk.push(file); })
+          .catch((e) => console.error('[costume] failed to load', file, e))));
+    }
+    costumeLoad.then(() => { if (costumeOn) rebuildCharPools(); });
+  }
   const nextCharFile = (female) => (female
     ? FEMALE_FILES[charSeq.female++ % FEMALE_FILES.length]
     : MALE_FILES[charSeq.male++ % MALE_FILES.length]);
@@ -4772,7 +4830,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     people: {
       add: addPerson, remove: removePerson,
       // Backdoor drives the random crowd via /crowd → SSE → here
-      setCrowdTarget,
+      setCrowdTarget, setCostumeMode,
       // users API control channel: Dashboard forwards SSE events here
       addUser: apiAddUser, updateUser: apiUpdateUser, removeUser: apiRemoveUser,
       leaveUser: apiLeaveUser, payUser: apiPayUser,

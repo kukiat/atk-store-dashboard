@@ -611,9 +611,11 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   useEffect(() => {
     const es = new EventSource(`${CROWD_API_URL}/events`);
     es.addEventListener('crowd', (ev) => {
-      let target;
-      try { target = JSON.parse(ev.data)?.target; } catch { return; }
-      if (typeof target === 'number') peopleRef.current?.setCrowdTarget?.(target);
+      let d;
+      try { d = JSON.parse(ev.data); } catch { return; }
+      if (typeof d?.target === 'number') peopleRef.current?.setCrowdTarget?.(d.target);
+      // same event carries the Costume Mode switch (wardrobe, not head-count)
+      if (typeof d?.costume === 'boolean') peopleRef.current?.setCostumeMode?.(d.costume);
     });
     return () => es.close();
   }, []);
@@ -636,7 +638,11 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   useEffect(() => {
     if (!crowd) return;
     apiFetch(CROWD_API_URL)
-      .then((d) => { if (d) peopleRef.current?.setCrowdTarget?.(d.target); })
+      .then((d) => {
+        if (!d) return;
+        peopleRef.current?.setCrowdTarget?.(d.target);
+        if (d.costume) peopleRef.current?.setCostumeMode?.(true); // survives a page reload
+      })
       .catch(() => {});
   }, [crowd?.maxTotal]);
   // walking/browsing are outcomes of the sim (shoppers decide for themselves

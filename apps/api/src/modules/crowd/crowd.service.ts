@@ -10,6 +10,10 @@ import { clamp } from "../../utils";
 // target, spawning/despawning through the right-side doors.
 class CrowdService {
   private target = CROWD_START; // opening random crowd (independent of the API roster)
+  // Costume Mode: a scene-side wardrobe flag, not a population one. It rides
+  // this module because it is the same Backdoor -> SSE -> scene channel and the
+  // same "ambient crowd" knob; it never affects head-count or the roster.
+  private costume = false;
   private listeners = new Set<(e: CrowdEvent) => void>();
 
   // event hub — the SSE route subscribes, mutations broadcast
@@ -23,13 +27,16 @@ class CrowdService {
   }
 
   get() {
-    return { target: this.target, max: CROWD_MAX };
+    return { target: this.target, max: CROWD_MAX, costume: this.costume };
   }
 
-  set(next: number) {
-    this.target = clamp(next);
-    this.emit({ type: "crowd", target: this.target });
-    return { target: this.target, max: CROWD_MAX };
+  // partial: Backdoor's stepper sends `target`, its costume switch sends
+  // `costume`; either way the listeners get the whole current state
+  set(patch: { target?: number; costume?: boolean }) {
+    if (patch.target !== undefined) this.target = clamp(patch.target);
+    if (patch.costume !== undefined) this.costume = patch.costume;
+    this.emit({ type: "crowd", target: this.target, costume: this.costume });
+    return this.get();
   }
 }
 

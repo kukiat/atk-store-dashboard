@@ -711,6 +711,9 @@ canvas { display: block; }
 .bd-crowd-num { font-size: 30px; font-weight: 700; color: #eaf6ff; line-height: 1; }
 .bd-crowd-max { font-size: 14px; color: #6f86b8; }
 .bd-crowd-hint { flex: 1 1 180px; font-size: 11px; color: #6f86b8; }
+/* costume-mode switch — reads as off until it is on, so nobody flips it by accident */
+.bd-costume { flex: none; white-space: nowrap; }
+.bd-costume.on { background: var(--accent); color: #061018; border-color: var(--accent); }
 
 /* roster list */
 .bd-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }

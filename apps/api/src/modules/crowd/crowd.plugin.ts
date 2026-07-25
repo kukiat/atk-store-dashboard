@@ -26,7 +26,7 @@ export const crowdPlugin = new Elysia({ prefix: "/crowd", tags: ["crowd"] })
       while (!request.signal.aborted) {
         while (queue.length) {
           const e = queue.shift()!;
-          yield sse({ event: e.type, data: { target: e.target } });
+          yield sse({ event: e.type, data: { target: e.target, costume: e.costume } });
         }
         // keepalive: Bun closes idle streams (~10s); ping keeps the pipe warm
         await new Promise<void>((resolve) => {
@@ -49,7 +49,7 @@ export const crowdPlugin = new Elysia({ prefix: "/crowd", tags: ["crowd"] })
   })
 
   // absolute set (Backdoor holds the current value and PATCHes the new one)
-  .patch("/", ({ crowdService, body }) => ok(crowdService.set(body.target)), {
+  .patch("/", ({ crowdService, body }) => ok(crowdService.set(body)), {
     body: "crowd.set",
     response: "crowd.res.entity",
   });
