@@ -23,7 +23,7 @@
 
 import {
   Engine, Scene, ArcRotateCamera, Camera, Vector3, Color3, Color4,
-  HemisphericLight, DirectionalLight, ShadowGenerator, MeshBuilder, TransformNode,
+  HemisphericLight, DirectionalLight, ShadowGenerator, MeshBuilder, Mesh, TransformNode,
   PBRMaterial, StandardMaterial, DynamicTexture, Curve3, PointerEventTypes,
   DefaultRenderingPipeline, ImageProcessingConfiguration, Scalar, SceneLoader, Matrix, Quaternion,
 } from '@babylonjs/core';
@@ -294,6 +294,19 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     }
     return charCache.get(file);
   }
+  // Props (katana, …) are NOT characters and must not go through
+  // loadCharContainer: a clip-less file trips its retarget branch, so Babylon
+  // would bake Casual_Male's walk cycle onto a sword, and measureBindPose would
+  // then find no `Head` bone and stretch the sword to TARGET_H — a katana as
+  // tall as a shopper. No retarget, no measure, no charScale entry.
+  const propCache = new Map(); // file -> Promise<AssetContainer>
+  function loadPropContainer(file) {
+    if (!propCache.has(file)) {
+      propCache.set(file, SceneLoader.LoadAssetContainerAsync('/models/', file + '.glb', scene));
+    }
+    return propCache.get(file);
+  }
+
   // The whole crowd is pulled in up front: it gates the reveal (nobody wants to
   // watch shoppers pop into a finished store), and each file that lands is a
   // real tick for the boot splash — the only honest, fine-grained progress this
@@ -1365,9 +1378,201 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     return look;
   }
 
-  function makeHuman(file) {
+  // ---------- named characters (preset = body file + fixed look + prop kit) ----------
+  // A named character is NOT a .glb of its own: it reuses a shipped body and
+  // adds what the pack cannot express. Kimono_Male has no `Hair` material at
+  // all (its scalp is bare `Skin`), so green hair could never have been a tint
+  // — it, the katana, the earrings and the scar are all props parented to bones.
+  const ZORO_GREEN = '#7cc63f';
+  const ZORO_LOOK = {
+    Skin: '#f0c08e',
+    Face: EYE_DARK,       // eye band stays the crowd's colour
+    Clothes: '#22222a',   // near-black: the light rig is almost pure blue and
+                          // swallows true black, same reason SUITS avoids it
+    // `Band` is ONE material covering both the waist sash and a head hachimaki
+    // whose two flared tails stick up at the back. They cannot be coloured
+    // apart, so the band takes the hair's green: the tails then read as extra
+    // hair spikes instead of stray ribbons, and the sash reads as the
+    // (equally canonical) green haramaki.
+    Band: ZORO_GREEN,
+    torso: '#22222a',     // avatar chip on the dashboard card
+  };
+  // Placement of every prop, in the bone's own space. Tuned live through
+  // debug.zoroTune on a running scene, then written back here — guessing ~30
+  // numbers a rebuild at a time is not a workflow.
+  // Bone space is not world space: `Head` sits at world y 1.683 on a 2.53-tall
+  // body and carries a 0.795 world scale, so every number below is ~1.26x the
+  // world distance it buys. Two things had to be measured rather than guessed —
+  // first-guess values buried the whole kit inside the ribcage, and the model
+  // faces +Z (the `Face` primitive sits at z +0.29..+0.44), which is the
+  // opposite of the assumption that put the scar on the back of the skull.
+  const ZORO_TUNE = {
+    // +x is the character's LEFT once the mounts put us in body axes — which is
+    // the side the earrings, the scar and all three swords belong on
+    // x/z exist because the skull is not centred on its own bone (it sits ~0.05
+    // to one side), which left a sliver of bare scalp showing at the back
+    hair:    { s: 1.16, x: -0.06, y: 0.66, z: 0.04, spikes: 11, len: 0.40, thick: 0.30, tilt: 0.85 },
+    earring: { s: 0.07, x: 0.53, y: 0.30, z: -0.05, drop: 0.11 },
+    scar:    { w: 0.035, h: 0.34, d: 0.05, x: 0.18, y: 0.42, z: 0.54, tilt: 0.12 },
+    // scaled anisotropically on purpose: the downloaded katana is a realistically
+    // slender blade, and next to a chibi with a head half its body height it read
+    // as a scratch. Fattened across (sx/sz) far more than lengthened (sy) so it
+    // matches the chunky low-poly the rest of the store is built from.
+    katana:  { sx: 4.2, sy: 1.85, sz: 2.4, x: 0.60, y: 0.06, z: 0.02, pitch: -2.25, yaw: 0.25, roll: 0.15, gap: 0.17 },
+  };
+  const KATANA_SAYA = ['#14161a', '#e8e4d8', '#5b3f8c']; // black / white / purple
+  const SAYA_MAT = 'M_PCL_Flat_Black';                   // the scabbard primitive
+
+  // one lift rule for every prop, matching makeHuman's own non-Skin lift
+  function propMat(name, hex, lift = 0.3) {
+    const m = new PBRMaterial(name, scene);
+    m.albedoColor = Color3.FromHexString(hex).toLinearSpace();
+    m.emissiveColor = m.albedoColor.scale(lift);
+    m.metallic = 0;
+    m.roughness = 0.85;
+    return m;
+  }
+
+  // spiky hair: a squashed dome plus a ring of cones leaning outward, merged
+  // into one mesh. The pack has no hairstyle anywhere near this shape, which is
+  // why the base model's own `Hair` material (had it owned one) was never the
+  // answer.
+  function buildZoroHair() {
+    const t = ZORO_TUNE.hair;
+    const dome = MeshBuilder.CreateSphere('zHairDome', { diameter: 1, segments: 8 }, scene);
+    dome.scaling.set(1, 0.8, 1);
+    const parts = [dome];
+    for (let i = 0; i < t.spikes; i++) {
+      const a = (i / t.spikes) * Math.PI * 2;
+      const ring = 0.34 + 0.1 * ((i * 5) % 3); // uneven radius keeps it from reading as a crown
+      const c = MeshBuilder.CreateCylinder('zHairSpike', {
+        height: t.len, diameterBottom: t.thick, diameterTop: 0, tessellation: 5,
+      }, scene);
+      c.rotation.set(Math.sin(a) * t.tilt, 0, -Math.cos(a) * t.tilt);
+      c.position.set(Math.cos(a) * ring, 0.28 + 0.06 * ((i * 7) % 3), Math.sin(a) * ring);
+      parts.push(c);
+    }
+    const hair = Mesh.MergeMeshes(parts, true, true);
+    hair.name = 'zoroHair';
+    return hair;
+  }
+
+  // Everything hangs off two bones. Called AFTER makeHuman has collected u.mats,
+  // and every prop material is pushed into that list, so disposeHuman tears the
+  // props down through the exact same path as the body — no special case, and
+  // no shared material that a dying shopper could dispose out from under the
+  // next one.
+  // A bone's local axes are whatever the rigger left them as — on this pack they
+  // are nowhere near the body's own. Parenting straight to `Head` therefore sent
+  // the earrings and the scar off at an angle while the (symmetric) hair looked
+  // fine, which is a confusing way to fail. Every prop instead hangs off a mount
+  // node whose rotation cancels the bone's bind orientation, so offsets below
+  // read in the body's axes: +x across, +y up, +z forward. It still rides the
+  // bone through every animation — only the frame of reference is borrowed.
+  function boneMount(bone, root) {
+    const n = new TransformNode(bone.name + 'Mount', scene);
+    n.parent = bone;
+    const q = (m) => Quaternion.FromRotationMatrix(m.getRotationMatrix());
+    n.rotationQuaternion = q(root.computeWorldMatrix(true))
+      .multiply(Quaternion.Inverse(q(bone.computeWorldMatrix(true))));
+    return n;
+  }
+
+  function buildZoroProps(root, u) {
+    const bone = (n) => root.getDescendants().find((d) => d.name === n) ?? null;
+    const headBone = bone('Head'), hipsBone = bone('Hips');
+    const head = headBone && boneMount(headBone, root);
+    const hips = hipsBone && boneMount(hipsBone, root);
+    const add = (mesh, parent) => {
+      mesh.parent = parent;
+      mesh.isPickable = false;
+      shadowGen.addShadowCaster(mesh);
+      return mesh;
+    };
+    if (head) {
+      const t = ZORO_TUNE;
+      const hair = buildZoroHair();
+      hair.material = propMat('zoroHair', ZORO_GREEN);
+      hair.scaling.setAll(t.hair.s);
+      hair.position.set(t.hair.x, t.hair.y, t.hair.z);
+      add(hair, head);
+      u.mats.push(hair.material);
+
+      // three hoops, deliberately oversized: at 2.66 units tall a true-to-life
+      // 2cm earring is below what this camera ever resolves
+      const gold = propMat('zoroGold', '#d4a52a', 0.45);
+      for (let i = 0; i < 3; i++) {
+        const e = MeshBuilder.CreateTorus('zoroEarring', {
+          diameter: t.earring.s * 2, thickness: t.earring.s * 0.5, tessellation: 10,
+        }, scene);
+        e.rotation.z = Math.PI / 2;
+        e.position.set(t.earring.x, t.earring.y - i * t.earring.drop, t.earring.z);
+        e.material = gold; // one material for all three hoops
+        add(e, head);
+      }
+      u.mats.push(gold);
+
+      // the scar is PALE, not dark: `Face` is already a dark band, so a dark
+      // line on it would be invisible. A pale streak cutting the eye band reads
+      // as scar and shut eye at once — and stays geometry, because this crowd
+      // is flat-shaded and makeHuman's emissive lift special-cases textures.
+      const scar = MeshBuilder.CreateBox('zoroScar', {
+        width: t.scar.w, height: t.scar.h, depth: t.scar.d,
+      }, scene);
+      // brighter and more lifted than the skin it crosses — the eye band is dark
+      // and the light rig is blue, so a subtle tone difference just disappears
+      scar.material = propMat('zoroScar', '#f7d3bb', 0.45);
+      scar.position.set(t.scar.x, t.scar.y, t.scar.z);
+      scar.rotation.z = t.scar.tilt;
+      add(scar, head);
+      u.mats.push(scar.material);
+    }
+    if (hips && zoroKatana) {
+      const t = ZORO_TUNE.katana;
+      KATANA_SAYA.forEach((hex, i) => {
+        const e = zoroKatana.instantiateModelsToScene((n) => n, true, { doNotInstantiate: true });
+        const pivot = new TransformNode('zoroKatana' + i, scene);
+        e.rootNodes[0].parent = pivot;
+        pivot.parent = hips;
+        pivot.scaling.set(t.sx, t.sy, t.sz);
+        pivot.position.set(t.x, t.y, t.z + i * t.gap);
+        pivot.rotation.set(t.pitch, t.yaw, t.roll);
+        pivot.getChildMeshes().forEach((m) => {
+          m.isPickable = false;
+          shadowGen.addShadowCaster(m);
+          if (!m.material) return;
+          if (m.material.name.includes(SAYA_MAT)) {
+            m.material.albedoColor = Color3.FromHexString(hex).toLinearSpace();
+          }
+          m.material.emissiveColor = (m.material.albedoColor ?? Color3.Black()).scale(0.3);
+          u.mats.push(m.material);
+        });
+      });
+    }
+  }
+
+  const CHAR_PRESETS = {
+    Zoro_Male: { file: 'Kimono_Male', look: ZORO_LOOK, props: buildZoroProps },
+  };
+  let zoroKatana = null; // AssetContainer, loaded with the preset
+  // Every file a preset needs, resolved before anyone wearing it is spawned —
+  // a body whose kit is still in flight walks the floor unarmed and then sprouts
+  // swords mid-aisle.
+  function loadPresetAssets(id) {
+    const preset = CHAR_PRESETS[id];
+    if (!preset) return Promise.resolve();
+    return Promise.all([
+      loadCharContainer(preset.file),
+      loadPropContainer('katana').then((c) => { zoroKatana = c; }),
+    ]);
+  }
+
+  function makeHuman(id) {
+    // an id with no preset IS a file name — the 17 shipped models are untouched
+    const preset = CHAR_PRESETS[id] ?? null;
+    const file = preset?.file ?? id;
     const h = group('human');
-    const u = { ready: false, groups: {}, fist: null, entries: null, look: buildLook(file), mats: null };
+    const u = { ready: false, groups: {}, fist: null, entries: null, look: preset?.look ?? buildLook(file), mats: null };
     h.metadata = u;
     loadCharContainer(file).then((container) => {
       if (h.isDisposed()) return; // removed while still loading
@@ -1409,6 +1614,17 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       });
       u.mats = [...mats];
       entries.animationGroups.forEach((g) => { g.stop(); u.groups[g.name] = g; });
+      // Props go on AFTER u.mats exists (they append their own materials to it,
+      // so disposeHuman frees body and kit through one path) and AFTER the clips
+      // are pinned to a known frame. instantiateModelsToScene starts every
+      // animation group immediately, so building props first measured the bones
+      // mid-stride: boneMount baked a random frame's head rotation into its
+      // correction and the hair sat at a different angle on every spawn.
+      const ref = u.groups.Idle;
+      if (ref) { ref.start(true); ref.goToFrame(0); ref.pause(); }
+      root.computeWorldMatrix(true);
+      preset?.props?.(root, u);
+      if (ref) ref.stop();
       u.fist = root.getDescendants().find((n) => n.name === 'Fist.R' || n.name === 'mixamorig_RightHand') || null;
       u.entries = entries;
       u.ready = true;
