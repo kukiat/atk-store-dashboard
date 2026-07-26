@@ -31,6 +31,9 @@ const UserEntity = t.Object({
   email: t.String({ format: "email" }),
   avatar_url: t.String(), // may be "" → UI falls back to initials chip
   auth_method: AuthMethod,
+  // 3D body override: null = pick from the wardrobe by gender (every user the
+  // external feed produces), a preset id = that named character
+  character: t.Nullable(t.String()),
 });
 
 export const usersModel = new Elysia({ name: "users.model" }).model({
@@ -44,6 +47,7 @@ export const usersModel = new Elysia({ name: "users.model" }).model({
     email: t.Optional(t.String({ format: "email" })),
     avatar_url: t.Optional(t.String()),
     auth_method: t.Optional(AuthMethod),
+    character: t.Optional(t.Nullable(t.String())),
   }),
   // PATCH — every field optional (status moves only via enter/verify/leave/pay)
   "users.update": t.Object({
@@ -52,6 +56,7 @@ export const usersModel = new Elysia({ name: "users.model" }).model({
     email: t.Optional(t.String({ format: "email" })),
     avatar_url: t.Optional(t.String()),
     auth_method: t.Optional(AuthMethod),
+    character: t.Optional(t.Nullable(t.String())),
   }),
   // single body for POST /:id/status — a discriminated union on `action`.
   // enter/leave/walkAway/shelfClose carry no data; verify/pay require a result,

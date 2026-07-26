@@ -117,6 +117,7 @@ class UsersService {
     email?: string;
     avatar_url?: string;
     auth_method?: AuthMethod;
+    character?: string | null;
   }) {
     // land at the entrance queue for a verify verdict, like enter —
     // the scene spawns `added` users holding at the gate, not walking in
@@ -131,6 +132,7 @@ class UsersService {
       email: input.email ?? `user${id}@demo.local`,
       avatar_url: input.avatar_url ?? "",
       auth_method: input.auth_method ?? "google",
+      character: input.character ?? null,
     };
     this.store.set(user.id, user);
     this.emit({ type: "added", user });
@@ -140,7 +142,10 @@ class UsersService {
   update(
     id: number,
     input: Partial<
-      Pick<User, "name" | "gender" | "email" | "avatar_url" | "auth_method">
+      Pick<
+        User,
+        "name" | "gender" | "email" | "avatar_url" | "auth_method" | "character"
+      >
     >,
   ) {
     const user = this.mustFind(id);

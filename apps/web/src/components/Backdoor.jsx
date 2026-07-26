@@ -104,7 +104,16 @@ function Avatar({ user }) {
   );
 }
 
-const EMPTY_EDIT = { name: '', gender: 'male', email: '', avatar_url: '', auth_method: 'google' };
+// Which 3D body walks in. null = the scene's usual wardrobe round-robin; a
+// preset id summons that named character (the scene ignores ids it has no
+// preset for). Identity picks the body here so a costume can never rename a
+// real customer — see CHAR_PRESETS in the scene.
+const CHARACTERS = [
+  { id: null, label: '— default —' },
+  { id: 'Zoro_Male', label: '🗡 Zoro' },
+];
+
+const EMPTY_EDIT = { name: '', gender: 'male', email: '', avatar_url: '', auth_method: 'google', character: null };
 
 let toastSeq = 0;
 
@@ -279,6 +288,7 @@ export default function Backdoor() {
       email: u.email ?? '',
       avatar_url: u.avatar_url ?? '',
       auth_method: u.auth_method ?? 'google',
+      character: u.character ?? null,
     });
     setModalMode('edit');
   }, []);
@@ -304,6 +314,7 @@ export default function Backdoor() {
       const body = { name, gender: ef.gender, auth_method: ef.auth_method };
       if (email) body.email = email;
       if (avatar) body.avatar_url = avatar;
+      if (ef.character) body.character = ef.character; // omitted → API defaults to null
       const okDone = await fire({ method: 'POST', body, ok: `Created ${name}` });
       if (okDone) closeModal();
       return;
@@ -319,6 +330,8 @@ export default function Backdoor() {
     if (email && email !== (editUser.email ?? '')) body.email = email;
     if (avatar !== (editUser.avatar_url ?? '')) body.avatar_url = avatar;
     if (ef.auth_method !== editUser.auth_method) body.auth_method = ef.auth_method;
+    // null is a real value here (back to the wardrobe), so send it explicitly
+    if ((ef.character ?? null) !== (editUser.character ?? null)) body.character = ef.character ?? null;
     if (Object.keys(body).length === 0) {
       closeModal();
       return;
@@ -659,6 +672,21 @@ export default function Backdoor() {
                       onClick={() => setEf((s) => ({ ...s, auth_method: a }))}
                     >
                       {AUTH_META[a].icon} {a}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="bd-field">
+                <span>Character</span>
+                <div className="bd-authpick">
+                  {CHARACTERS.map((c) => (
+                    <button
+                      type="button"
+                      key={c.id ?? 'default'}
+                      className={`bd-gbtn${(ef.character ?? null) === c.id ? ' active' : ''}`}
+                      onClick={() => setEf((s) => ({ ...s, character: c.id }))}
+                    >
+                      {c.label}
                     </button>
                   ))}
                 </div>

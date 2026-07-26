@@ -22,6 +22,12 @@ export type User = {
   email: string;
   avatar_url: string;
   auth_method: AuthMethod;
+  // Which 3D body this customer walks in. null (everyone from the external
+  // feed) means the scene picks from its wardrobe by gender as before; a
+  // preset id like "Zoro_Male" summons a specific named character. Identity
+  // owns the body and not the other way round — the scene must never rewrite
+  // a real customer's name because a wardrobe roll landed on a costume.
+  character: string | null;
 };
 export type UserEvent =
   | { type: "added" | "updated" | "enter"; user: User }

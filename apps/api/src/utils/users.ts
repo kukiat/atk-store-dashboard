@@ -54,6 +54,10 @@ export async function fetchBootRoster(): Promise<User[]> {
       email: u.email,
       avatar_url: u.avatar_url ?? "", // null → "" (UI falls back to initials)
       auth_method: "google", // external only ever shows Google logins
+      // the external feed has no concept of a 3D body, so everyone it sends
+      // takes the wardrobe path; a named character is only ever assigned here
+      // through POST/PATCH (see Backdoor)
+      character: null,
     };
     return [user];
   });

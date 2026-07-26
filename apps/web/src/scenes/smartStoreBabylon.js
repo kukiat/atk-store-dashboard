@@ -1554,13 +1554,17 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const CHAR_PRESETS = {
     Zoro_Male: { file: 'Kimono_Male', look: ZORO_LOOK, props: buildZoroProps },
   };
-  let zoroKatana = null; // AssetContainer, loaded with the preset
-  // Every file a preset needs, resolved before anyone wearing it is spawned —
-  // a body whose kit is still in flight walks the floor unarmed and then sprouts
-  // swords mid-aisle.
-  function loadPresetAssets(id) {
-    const preset = CHAR_PRESETS[id];
-    if (!preset) return Promise.resolve();
+  let zoroKatana = null; // AssetContainer, loaded on demand with the preset
+  // A preset's prop files are part of its body: resolve them alongside the
+  // model so nobody is ever built from a half-arrived kit (buildZoroProps
+  // simply skips the swords if the container is missing, which would put an
+  // unarmed swordsman on the floor with no error anywhere). Everything is
+  // cached, so this is one download for the whole session and a no-op after.
+  // Deliberately NOT part of the boot preload: the roster comes from the
+  // external feed, which has no `character` column, so a named customer only
+  // ever appears through a POST/PATCH long after boot — gating the splash on
+  // files no default boot needs would tax every load for nothing.
+  function loadPresetAssets(preset) {
     return Promise.all([
       loadCharContainer(preset.file),
       loadPropContainer('katana').then((c) => { zoroKatana = c; }),
@@ -1574,7 +1578,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const h = group('human');
     const u = { ready: false, groups: {}, fist: null, entries: null, look: preset?.look ?? buildLook(file), mats: null };
     h.metadata = u;
-    loadCharContainer(file).then((container) => {
+    const ready = preset
+      ? loadPresetAssets(preset).then(([container]) => container)
+      : loadCharContainer(file);
+    ready.then((container) => {
       if (h.isDisposed()) return; // removed while still loading
       // cloneMaterials + doNotInstantiate: instanced meshes silently keep the
       // shared material (assetContainer skips the swap on InstancedMesh), so
@@ -1663,6 +1670,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const identFromUser = (u) => ({
     custNo: String(u.id).padStart(2, '0'), name: u.name,
     female: u.gender === 'female', apiId: u.id,
+    // named-character override: identity picks the body, never the reverse
+    // (see CHAR_PRESETS). null/absent = the usual wardrobe round-robin.
+    character: u.character ?? null,
     // display-only profile fields carried through to the dashboard cards
     avatarUrl: u.avatar_url ?? '', email: u.email ?? '',
   });
@@ -1734,6 +1744,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       initials: initialsOf(ident.name),
       female: ident.female,
       apiId: ident.apiId ?? null, // set for roster/API customers, null for walk-ins
+      character: ident.character ?? null, // preset id; kept so a body swap can honour it
       avatarUrl: ident.avatarUrl ?? '', // '' for walk-ins → card falls back to chip
       email: ident.email ?? '', // '' for walk-ins → card hides the email
       color: cardColor(h.metadata.look.torso),
@@ -2351,6 +2362,15 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const nextCharFile = (female) => (female
     ? FEMALE_FILES[charSeq.female++ % FEMALE_FILES.length]
     : MALE_FILES[charSeq.male++ % MALE_FILES.length]);
+  // The one place a body is chosen. A customer carrying a `character` gets that
+  // preset; everyone else takes the next wardrobe file for their gender. An
+  // unknown preset id falls back rather than trying to load it — a missing
+  // model does not 404 here (Vite answers with the SPA's index.html), so the
+  // body would silently never finish loading and the shopper would stand
+  // invisible on the floor.
+  const bodyFor = (ident) => (ident.character && CHAR_PRESETS[ident.character]
+    ? ident.character
+    : nextCharFile(ident.female));
   const MAX_PEOPLE = 8; // one cap for the whole crowd
   // every person in the store is a shopper: one agent that roams the floor on
   // its own routed itinerary, stopping at shelves for browse sessions (mode
@@ -2589,7 +2609,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   function makeShopper(mode, identOverride, pc = frontPC) {
     const ident = identOverride ?? nextIdentity();
     const persona = rollPersona();
-    const h = makeHuman(nextCharFile(ident.female));
+    // a customer carrying a `character` summons that preset; everyone else
+    // takes the next body off the gender round-robin
+    const h = makeHuman(bodyFor(ident));
     // browse kit, disabled until a shelf visit: a hand-sized item (one of
     // four small-goods shapes — can / bottle / snack bag / packet — re-rolled
     // per gesture by armItem), phone + beam for the QR scan, green access
@@ -2835,8 +2857,16 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     e.initials = initialsOf(u.name);
     e.avatarUrl = u.avatar_url ?? ''; // PATCH reflects live in the cards, like name
     e.email = u.email ?? '';
+    // gender and character both decide which body is on the floor, so either
+    // one changing needs the same swap — PATCHing a customer into (or out of)
+    // a named character reads as an instant costume change
     const female = u.gender === 'female';
-    if (female !== e.female) { e.female = female; respawnBody(p, female); }
+    const character = u.character ?? null;
+    if (female !== e.female || character !== e.character) {
+      e.female = female;
+      e.character = character;
+      respawnBody(p);
+    }
   }
   // abandon any shelf business mid-flight and start roaming from where they
   // stand — used when an API command needs the shopper walkable NOW (body
@@ -3011,11 +3041,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // body swap: keep the sim object and the person entry (custNo, picks, the
   // followed card), replace only the 3D body. Mid-browse swaps first snap the
   // shopper back onto the loop — a pick sequence can't survive losing its arms.
-  function respawnBody(p, female) {
+  function respawnBody(p) {
     const e = p.person;
     snapToRoam(p);
     const old = p.h;
-    const nh = makeHuman(nextCharFile(female));
+    const nh = makeHuman(bodyFor(e)); // e carries the current female/character pair
     nh.parent = world;
     nh.position.copyFrom(old.position);
     nh.rotation.y = old.rotation.y;
