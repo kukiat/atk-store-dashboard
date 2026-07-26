@@ -18,6 +18,29 @@ export type LoadcellStatus = {
   rssi: number;
 };
 
+// End-of-session summary the device publishes on
+// {deviceUuid}/loadcell/main/{sessionSku}/status when the shelf door closes —
+// four topic levels, unlike the three-level heartbeat above, which is how the
+// two are told apart (see ./mqtt.client). Fields are snake_case here because
+// that is how they arrive on the wire; we keep them faithful so a payload
+// captured off the broker lines up with the type. Only `device_id`, `sku`,
+// `status` and `currentQty` are acted on — the rest is kept for logging and
+// documentation of the frame.
+export type ShelfClosedStatus = {
+  uuid: string; // device UUID (also in the topic)
+  sku: string; // product UUID == ShelfSession.sku (also in the topic)
+  device_id: string; // == Shelf.id (external device_id)
+  status: string; // "shelf_closed" — anything else is ignored
+  reason: string; // e.g. "done"
+  started_at: string; // ISO-8601, when the door opened
+  closed_at: string; // ISO-8601, when it closed
+  openingQty: number;
+  currentQty: number; // closing weigh-in — authoritative on-shelf stock
+  pickedOutTotal: number;
+  addedInTotal: number;
+  takenTotal: number; // net taken over the whole session
+};
+
 // Rolling per-session tally the device ships alongside every event.
 export type LoadcellSessionSummary = {
   addedInTotal: number;
@@ -39,7 +62,7 @@ export type LoadcellEvent = {
   deltaQty: number; // signed: negative on a pick, positive on a return
   deltaWeightKg: number;
   deviceId: string; // == Shelf.id (external device_id)
-  event: string; // "item_picked" | "item_returned" | "shelf_close" (hardware closed the shelf)
+  event: string; // "item_picked" | "item_returned"
   grossWeightKg: number;
   itemName: string;
   netWeightKg: number;

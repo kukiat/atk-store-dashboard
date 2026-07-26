@@ -14,11 +14,12 @@ import type {
 //
 // Two mutation entry points only: `open` (scanQR pass, from the users route)
 // and `closeByUser` (from UsersService.endShelfSession, which every browse-exit
-// funnels through). MQTT `shelf_close` and the force-close route don't mutate
+// funnels through). MQTT `shelf_closed` and the force-close route don't mutate
 // here directly — they resolve a device_id / session id to a userId (read) and
 // call the users shelfClose action, which lands back in closeByUser. That keeps
 // removal in one place and the state consistent: a row exists iff its user is
-// browsing.
+// browsing. (One sanctioned exception: if shelfClose rejects the transition the
+// MQTT handler calls closeByUser to drop what is by then a proven orphan row.)
 class SessionsService {
   private store = new Map<string, ShelfSession>();
   private listeners = new Set<(e: SessionEvent) => void>();
@@ -41,11 +42,16 @@ class SessionsService {
     return this.store.get(id);
   }
 
-  // every row currently open at a physical device (matched on device_id, which
-  // is unique per device — unlike sku, which the IoT feed repeats). The MQTT
-  // shelf_close handler reads this to find whose session to close.
-  findByDevice(deviceId: string) {
-    return this.list().filter((s) => s.externalDevice.device_id === deviceId);
+  // every row currently open at a physical device for a given sku. The MQTT
+  // shelf_closed handler reads this (read-only — it closes via the users
+  // shelfClose action) to find whose session the hardware just ended. Matched on
+  // BOTH keys like recordPickReturn: device_id alone is already unique, but a
+  // sku mismatch means the frame doesn't describe the session we think it does,
+  // so we'd rather match nothing than close the wrong row.
+  findByDeviceAndSku(deviceId: string, sku: string) {
+    return this.list().filter(
+      (s) => s.externalDevice.device_id === deviceId && s.sku === sku,
+    );
   }
 
   // scanQR pass: enrich and stash a new session. Idempotent per user — any stale
