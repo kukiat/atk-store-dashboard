@@ -1,5 +1,9 @@
 import mqtt, { type MqttClient } from "mqtt";
-import type { LoadcellEvent, LoadcellStatus } from "./mqtt.types";
+import type {
+  LoadcellEvent,
+  LoadcellStatus,
+  ShelfClosedStatus,
+} from "./mqtt.types";
 // raw service instances (this handler lives outside the Elysia graph). The
 // sessions ledger resolves a device_id → the shopper(s) browsing it; the users
 // service runs the shelfClose action that tears the row down and closes the
@@ -10,13 +14,17 @@ import { usersServiceInstance } from "../modules/users/users.service";
 import { shelfsServiceInstance } from "../modules/shelfs/shelfs.service";
 
 // Live loadcell feed. On API boot we open one MQTT connection and subscribe to
-// two topics:
+// three topics:
 //   {deviceUuid}/loadcell/main/{sessionSku}/event  → +/loadcell/main/+/event
-//       per-pick pick/return + shelf_close events off a shelf
+//       per-pick pick/return events off a shelf
+//   {deviceUuid}/loadcell/main/{sessionSku}/status → +/loadcell/main/+/status
+//       the shelf_closed end-of-session frame (closes the shopper's session)
 //   loadcell/main/{deviceId}/status                → loadcell/main/+/status
 //       device online/offline heartbeat (no leading uuid, no session level)
-// (`+` matches exactly one level.)
+// (`+` matches exactly one level, so the two …/status subscriptions never
+// overlap: the heartbeat is three levels, shelf_closed is four.)
 const EVENT_TOPIC = "+/loadcell/main/+/event";
+const SHELF_CLOSED_TOPIC = "+/loadcell/main/+/status";
 const STATUS_TOPIC = "loadcell/main/+/status";
 
 let client: MqttClient | null = null;
@@ -42,10 +50,16 @@ function connectOptions() {
   };
 }
 
-// Parse and dispatch one raw message, routed by topic (…/status vs …/event). A
-// bad payload is logged and dropped — one malformed frame must not take the
-// listener down.
-function handleMessage(topic: string, payload: Buffer) {
+// Parse and dispatch one raw message. Two different payload shapes arrive on a
+// …/status suffix, so the suffix alone can't route them — we go by topic depth,
+// which the broker guarantees (`+` matches exactly one level):
+//   5 segments ({uuid}/loadcell/main/{sku}/status) → shelf_closed session frame
+//   4 segments (loadcell/main/{deviceId}/status)   → device heartbeat
+// Anything else is an …/event. A bad payload is logged and dropped — one
+// malformed frame must not take the listener down.
+// Exported for the offline harness, which drives it directly instead of
+// standing up a broker.
+export function handleMessage(topic: string, payload: Buffer) {
   let msg: unknown;
   try {
     msg = JSON.parse(payload.toString());
@@ -53,8 +67,16 @@ function handleMessage(topic: string, payload: Buffer) {
     console.error(`[mqtt] bad payload on ${topic}:`, err);
     return;
   }
-  if (topic.endsWith("/status")) onLoadcellStatus(msg as LoadcellStatus);
-  else onLoadcellEvent(msg as LoadcellEvent);
+
+  if (topic.endsWith("/status")) {
+    if (topic.split("/").length === 5) {
+      onShelfClosed(msg as ShelfClosedStatus);
+    } else {
+      onLoadcellStatus(msg as LoadcellStatus);
+    }
+  } else {
+    onLoadcellEvent(msg as LoadcellEvent);
+  }
 }
 
 // Device heartbeat → shelf online state. ShelfsService dedups (a same-state
@@ -66,17 +88,12 @@ function onLoadcellStatus(s: LoadcellStatus) {
 }
 
 // Where a loadcell event lands.
-//   shelf_close   — the hardware closed the shelf: find whoever is browsing this
-//                   device and run their shelfClose (row teardown + scene door +
-//                   user browsing→inside), same as the /sessions/:id force-close.
 //   pick / return — update the basket of the session open at this device+sku and
 //                   emit picked/returned on /sessions/events (scene gesture +
 //                   dashboard cart). No open session → logged and dropped.
+// (Session teardown used to ride this topic as an `event: "shelf_close"`; it now
+// arrives on the four-level …/status topic — see onShelfClosed.)
 function onLoadcellEvent(e: LoadcellEvent) {
-  if (e.event === "shelf_close") {
-    closeSessionsAt(e.deviceId);
-    return;
-  }
   if (e.action === "pick" || e.action === "add") {
     // on-shelf stock is a property of the shelf, not the shopper — update it
     // from currentQty regardless of whether a session is open (dedup + emit
@@ -106,27 +123,47 @@ function recordPickReturn(e: LoadcellEvent) {
   } else {
     console.log(
       `[mqtt] ${e.action} ${e.deviceId} "${e.itemName}" → user(s) ` +
-        rows.map((r) => r.userId).join(","),
+      rows.map((r) => r.userId).join(","),
     );
   }
 }
 
-// Close every open session at a device (0 or 1 in practice). We don't delete
-// rows here — the shelfClose action funnels through endShelfSession, the single
-// removal point. Each call is guarded so one non-browsing shopper (a race where
-// the row is already gone) can't sink the rest.
-function closeSessionsAt(deviceId: string) {
-  const sessions = sessionsServiceInstance.findByDevice(deviceId);
-  if (sessions.length === 0) {
-    console.log(`[mqtt] shelf_close ${deviceId} — no open session`);
+// The hardware closed a shelf door: the end of a browse session. This is now
+// the only path that ends one from the device side.
+//
+// The closing weigh-in is the most trustworthy stock reading we get — more so
+// than the per-pick frames, which can be dropped in flight — so we reconcile the
+// shelf from it first, whether or not a session is open (setStock dedups, so an
+// unchanged qty emits nothing).
+//
+// Then we RESOLVE the session and hand off: findByDeviceAndSku is a read, and
+// UsersService.shelfClose does the row removal itself via endShelfSession. That
+// ordering matters — deleting the row here first would break the ledger's
+// invariant ("a row exists iff its user is browsing") the moment shelfClose
+// rejects the transition.
+function onShelfClosed(s: ShelfClosedStatus) {
+  if (s.status !== "shelf_closed") {
+    console.log(`[mqtt] status "${s.status}" ${s.device_id} — ignored (no handler)`);
     return;
   }
-  for (const s of sessions) {
+  const tag = `shelf_closed ${s.device_id}/${s.sku} (${s.reason}, taken ${s.takenTotal})`;
+  shelfsServiceInstance.setStock(s.device_id, s.sku, s.currentQty);
+
+  const sessions = sessionsServiceInstance.findByDeviceAndSku(s.device_id, s.sku);
+  if (sessions.length === 0) {
+    console.log(`[mqtt] ${tag} — no open session`);
+    return;
+  }
+  for (const row of sessions) {
     try {
-      usersServiceInstance.applyAction(s.userId, { action: "shelfClose" });
-      console.log(`[mqtt] shelf_close ${deviceId} — closed session for user ${s.userId}`);
+      usersServiceInstance.applyAction(row.userId, { action: "shelfClose" });
+      console.log(`[mqtt] ${tag} — closed session for user ${row.userId}`);
     } catch (err) {
-      console.error(`[mqtt] shelf_close ${deviceId} user ${s.userId} failed:`, err);
+      // The user isn't browsing, so shelfClose refused — which means the row was
+      // already an orphan. Dropping it here restores the invariant rather than
+      // breaking it, and is the one place outside endShelfSession allowed to.
+      console.error(`[mqtt] ${tag} user ${row.userId} failed, dropping orphan row:`, err);
+      sessionsServiceInstance.closeByUser(row.userId);
     }
   }
 }
@@ -146,7 +183,7 @@ export function startMqtt(): MqttClient | null {
 
   client.on("connect", () => {
     console.log(`[mqtt] connected to ${url}`);
-    const topics = [EVENT_TOPIC, STATUS_TOPIC];
+    const topics = [EVENT_TOPIC, SHELF_CLOSED_TOPIC, STATUS_TOPIC];
     client!.subscribe(topics, (err) => {
       if (err) console.error(`[mqtt] subscribe failed:`, err);
       else console.log(`[mqtt] subscribed to ${topics.join(", ")}`);
