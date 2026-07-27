@@ -84,3 +84,4 @@ export type LoadcellEvent = {
   unitWeightTolerancePercent: number;
   uuid: string; // device UUID (also in the topic)
 };
+
