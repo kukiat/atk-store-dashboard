@@ -182,7 +182,7 @@ export default function BootSplash({ boot, onRetry }) {
       <div className="boot-grid" aria-hidden="true" />
       <div className="boot-card">
         <h1 className="boot-title">SMART STORE</h1>
-        <p className="boot-sub">digital twin · babylon.js</p>
+        <p className="boot-sub">digital twin</p>
 
         <div className="boot-bar">
           <div className="boot-fill">
