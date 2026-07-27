@@ -155,7 +155,7 @@ export function validateUsers(users) {
 
 // `onProgress` reports boot milestones for the loading splash — semantic only
 // ('built' / 'frame' / 'model'); the dashboard owns the weighting and the %.
-export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelectPerson, onReady, onProgress, onShelfEvent, shelves = [], users = [] } = {}) {
+export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelectPerson, onFollowPerson, onReady, onProgress, onShelfEvent, shelves = [], users = [] } = {}) {
   const ACCENT_HEX = '#35c3ff';
   const ACCENT = Color3.FromHexString(ACCENT_HEX);
   const C3 = (hex) => Color3.FromHexString('#' + hex.toString(16).padStart(6, '0'));
@@ -1085,8 +1085,16 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   function setFloor(i) {
     const show = i === 1;
     setFloor2(show);
+    // same hand-off as selectShelf: Floor 2 takes the camera off Focus mode and
+    // inherits the framing from before the follow, not the shopper close-up.
+    const fh = show ? releaseFollow() : null;
     if (show) {
-      if (!floorHome) floorHome = { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone(), zoom };
+      if (!floorHome) {
+        floorHome = {
+          alpha: camera.alpha, beta: camera.beta, radius: camera.radius,
+          target: fh ? fh.target : camera.target.clone(), zoom: fh ? fh.zoom : zoom,
+        };
+      }
       // keep the user's orbit, lift the aim to mid-building and zoom to frame both
       // storeys. 0.95 crops the outermost wall-top corners slightly (~30px at the
       // default orbit) — chosen deliberately for a tighter, closer look.
@@ -1223,8 +1231,14 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       return;
     }
     if (!zoneById.has(selectedId)) { selectedId = prev; return; } // unknown id — leave the camera alone
+    // shelf focus and Focus mode are exclusive owners of the camera: take it over
+    // directly (no fly home first) and adopt the framing from before the follow.
+    const fh = releaseFollow();
     if (!prev && !homePose) {
-      homePose = { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone(), zoom };
+      homePose = {
+        alpha: camera.alpha, beta: camera.beta, radius: camera.radius,
+        target: fh ? fh.target : camera.target.clone(), zoom: fh ? fh.zoom : zoom,
+      };
     }
     frameOutline(selOutline, zoneById.get(selectedId).unit, 0.5);
     setDim(selectedId);
@@ -1496,6 +1510,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // pass until the in-scene scan beam sweeps that customer through (or their
   // body despawns first). onReveal(true) reveals it, onReveal(false) drops it.
   let flashPending = null;
+  // The bubble lands on the very same head-projection as the person card, so
+  // while one is up for the *selected* shopper the card fades out of the way
+  // (`.muted` — CSS owns the 150ms, this only flips the end state). A pay pass
+  // keeps it muted after the bubble goes: they walk out seconds later, and a
+  // card blinking back for that last stride reads as a glitch. Only an explicit
+  // re-select (or their despawn) brings it back.
+  let cardMuteE = null; // person entry whose card stays muted past its pay bubble
 
   // invisible pick proxy — rides along and is disposed with the person's body
   function makePickCap(personId, h) {
@@ -1534,6 +1555,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       if (e.h !== h) continue;
       persons.delete(id);
       if (hoverPersonId === id) hoverPersonId = null;
+      if (cardMuteE === e) cardMuteE = null;
+      // the body we were following is gone (paid and walked out, or deleted mid
+      // entry-flight): fly home, which doubles as the "the mode ended" signal
+      if (followId === id) followPerson(null);
       if (selectedPersonId === id) { selectedPersonId = null; onSelectPerson?.(null); }
       break;
     }
@@ -1542,8 +1567,66 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // React <-> scene sync (mirror of selectShelf, for people)
   function selectPerson(id) {
     if (id && !persons.has(id)) { onSelectPerson?.(null); return; } // despawned between click and sync
+    cardMuteE = null; // picking a row again is explicit: it beats the pay mute
     selectedPersonId = id || null;
     if (hoverPersonId === selectedPersonId) hoverPersonId = null;
+  }
+
+  // ---------- camera follow ("Focus mode", from the CUSTOMERS row menu) ----------
+  // Pan only: the target chases the shopper while alpha/beta stay exactly where
+  // the user left them, so orbiting mid-follow keeps working (and is how you get
+  // a shelf out of the way when it blocks them). `followHome` therefore records
+  // only what the mode itself changed — target + zoom — and the fly-back restores
+  // just those, leaving any manual orbit the user did during the mode intact.
+  // Deliberately separate from selectShelf's `homePose` and setFloor's
+  // `floorHome`: the three modes are exclusive but can hand the camera straight
+  // to one another, and a shared slot would blend their poses.
+  const FOLLOW_ZOOM = 1.8;   // one nudge in on entry; the wheel owns zoom afterwards
+  const FOLLOW_Y = 1.5;      // chest height, fixed — never bobs with the walk cycle
+  const FOLLOW_LERP = 4;     // exponential chase; filters the ±0.3 walk weave out
+  let followId = null;
+  let followHome = null;     // { target, zoom } — framing from before the mode
+  const _followGoal = new Vector3();
+
+  function followTargetOf(e) {
+    return new Vector3(e.h.position.x, FOLLOW_Y, e.h.position.z);
+  }
+
+  // Hand the camera over without flying anywhere, and report the pre-follow
+  // framing so the next owner can adopt it as *its* home. Without this, focusing
+  // a shelf mid-follow would save the close-up-on-a-shopper pose as "home" and
+  // clearing that shelf later would fly back to a spot in the middle of an aisle.
+  function releaseFollow() {
+    if (followId == null) return null;
+    followId = null;
+    const home = followHome;
+    followHome = null;
+    onFollowPerson?.(null);
+    return home;
+  }
+
+  function followPerson(id) {
+    if (id == null) {
+      const home = releaseFollow();
+      if (home) flyTo({ alpha: camera.alpha, beta: camera.beta, radius: camera.radius, ...home });
+      return;
+    }
+    const e = persons.get(id);
+    if (!e) { onFollowPerson?.(null); return; } // despawned between menu click and sync
+    if (followId === id) return;
+    // A flight already in progress (shelf focus flying home, Floor 2 collapsing)
+    // means the camera is mid-air — its destination, not its current pose, is the
+    // framing this mode is borrowing and must give back.
+    if (followHome == null) {
+      followHome = fly.active
+        ? { target: fly.toTarget.clone(), zoom: fly.toZoom }
+        : { target: camera.target.clone(), zoom };
+    }
+    followId = id;
+    flyTo({
+      alpha: camera.alpha, beta: camera.beta, radius: camera.radius,
+      target: followTargetOf(e), zoom: FOLLOW_ZOOM,
+    });
   }
 
   function getPersonData(id) {
@@ -1604,10 +1687,14 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   }
   // the gate sweep just cleared this shopper (green flash / ID or paid tag) — if
   // a flash was armed for them, reveal it now and start React's 3s clock.
-  function notifyScanPass(p) {
+  // `kind` comes from the call site (entry gate vs exit fare-gate) rather than
+  // from React — the scene already knows which sweep it is, so the pay/verify
+  // distinction the card mute needs costs nothing to plumb.
+  function notifyScanPass(p, kind) {
     const id = p?.person?.apiId;
     if (id == null || !flashPending || flashPending.apiId !== id) return;
     flashApiId = id;
+    if (kind === 'pay') cardMuteE = p.person; // stays muted until despawn / re-select
     const cb = flashPending.onReveal; flashPending = null;
     cb?.(true);
   }
@@ -4315,7 +4402,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
           gate.flash = 1.4;
           showPaidTag();
           exitReticle.succeed();
-          notifyScanPass(u); // reveal an armed pay-pass bubble now
+          notifyScanPass(u, 'pay'); // reveal an armed pay-pass bubble now
         }
       } else {
         gateBeam.isVisible = false;
@@ -4370,7 +4457,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
             entryGate.flash = 1.4;
             showIdTag();
             entryReticle.succeed();
-            notifyScanPass(u); // reveal an armed verify-pass bubble now
+            notifyScanPass(u, 'verify'); // reveal an armed verify-pass bubble now
           }
         }
       } else {
@@ -4692,6 +4779,14 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
         const y = Scalar.Clamp(_cardScreen.y * hw, ch + 18, Math.max(ch + 18, H - 10));
         cardEl.style.transform = `translate(${x}px, ${y}px) translate(-50%, -100%) translateY(-10px)`;
         cardEl.style.visibility = 'visible';
+        // fade out while this shopper's own verify/pay bubble occupies the same
+        // spot above their head — className is a constant in the JSX, so React
+        // never rewrites the attribute and the class survives its re-renders
+        // (same assumption the transform/visibility writes above already make).
+        cardEl.classList.toggle(
+          'muted',
+          (flashApiId != null && selE.apiId === flashApiId) || cardMuteE === selE,
+        );
       } else if (cardEl) {
         cardEl.style.visibility = 'hidden';
       }
@@ -4748,6 +4843,17 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       }
     } else {
       zoom += (zoomTarget - zoom) * Math.min(1, dt * 9);
+    }
+
+    // Focus mode chase — after the fly tween on purpose: the entry flight owns
+    // the target until it lands, and whatever ground they covered during those
+    // 0.9s is then closed by this lerp (reads as a camera catching up).
+    if (followId != null && !fly.active) {
+      const e = persons.get(followId);
+      if (e) {
+        _followGoal.set(e.h.position.x, FOLLOW_Y, e.h.position.z);
+        Vector3.LerpToRef(camera.target, _followGoal, Math.min(1, dt * FOLLOW_LERP), camera.target);
+      }
     }
 
     // Floor-2 cross-fade
@@ -4852,6 +4958,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       // person selection: React pushes the id in, polls live card data out,
       // and hands over the card element for the per-frame follow transform.
       select: selectPerson,
+      // Focus mode: camera pans along with them until something takes the camera
+      // back (follow(null), a shelf/floor hand-off, or they despawn)
+      follow: followPerson,
+      followed: () => followId,
       get: getPersonData,
       list: () => [...persons.keys()].map(getPersonData),
       bindCard,
@@ -4894,6 +5004,16 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       goal: p.mv ? { kind: p.mv.kind ?? 'shelf', x: +p.mv.wps[p.mv.wps.length - 1].x.toFixed(2), z: +p.mv.wps[p.mv.wps.length - 1].z.toFixed(2), legs: p.mv.wps.length } : null,
       speed: +(p.cur ?? 0).toFixed(3), exit: p.exit,
     })),
+    // who currently owns the camera, and what each owner promised to give back.
+    // Three exclusive modes hand it to each other (shelf focus / Floor 2 / Focus
+    // mode), so "which home is armed" is the first thing to ask when a fly-back
+    // goes to the wrong place.
+    camera: () => ({
+      selectedShelf: selectedId, followId, flying: fly.active,
+      homePose: homePose && { t: homePose.target.asArray().map((v) => +v.toFixed(2)), zoom: +homePose.zoom.toFixed(2) },
+      floorHome: floorHome && { t: floorHome.target.asArray().map((v) => +v.toFixed(2)), zoom: +floorHome.zoom.toFixed(2) },
+      followHome: followHome && { t: followHome.target.asArray().map((v) => +v.toFixed(2)), zoom: +followHome.zoom.toFixed(2) },
+    }),
     navFree: (x, z) => navFree(x, z),
     // route probes: a stand point sits inside an inflated shelf footprint, so
     // "can a shopper actually walk back out of one" is worth being able to ask

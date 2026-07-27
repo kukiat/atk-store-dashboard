@@ -293,7 +293,14 @@ canvas { display: block; }
   visibility: hidden;            /* revealed by the scene on the first tracked frame */
   will-change: transform;
   pointer-events: none;          /* don't block orbit drags around the card */
+  transition: opacity .15s linear;
 }
+/* the verify/pay bubble owns this exact spot above the head while it is up —
+   the scene toggles `.muted` for the shopper it belongs to (see the card block
+   in the render loop). Faded out means untouchable too, or the invisible ✕
+   still swallows clicks. */
+.person-card-track.muted { opacity: 0; }
+.person-card-track.muted .person-card { pointer-events: none; }
 .person-card-track .person-card {
   position: static;              /* the track carries the position, not the card */
   width: 196px; padding: 11px 12px 12px;
@@ -434,7 +441,7 @@ canvas { display: block; }
 .dash-body.right-collapsed .sb-toggle-right { right: 0; }
 
 @media (prefers-reduced-motion: reduce) {
-  .col-left, .col-right, .sb-toggle, .store-detail-card, .floor-ctrl { transition: none; }
+  .col-left, .col-right, .sb-toggle, .store-detail-card, .floor-ctrl, .follow-chip { transition: none; }
 }
 
 /* cards */
@@ -504,6 +511,23 @@ canvas { display: block; }
 .cust-pill.paying { background: rgba(55,194,201,.15); color: #37c2c9; }
 .cust-pill.leaving { background: rgba(239,178,58,.15); color: #efb23a; }
 .cust-pill.exited { background: rgba(111,134,184,.16); color: #8ea0c4; } /* muted slate — not in store */
+/* Focus mode: the followed row keeps the `active` selection styling (a follow
+   always selects) and adds a warmer rail so it reads as more than just picked */
+.cust-row.following { border-left-color: #f5b74e; background: rgba(245,183,78,.10); }
+.cust-follow { flex: none; font-size: 10px; line-height: 1; }
+/* pointer-anchored row menu — portalled to <body>, see the tooltip above */
+.cust-menu {
+  position: fixed; z-index: 70; min-width: 168px; padding: 4px;
+  border-radius: 8px; background: #0b1730; border: 1px solid #2a4c86;
+  box-shadow: 0 10px 28px rgba(0,0,0,.5);
+  animation: detail-in .12s ease-out;
+}
+.cust-menu-item {
+  display: block; width: 100%; text-align: left; padding: 7px 10px;
+  border: none; border-radius: 6px; background: none;
+  color: #eaf6ff; font-size: 12px; cursor: pointer;
+}
+.cust-menu-item:hover { background: rgba(53,195,255,.14); color: #fff; }
 
 /* environment */
 .env-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 12px; }
@@ -524,6 +548,29 @@ canvas { display: block; }
   pointer-events: none;
 }
 .floor-ctrl > * { pointer-events: auto; }
+
+/* Focus mode banner — top-center of the stage, panel-aware like .floor-ctrl.
+   Carries the ✕ because it is the only exit left once both panels collapse. */
+.follow-chip {
+  position: absolute; left: 0; right: 0; top: 14px; z-index: 20;
+  margin: 0 auto; width: max-content;
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 6px 5px 12px; border-radius: 999px;
+  background: rgba(9,16,33,.86); border: 1px solid #2a4c86;
+  backdrop-filter: blur(8px); box-shadow: 0 8px 24px rgba(0,0,0,.45);
+  transition: left .25s ease, right .25s ease;
+  animation: detail-in .14s ease-out;
+}
+.dash-body:not(.left-collapsed)  .follow-chip { left: 312px; }
+.dash-body:not(.right-collapsed) .follow-chip { right: 342px; }
+.fchip-eye { font-size: 12px; line-height: 1; }
+.fchip-label { font-size: 10px; letter-spacing: .12em; color: #6f86b8; text-transform: uppercase; }
+.fchip-name { font-size: 12px; color: #f5b74e; font-weight: 600; }
+.fchip-close {
+  border: none; background: none; cursor: pointer; color: #9fb6e6;
+  font-size: 11px; line-height: 1; padding: 5px 7px; border-radius: 999px;
+}
+.fchip-close:hover { color: #eaf6ff; background: rgba(53,195,255,.14); }
 .fc-label { font-size: 11px; letter-spacing: .14em; color: #6f86b8; }
 .seg, .floors {
   display: flex; gap: 4px; padding: 4px; border-radius: 999px;

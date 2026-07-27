@@ -141,7 +141,7 @@ const BOTTOM = [
 // `sceneFactory(container, { onSelectShelf }) => { dispose, selectShelf }` lets
 // V4 (Three.js) and V5 (Babylon.js) share the exact same dashboard chrome —
 // only the engine driving the center stage differs.
-function StoreStage({ selectedShelf, selectedPerson, onSelectShelf, onSelectPerson, onShelfEvent, sceneFactory, onController, defer = false, onReady, onProgress, shelves, users }) {
+function StoreStage({ selectedShelf, selectedPerson, onSelectShelf, onSelectPerson, onFollowPerson, onShelfEvent, sceneFactory, onController, defer = false, onReady, onProgress, shelves, users }) {
   const ref = useRef(null);
   const ctrlRef = useRef(null);
 
@@ -152,7 +152,7 @@ function StoreStage({ selectedShelf, selectedPerson, onSelectShelf, onSelectPers
     const create = () => {
       if (controller) return; // double-rAF and the timeout fallback can race
       controller = { dispose() {}, selectShelf() {} };
-      try { controller = sceneFactory(container, { onSelectShelf, onSelectPerson, onReady, onProgress, onShelfEvent, shelves, users }); }
+      try { controller = sceneFactory(container, { onSelectShelf, onSelectPerson, onFollowPerson, onReady, onProgress, onShelfEvent, shelves, users }); }
       catch (e) { console.error('[storeStage] scene factory failed:', e); onReady?.(); }
       ctrlRef.current = controller;
       onController?.(controller);
@@ -188,7 +188,7 @@ function StoreStage({ selectedShelf, selectedPerson, onSelectShelf, onSelectPers
       controller?.dispose(); ctrlRef.current = null; onController?.(null);
     };
     // created once; selection flows in via the sync effects below.
-  }, [onSelectShelf, onSelectPerson, onShelfEvent, sceneFactory, onController, defer, onReady, onProgress, shelves, users]);
+  }, [onSelectShelf, onSelectPerson, onFollowPerson, onShelfEvent, sceneFactory, onController, defer, onReady, onProgress, shelves, users]);
 
   // React owns the selection — push it into the scene to drive the outline.
   useEffect(() => {
@@ -336,10 +336,46 @@ const custInitials = (name) => {
 // muted slate for the exited-row avatar chip fallback (no torso tint to borrow)
 const EXITED_CHIP = '#3d4a63';
 
-function CustomersCard({ peopleRef, crowd, outsideUsers, selectedPerson, onSelect, shelfName }) {
+function CustomersCard({ peopleRef, crowd, outsideUsers, selectedPerson, onSelect, followedPerson, onFollow, shelfName }) {
   const [list, setList] = useState([]);
   const ulRef = useRef(null);
   const flipState = useRef(null);
+
+  // right-click menu — Focus mode's only entry point. Anchored to the pointer
+  // and portalled out, not mounted inside the row: the list re-sorts every
+  // second with a FLIP animation, so a row-anchored menu would slide away
+  // mid-aim. Exited rows have no 3D body to follow and keep the native menu.
+  const [menu, setMenu] = useState(null); // { id, x, y } | null
+  const closeMenu = useCallback(() => setMenu(null), []);
+  const openMenu = useCallback((id, e) => {
+    e.preventDefault();
+    // keep it on screen when the row sits near the bottom edge (menu ≈ 46px tall)
+    setMenu({
+      id,
+      x: Math.min(e.clientX, window.innerWidth - 184),
+      y: Math.min(e.clientY, window.innerHeight - 58),
+    });
+  }, []);
+  useEffect(() => {
+    if (!menu) return;
+    const onKey = (e) => { if (e.key === 'Escape') closeMenu(); };
+    // capture, so a scroll inside the list (which doesn't bubble) still closes it
+    window.addEventListener('pointerdown', closeMenu);
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', closeMenu, true);
+    window.addEventListener('resize', closeMenu);
+    return () => {
+      window.removeEventListener('pointerdown', closeMenu);
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', closeMenu, true);
+      window.removeEventListener('resize', closeMenu);
+    };
+  }, [menu, closeMenu]);
+  // they can despawn while the menu sits open — don't leave a menu pointing at
+  // a shopper who has already walked out
+  useEffect(() => {
+    if (menu && !list.some((p) => p.id === menu.id)) closeMenu();
+  }, [list, menu, closeMenu]);
 
   // email tooltip — a single fixed-position node placed on hover of a name, so
   // it escapes the list's overflow-y:auto clipping (only API customers carry an
@@ -416,8 +452,9 @@ function CustomersCard({ peopleRef, crowd, outsideUsers, selectedPerson, onSelec
               <li
                 key={p.id}
                 data-flip-id={`cust-${p.id}`}
-                className={`cust-row${selectedPerson === p.id ? ' active' : ''}`}
+                className={`cust-row${selectedPerson === p.id ? ' active' : ''}${followedPerson === p.id ? ' following' : ''}`}
                 onClick={() => onSelect(p.id)}
+                onContextMenu={(e) => openMenu(p.id, e)}
               >
                 <PersonAvatar key={p.avatarUrl || 'chip'} person={p} className="cust-avatar" />
                 <div className="cust-main">
@@ -429,6 +466,7 @@ function CustomersCard({ peopleRef, crowd, outsideUsers, selectedPerson, onSelec
                     >
                       {p.name}
                     </span>
+                    {followedPerson === p.id && <span className="cust-follow" title="Camera is following">🎥</span>}
                     <span className={`cust-tag ${p.api ? 'api' : 'random'}`}>{p.api ? 'API' : 'AUTO'}</span>
                     <span className={`cust-pill ${p.status}`}>{PERSON_STATUS[p.status]}</span>
                   </div>
@@ -469,6 +507,28 @@ function CustomersCard({ peopleRef, crowd, outsideUsers, selectedPerson, onSelec
             // otherwise become its containing block)
             <div className="cust-email-tip" role="tooltip" style={{ left: tip.x, top: tip.y }}>
               {tip.email}
+            </div>,
+            document.body,
+          )
+        : null}
+      {menu
+        ? createPortal(
+            // same portal reasoning as the tooltip. onPointerDown stops the
+            // window-level dismissal from firing before the click lands.
+            <div
+              className="cust-menu"
+              role="menu"
+              style={{ left: menu.x, top: menu.y }}
+              onPointerDown={(e) => e.stopPropagation()}
+              onContextMenu={(e) => e.preventDefault()}
+            >
+              <button
+                className="cust-menu-item"
+                role="menuitem"
+                onClick={() => { onFollow(menu.id); closeMenu(); }}
+              >
+                🎥 {followedPerson === menu.id ? 'Exit focus mode' : 'Focus mode'}
+              </button>
             </div>,
             document.body,
           )
@@ -799,6 +859,39 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     setSelectedPerson((prev) => (prev === id ? null : id));
   }, []);
 
+  // ---- Focus mode: the camera pans along with one shopper until something
+  // takes the camera back. Selection and follow are deliberately different
+  // things — a left-click on a row only selects; only the row's right-click
+  // menu starts a follow — but a follow always implies a selection, which is
+  // where the pulsing ring and the floating card come from for free.
+  const [followedPerson, setFollowedPerson] = useState(null);
+  const toggleFollow = useCallback((id) => {
+    setFollowedPerson((prev) => {
+      const next = prev === id ? null : id;
+      if (next != null) {
+        setSelectedShelf(null); // exclusive camera owners (scene enforces it too)
+        setSelectedPerson(next);
+        setFloor(0);            // a Floor-2 deck would sit right on top of them
+      }
+      return next;
+    });
+  }, []);
+  // The mode can't outlive its selection: Esc, a click on empty floor, picking
+  // another row, focusing a shelf and the despawn watchdog all clear
+  // `selectedPerson`, so this one rule covers every exit the scene doesn't own.
+  useEffect(() => {
+    if (followedPerson != null && selectedPerson !== followedPerson) setFollowedPerson(null);
+  }, [selectedPerson, followedPerson]);
+  // scene-side exits (it despawned them, or a shelf/floor hand-off took over)
+  const handleFollowPerson = useCallback((id) => { setFollowedPerson(id ?? null); }, []);
+  // Pushed into the scene LAST on purpose. One commit can move the camera three
+  // times (shelf focus clearing, Floor 2 collapsing, then this) through a single
+  // shared fly tween — going last lets the follow read the others' flight
+  // *destination* as the framing it must give back, instead of a mid-air pose.
+  // Effects run in declaration order, and this sits below the floor sync above;
+  // putting it in StoreStage would run it first, since child effects go first.
+  useEffect(() => { peopleRef.current?.follow?.(followedPerson); }, [followedPerson]);
+
   // live data for the followed person's card. Position never touches React —
   // the scene writes the wrapper's transform per frame; only text goes through
   // state, polled at 2 Hz. get() returning null means they despawned → close.
@@ -890,6 +983,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   }, []);
 
   // Esc closes the inspector (mirrors the ✕ / click-empty / click-again paths).
+  // Clearing the person also ends Focus mode, via the effect that ties the two.
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') { setSelectedShelf(null); setSelectedPerson(null); } };
     window.addEventListener('keydown', onKey);
@@ -988,6 +1082,8 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
               outsideUsers={outsideUsers}
               selectedPerson={selectedPerson}
               onSelect={handleSelectPersonFromList}
+              followedPerson={followedPerson}
+              onFollow={toggleFollow}
               shelfName={shelfName}
             />
           )}
@@ -1019,6 +1115,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
             selectedPerson={selectedPerson}
             onSelectShelf={handleSelectShelf}
             onSelectPerson={handleSelectPerson}
+            onFollowPerson={handleFollowPerson}
             onShelfEvent={handleShelfEvent}
             sceneFactory={sceneFactory}
             onController={handleController}
@@ -1054,6 +1151,21 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
                   <span className="verify-flash-ok">{verifyFlash.label}</span>
                 </div>
               </div>
+            </div>
+          )}
+          {/* Focus mode banner — the only exit that survives both panels being
+              collapsed, which is exactly what someone watching a followed
+              shopper full-bleed will do. Top-center clears both floating panels. */}
+          {followedPerson != null && personData && (
+            <div className="follow-chip">
+              <span className="fchip-eye">🎥</span>
+              <span className="fchip-label">Following</span>
+              <b className="fchip-name">{personData.name}</b>
+              <button
+                className="fchip-close"
+                onClick={() => setFollowedPerson(null)}
+                title="Exit focus mode (Esc)"
+              >✕</button>
             </div>
           )}
           <div className="floor-ctrl">
