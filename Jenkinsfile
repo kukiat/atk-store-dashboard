@@ -41,7 +41,7 @@ pipeline {
   environment {
     // Separate from legacy bunchax/atk-store (atk.hexdas.cloud :3000)
     WEB_IMAGE = 'bunchax/atk-store-dashboard'
-    API_IMAGE = 'bunchax/atk-store-api'
+    API_IMAGE = 'bunchax/atk-store-dashboard-api'
   }
 
   stages {

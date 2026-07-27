@@ -34,9 +34,9 @@
       - proxy
 
   atk-store-dashboard-api:
-    image: bunchax/atk-store-api:latest
+    image: bunchax/atk-store-dashboard-api:latest
     platform: linux/amd64
-    container_name: atk-store-api
+    container_name: atk-store-dashboard-api
     restart: always
     env_file:
       - ./.env
