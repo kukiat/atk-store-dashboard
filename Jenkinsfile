@@ -1,10 +1,10 @@
 // atk-store-dashboard — Jenkins job: https://jenkins.hexdas.cloud/job/atk-store-dashboard/
 // Script Path (default): Jenkinsfile
 //
-// Deploys the same stack that already runs on the host as:
-//   atk-store      → web  (Host: atk-dashboard.hexdas.cloud)
-//   atk-store-api  → api  (PathPrefix on the same host)
-// Compose path: /docker/hexdas/atk  (alongside atk-store-mqtt / shelfbox)
+// Deploys only the dashboard pair (does NOT touch atk-store / mqtt / shelfbox):
+//   atk-store-dashboard      → web  (Host: atk-dashboard.hexdas.cloud)
+//   atk-store-dashboard-api  → api  (PathPrefix on atk-dashboard + atk hosts)
+// Compose path: /docker/hexdas/atk
 //
 // Agent is linux/amd64 — uses plain `docker build` / `docker push` (no buildx required).
 // Jenkins อยู่เครื่องเดียวกับ deploy → default DEPLOY_MODE=local (ไม่ต้อง SSH)
@@ -23,7 +23,7 @@ pipeline {
   }
 
   parameters {
-    choice(name: 'TARGET', choices: ['all', 'web', 'api'], description: 'What to build & deploy (web=atk-store, api=atk-store-api)')
+    choice(name: 'TARGET', choices: ['all', 'web', 'api'], description: 'What to build & deploy (web=atk-store-dashboard, api=atk-store-dashboard-api)')
     string(name: 'IMAGE_TAG', defaultValue: 'latest', description: 'Docker image tag')
     string(
       name: 'VITE_API_URL',
@@ -39,9 +39,9 @@ pipeline {
   }
 
   environment {
-    // Replaces armdocker123/atk-store once compose image lines are updated
-    WEB_IMAGE = 'bunchax/atk-store'
-    API_IMAGE = 'bunchax/atk-store-api'
+    // Separate from legacy bunchax/atk-store (atk.hexdas.cloud :3000)
+    WEB_IMAGE = 'bunchax/atk-store-dashboard'
+    API_IMAGE = 'bunchax/atk-store-dashboard-api'
   }
 
   stages {
@@ -167,8 +167,8 @@ Then leave DOCKERHUB_CRED_ID = dockerhub-creds'''
         script {
           // Must match service names in /docker/hexdas/atk docker-compose
           def services = []
-          if (targetIncludes('web')) { services << 'atk-store' }
-          if (targetIncludes('api'))  { services << 'atk-store-api' }
+          if (targetIncludes('web')) { services << 'atk-store-dashboard' }
+          if (targetIncludes('api'))  { services << 'atk-store-dashboard-api' }
           def svc = services.join(' ')
           if (!svc) {
             error 'No compose services selected for TARGET'
@@ -203,8 +203,8 @@ FAILED — common causes:
   2) Credential ID mismatch (DOCKERHUB_CRED_ID)
   3) Agent missing docker / permission to docker.sock
   4) DEPLOY_MODE=local: host must have DEPLOY_PATH and env files used by compose
-  5) Compose still points at armdocker123/* — update image lines to bunchax/atk-store*
-  6) Deploy without --no-deps can fail if a depends_on healthcheck (e.g. atk-animation-seed) is unhealthy
+  5) Compose service names must be atk-store-dashboard + atk-store-dashboard-api
+  6) Deploy uses --no-deps so atk-animation-seed / shelfbox are not restarted
 '''
     }
   }

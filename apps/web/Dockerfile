@@ -1,9 +1,9 @@
 # Build from the monorepo root:
-#   docker build -f apps/web/Dockerfile -t bunchax/atk-store \
+#   docker build -f apps/web/Dockerfile -t bunchax/atk-store-dashboard \
 #     --build-arg VITE_API_URL=https://atk-dashboard.hexdas.cloud .
 #
 # Run:
-#   docker run -p 8080:80 bunchax/atk-store
+#   docker run -p 8080:80 bunchax/atk-store-dashboard
 
 FROM oven/bun:1 AS build
 WORKDIR /app

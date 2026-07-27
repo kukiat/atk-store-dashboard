@@ -1,8 +1,8 @@
 # Build from the monorepo root:
-#   docker build -f apps/api/Dockerfile -t bunchax/atk-store-api .
+#   docker build -f apps/api/Dockerfile -t bunchax/atk-store-dashboard-api .
 #
 # Run:
-#   docker run --env-file apps/api/.env -p 3004:3004 bunchax/atk-store-api
+#   docker run --env-file apps/api/.env -p 3004:3004 bunchax/atk-store-dashboard-api
 
 FROM oven/bun:1 AS build
 WORKDIR /app

@@ -1,11 +1,15 @@
-# Paste / replace services in /docker/hexdas/atk compose.
-# Host: atk-dashboard.hexdas.cloud
-# `atk-store-mqtt` stays as-is (separate image / pipeline).
+# Dashboard stack only (used by this repo's Jenkins deploy):
+#   atk-store-dashboard
+#   atk-store-dashboard-api
+#   atk-animation-seed   ← dependency of api; Jenkins uses --no-deps so it is not recreated
+#
+# Do NOT touch sibling services in the same compose file:
+#   atk-store / atk-store-mqtt / shelfbox / shelfbox-backend
 
-  atk-store:
-    image: bunchax/atk-store:latest
+  atk-store-dashboard:
+    image: bunchax/atk-store-dashboard:latest
+    container_name: atk-store-dashboard
     platform: linux/amd64
-    container_name: atk-store
     restart: always
     ports:
       - "3001:80"
@@ -17,25 +21,54 @@
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=hexdas_proxy"
-      - "traefik.http.routers.atk-store.rule=Host(`atk-dashboard.hexdas.cloud`)"
-      - "traefik.http.routers.atk-store.entrypoints=websecure"
-      - "traefik.http.routers.atk-store.tls=true"
-      - "traefik.http.routers.atk-store.tls.certresolver=mytlschallenge"
-      - "traefik.http.services.atk-store-svc.loadbalancer.server.port=80"
-      - "traefik.http.services.atk-store-svc.loadbalancer.server.scheme=http"
+      - "traefik.http.routers.atk-dashboard.rule=Host(`atk-dashboard.hexdas.cloud`)"
+      - "traefik.http.routers.atk-dashboard.entrypoints=websecure"
+      - "traefik.http.routers.atk-dashboard.tls=true"
+      - "traefik.http.routers.atk-dashboard.tls.certresolver=mytlschallenge"
+      - "traefik.http.routers.atk-dashboard.service=atk-dashboard-svc"
+      - "traefik.http.services.atk-dashboard-svc.loadbalancer.server.port=80"
+      - "traefik.http.services.atk-dashboard-svc.loadbalancer.server.scheme=http"
     depends_on:
-      - atk-store-api
+      - atk-store-dashboard-api
     networks:
       - proxy
 
-  atk-store-api:
-    image: bunchax/atk-store-api:latest
+  atk-animation-seed:
+    image: python:3.12-alpine
     platform: linux/amd64
-    container_name: atk-store-api
+    container_name: atk-animation-seed
+    restart: always
+    environment:
+      PORT: "8099"
+      ANIMATION_USERS_SRC: https://atk-store-dashboardapi-production.up.railway.app/users
+    volumes:
+      - ./animation-seed/server.py:/app/server.py:ro
+    command: ["python", "/app/server.py"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8099/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 3s
+    networks:
+      - proxy
+
+  atk-store-dashboard-api:
+    image: bunchax/atk-store-dashboard-api:latest
+    platform: linux/amd64
+    container_name: atk-store-dashboard-api
     restart: always
     env_file:
       - ./.env
       - /root/atk-store-secrets/aws.env
+    environment:
+      IOT_API_URL: http://shelfbox-backend:8081/api/v1
+      ATK_STORE_API_URL: http://atk-animation-seed:8099
+      MQTT_URL: ${MQTT_URL:-mqtt://rabbitmq:1883}
+      MQTT_CONNECT_USE_TLS: ${MQTT_CONNECT_USE_TLS:-false}
+    depends_on:
+      atk-animation-seed:
+        condition: service_healthy
     ports:
       - "3004:3004"
     extra_hosts:
@@ -46,13 +79,13 @@
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=hexdas_proxy"
-      - "traefik.http.routers.atk-store-api.rule=Host(`atk-dashboard.hexdas.cloud`) && (PathPrefix(`/users`) || PathPrefix(`/shelfs`) || PathPrefix(`/sessions`) || PathPrefix(`/crowd`) || PathPrefix(`/groups`) || PathPrefix(`/swagger`) || Path(`/health-check`))"
-      - "traefik.http.routers.atk-store-api.entrypoints=websecure"
-      - "traefik.http.routers.atk-store-api.tls=true"
-      - "traefik.http.routers.atk-store-api.tls.certresolver=mytlschallenge"
-      - "traefik.http.routers.atk-store-api.priority=100"
-      - "traefik.http.routers.atk-store-api.service=atk-store-api-svc"
-      - "traefik.http.services.atk-store-api-svc.loadbalancer.server.port=3004"
-      - "traefik.http.services.atk-store-api-svc.loadbalancer.server.scheme=http"
+      - "traefik.http.routers.atk-store-dashboard-api.rule=(Host(`atk.hexdas.cloud`) || Host(`atk-dashboard.hexdas.cloud`)) && (PathPrefix(`/users`) || PathPrefix(`/shelfs`) || PathPrefix(`/sessions`) || PathPrefix(`/crowd`) || PathPrefix(`/groups`) || PathPrefix(`/swagger`) || Path(`/health-check`))"
+      - "traefik.http.routers.atk-store-dashboard-api.entrypoints=websecure"
+      - "traefik.http.routers.atk-store-dashboard-api.tls=true"
+      - "traefik.http.routers.atk-store-dashboard-api.tls.certresolver=mytlschallenge"
+      - "traefik.http.routers.atk-store-dashboard-api.priority=100"
+      - "traefik.http.routers.atk-store-dashboard-api.service=atk-store-dashboard-api-svc"
+      - "traefik.http.services.atk-store-dashboard-api-svc.loadbalancer.server.port=3004"
+      - "traefik.http.services.atk-store-dashboard-api-svc.loadbalancer.server.scheme=http"
     networks:
       - proxy
