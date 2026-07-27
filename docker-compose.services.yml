@@ -1,14 +1,17 @@
-# Paste / replace services in /docker/hexdas/atk compose.
+# Paste BOTH services into /docker/hexdas/atk compose.
+# Error if only web is present:
+#   service "atk-store-dashboard" depends on undefined service "atk-store-api"
+#
 # Host: atk-dashboard.hexdas.cloud
-# `atk-store-mqtt` stays as-is (separate image / pipeline).
+# Keep existing `atk-store` (armdocker123 / atk.hexdas.cloud) untouched.
 
-  atk-store:
+  atk-store-dashboard:
     image: bunchax/atk-store:latest
     platform: linux/amd64
-    container_name: atk-store
+    container_name: atk-store-dashboard
     restart: always
     ports:
-      - "3001:80"
+      - "3010:80"
     extra_hosts:
       - "atk.hexdas.cloud:host-gateway"
       - "atk-dashboard.hexdas.cloud:host-gateway"
@@ -17,12 +20,12 @@
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=hexdas_proxy"
-      - "traefik.http.routers.atk-store.rule=Host(`atk-dashboard.hexdas.cloud`)"
-      - "traefik.http.routers.atk-store.entrypoints=websecure"
-      - "traefik.http.routers.atk-store.tls=true"
-      - "traefik.http.routers.atk-store.tls.certresolver=mytlschallenge"
-      - "traefik.http.services.atk-store-svc.loadbalancer.server.port=80"
-      - "traefik.http.services.atk-store-svc.loadbalancer.server.scheme=http"
+      - "traefik.http.routers.atk-store-dashboard.rule=Host(`atk-dashboard.hexdas.cloud`)"
+      - "traefik.http.routers.atk-store-dashboard.entrypoints=websecure"
+      - "traefik.http.routers.atk-store-dashboard.tls=true"
+      - "traefik.http.routers.atk-store-dashboard.tls.certresolver=mytlschallenge"
+      - "traefik.http.services.atk-store-dashboard-svc.loadbalancer.server.port=80"
+      - "traefik.http.services.atk-store-dashboard-svc.loadbalancer.server.scheme=http"
     depends_on:
       - atk-store-api
     networks:

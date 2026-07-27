@@ -2,9 +2,9 @@
 // Script Path (default): Jenkinsfile
 //
 // Deploys the same stack that already runs on the host as:
-//   atk-store      → web  (Host: atk-dashboard.hexdas.cloud)
-//   atk-store-api  → api  (PathPrefix on the same host)
-// Compose path: /docker/hexdas/atk  (alongside atk-store-mqtt / shelfbox)
+//   atk-store-dashboard  → web  (Host: atk-dashboard.hexdas.cloud)
+//   atk-store-api        → api  (PathPrefix on the same host)
+// Compose path: /docker/hexdas/atk  (alongside atk-store / shelfbox)
 //
 // Agent is linux/amd64 — uses plain `docker build` / `docker push` (no buildx required).
 // Jenkins อยู่เครื่องเดียวกับ deploy → default DEPLOY_MODE=local (ไม่ต้อง SSH)
@@ -23,7 +23,7 @@ pipeline {
   }
 
   parameters {
-    choice(name: 'TARGET', choices: ['all', 'web', 'api'], description: 'What to build & deploy (web=atk-store, api=atk-store-api)')
+    choice(name: 'TARGET', choices: ['all', 'web', 'api'], description: 'What to build & deploy (web=atk-store-dashboard, api=atk-store-api)')
     string(name: 'IMAGE_TAG', defaultValue: 'latest', description: 'Docker image tag')
     string(
       name: 'VITE_API_URL',
@@ -167,7 +167,7 @@ Then leave DOCKERHUB_CRED_ID = dockerhub-creds'''
         script {
           // Must match service names in /docker/hexdas/atk docker-compose
           def services = []
-          if (targetIncludes('web')) { services << 'atk-store' }
+          if (targetIncludes('web')) { services << 'atk-store-dashboard' }
           if (targetIncludes('api'))  { services << 'atk-store-api' }
           def svc = services.join(' ')
           if (!svc) {
@@ -203,7 +203,7 @@ FAILED — common causes:
   2) Credential ID mismatch (DOCKERHUB_CRED_ID)
   3) Agent missing docker / permission to docker.sock
   4) DEPLOY_MODE=local: host must have DEPLOY_PATH and env files used by compose
-  5) Compose still points at armdocker123/* — update image lines to bunchax/atk-store*
+  5) Compose missing atk-store-api while atk-store-dashboard depends_on it
   6) Deploy without --no-deps can fail if a depends_on healthcheck (e.g. atk-animation-seed) is unhealthy
 '''
     }
