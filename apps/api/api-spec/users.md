@@ -21,10 +21,14 @@ API จำลอง (in-memory, ไม่มี DB) สำหรับจัด�
 ตัวอย่าง output ด้านล่างแสดง entity แบบ**ยังไม่ห่อ** เพื่อความกระชับ ของจริงอยู่ใน `data` เสมอ
 
 - Prefix: `http://localhost:3004/users`
-- ข้อมูลหายเมื่อ restart process — boot roster ถูก fetch ใหม่จาก external `${ATK_STORE_API_URL}/animation-api/users` (เก็บเฉพาะคนที่ `visit_status` ไม่ใช่ null, map `exited`→`outside`, `inside`→`inside`) — ถ้า external ล่มตอน boot server จะไม่ขึ้นเลย (ตั้งใจ)
+- ข้อมูลหายเมื่อ restart process — boot roster ถูก fetch ใหม่จาก external `${ATK_STORE_API_URL}/animation-api/users` (เก็บเฉพาะคนที่ `visit_status` ไม่ใช่ null, map `exited`→`outside`, `inside`→`inside`, ดึง `entered_at` มาด้วย) — ถ้า external ล่มตอน boot server จะไม่ขึ้นเลย (ตั้งใจ)
 - ล้าง+ดึง roster ใหม่ได้โดยไม่ต้อง restart ผ่าน `POST /users/roster/refresh` (ดูท้ายไฟล์)
-- schema ของ user: `{ "id": number, "name": string, "gender": "male" | "female", "status": "outside" | "waiting" | "inside" | "scanning" | "browsing" | "paying", "shelf_id": number | null }`
+- schema ของ user: `{ "id": number, "name": string, "gender": "male" | "female", "status": "outside" | "waiting" | "inside" | "scanning" | "browsing" | "paying", "shelf_id": number | null, "entered_at": string | null }`
   - `shelf_id` — shelf ที่กำลังมี session อยู่ (ตอน `scanning`/`browsing`), นอกนั้น null
+  - `entered_at` — เวลาเริ่มรอบเข้าร้าน (ISO 8601), `null` ตอนอยู่นอกร้าน
+    - boot roster เอาค่ามาจาก external ตรง ๆ (เฉพาะคนที่ยังไม่ออกจากร้าน — สถานะ `outside` ถูกล้างเป็น null เพราะเป็นค่าของรอบก่อน)
+    - `verify pass` = ประทับเวลาใหม่, `verify fail` / `pay pass` = ล้างเป็น null (`pay fail` ยังอยู่ในร้าน นาฬิกาเดินต่อ)
+    - dashboard นับ "In store" จากค่านี้ ไม่ได้นับจากตอน sim spawn ตัวละคร — reload หน้าเว็บแล้วเวลาไม่รีเซ็ต
 
 ## Lifecycle
 

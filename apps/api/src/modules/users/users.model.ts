@@ -27,6 +27,9 @@ const UserEntity = t.Object({
   // otherwise. The session ends on an explicit shelfClose (or leave), so there
   // is no auto-close deadline to expose.
   shelf_id: t.Nullable(t.String()),
+  // ISO 8601 start of the current visit, null when they're outside — the
+  // dashboard's "In store" timer counts from here (see User in ../../models)
+  entered_at: t.Nullable(t.String()),
   // display-only profile fields — required on the entity, defaulted on create
   email: t.String({ format: "email" }),
   avatar_url: t.String(), // may be "" → UI falls back to initials chip

@@ -18,6 +18,11 @@ export type User = {
   // otherwise. Ends on an explicit shelfClose (or leave) — no auto-close.
   // A shelf id is the device_id string from the IoT feed (see Shelf in ./shelfs).
   shelf_id: string | null;
+  // when this visit started, ISO 8601 — seeded from the external feed's
+  // `entered_at` at boot, stamped on a verify pass, cleared when they go
+  // `outside`. The dashboard counts its "In store" timer from here, so it has
+  // to survive a page reload (a scene-clock counter would restart at 0).
+  entered_at: string | null;
   // display-only profile fields (see ../modules/users/users.model.ts)
   email: string;
   avatar_url: string;
@@ -54,11 +59,15 @@ export type ActionInput =
 
 // ── external boot roster ──────────────────────────────────────────────
 // One row from GET {ATK_STORE_API_URL}/animation-api/users. Only a subset
-// maps onto our User; disabled_*/entered_at/exited_at have no home here.
+// maps onto our User; disabled_*/exited_at have no home here.
 export type ExternalUser = {
   id: number;
   name: string;
   email: string;
   avatar_url: string | null;
   visit_status: string | null;
+  // ISO 8601 (or null). Kept only for rows still in the store — on an exited
+  // row it's the last visit's start, which would make the dashboard count a
+  // days-old timer the moment they walk back in.
+  entered_at: string | null;
 };

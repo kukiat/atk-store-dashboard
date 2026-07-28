@@ -5,6 +5,7 @@ import { useGSAP } from '@gsap/react';
 import { Flip } from 'gsap/Flip';
 import { createSmartStoreBabylonScene, validateShelfLayout, validateUsers } from '../scenes/smartStoreBabylon.js';
 import BootSplash, { useBootProgress } from './BootSplash.jsx';
+import { HeadCards, useHeadCards, scanCard, pickCard } from './HeadCards.jsx';
 import { apiFetch } from '../api';
 
 gsap.registerPlugin(Flip);
@@ -27,29 +28,6 @@ function PersonAvatar({ person, className = '' }) {
   );
 }
 
-// A smooth SVG sparkline from a list of values.
-function Spark({ data, color = '#35c3ff', w = 200, h = 42 }) {
-  const min = Math.min(...data), max = Math.max(...data);
-  const span = max - min || 1;
-  const step = w / (data.length - 1);
-  const pts = data.map((v, i) => [i * step, h - ((v - min) / span) * (h - 6) - 3]);
-  const d = pts.map((p, i) => (i === 0 ? `M${p[0]},${p[1]}` : `L${p[0]},${p[1]}`)).join(' ');
-  const area = `${d} L${w},${h} L0,${h} Z`;
-  const id = `g${color.replace('#', '')}`;
-  return (
-    <svg className="spark" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
-      <defs>
-        <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={color} stopOpacity="0.35" />
-          <stop offset="100%" stopColor={color} stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <path d={area} fill={`url(#${id})`} />
-      <path d={d} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
 // Donut chart for online / offline shelves.
 function Donut({ online, offline }) {
   const total = online + offline;
@@ -68,13 +46,6 @@ function Donut({ online, offline }) {
     </svg>
   );
 }
-
-const STAT_CARDS = [
-  { k: 'Total Sales (Today)', v: '24,560', u: '฿', d: '+18.6%', spark: [12, 14, 13, 16, 15, 19, 18, 22, 21, 24], color: '#35c3ff' },
-  { k: 'Customers', v: '362', u: '', d: '+12.3%', spark: [8, 9, 11, 10, 13, 12, 15, 14, 17, 18], color: '#4caf72' },
-  { k: 'Conversion Rate', v: '28.5', u: '%', d: '+2.4%', spark: [20, 22, 21, 24, 23, 25, 26, 27, 28, 28], color: '#4caf72' },
-  { k: 'Average Dwell Time', v: '6m 24', u: 's', d: '+8.1%', spark: [4, 5, 5, 6, 6, 7, 6, 8, 7, 8], color: '#4caf72' },
-];
 
 // ---------- data source ----------
 // The whole shelf catalogue — ids, names, layout, online flags AND the item
@@ -125,17 +96,14 @@ const fmtTime = (d) =>
 
 let alertSeq = 0;
 
-const ENV = [
-  ['Temperature', '23.6', '°C', 'Optimal', 'ok'],
-  ['Humidity', '45', '%', 'Optimal', 'ok'],
-  ['CO₂ Level', '560', 'ppm', 'Good', 'ok'],
-  ['Air Quality', 'Good', '', 'PM2.5 12', 'ok'],
-];
-
-const NAV = ['STORE OVERVIEW', 'SHELF STATUS', 'ANALYTICS', 'ALERTS'];
+const NAV =['STORE OVERVIEW', 'SHELF STATUS', 'ANALYTICS', 'ALERTS'];
 const BOTTOM = [
   ['Dashboard', '⌂'], ['Analytics', '📊'], ['Products', '🛍'], ['Alerts', '🔔'], ['Settings', '⚙'],
 ];
+// Bottom nav is mockup chrome — none of the five buttons has a handler. Off by
+// default; flip to `true` to get it back untouched (its CSS, the `.is-armed`
+// pre-hide rule and the GSAP entrance target all stay in place for that).
+const SHOW_BOTTOM_NAV = false;
 
 /* ---------- 3D center stage mount ---------- */
 // `sceneFactory(container, { onSelectShelf }) => { dispose, selectShelf }` lets
@@ -200,33 +168,6 @@ function StoreStage({ selectedShelf, selectedPerson, onSelectShelf, onSelectPers
   }, [selectedPerson]);
 
   return <div className="store-stage" ref={ref} />;
-}
-
-/* ---------- heatmap (radial blobs on a tinted floor) ---------- */
-function Heatmap() {
-  const ref = useRef(null);
-  useEffect(() => {
-    const cv = ref.current;
-    const ctx = cv.getContext('2d');
-    const W = cv.width, H = cv.height;
-    const blobs = [
-      [0.3, 0.35, 28, 1], [0.55, 0.3, 22, 0.8], [0.7, 0.55, 30, 1],
-      [0.4, 0.65, 24, 0.9], [0.2, 0.6, 18, 0.6], [0.78, 0.78, 16, 0.5],
-      [0.5, 0.5, 20, 0.7],
-    ];
-    ctx.fillStyle = 'rgba(10,20,42,0.6)';
-    ctx.fillRect(0, 0, W, H);
-    blobs.forEach(([x, y, rad, a]) => {
-      const g = ctx.createRadialGradient(x * W, y * H, 0, x * W, y * H, rad);
-      g.addColorStop(0, `rgba(255,60,40,${a})`);
-      g.addColorStop(0.4, `rgba(255,170,40,${a * 0.7})`);
-      g.addColorStop(0.75, `rgba(60,180,255,${a * 0.35})`);
-      g.addColorStop(1, 'rgba(60,180,255,0)');
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 0, W, H);
-    });
-  }, []);
-  return <canvas className="heatmap-cv" ref={ref} width={300} height={150} />;
 }
 
 /* ---------- one live-stock row (flashes briefly when its qty changes) ---------- */
@@ -295,13 +236,26 @@ const PERSON_STATUS = {
   walking: 'Walking', paying: 'Paying', leaving: 'Leaving',
   browsing: 'Browsing', scanning: 'Scanning', verifying: 'Verifying',
 };
-const fmtDur = (s) => `${Math.floor(s / 60)}m ${String(Math.floor(s % 60)).padStart(2, '0')}s`;
+// "In store" counts from the API's `entered_at`, which for the crowd already
+// inside at boot can be hours or days back — flat minutes would read
+// "14520m 00s". Roll up to h/d and drop the unit that's become noise.
+const fmtDur = (s) => {
+  const d = Math.floor(s / 86400);
+  const h = Math.floor(s / 3600) % 24;
+  const m = Math.floor(s / 60) % 60;
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${String(m).padStart(2, '0')}m`;
+  return `${m}m ${String(Math.floor(s % 60)).padStart(2, '0')}s`;
+};
 
-function PersonDetailCard({ person, onClose, bindEl, shelfName }) {
+// closeTitle is a prop because ✕ stops meaning "close" during Focus mode — there
+// it only hides the card, and Esc (which still clears everything) is no longer
+// the same key stroke.
+function PersonDetailCard({ person, onClose, closeTitle, bindEl, shelfName }) {
   return (
     <div className="person-card-track" ref={bindEl}>
       <div className="store-detail-card person-card">
-        <button className="detail-close" onClick={onClose} title="Close (Esc)">✕</button>
+        <button className="detail-close" onClick={onClose} title={closeTitle}>✕</button>
         <div className="detail-head pc-head">
           <PersonAvatar key={person.avatarUrl || 'chip'} person={person} />
           <span className="pc-id">
@@ -596,6 +550,13 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   // identity, or StoreStage tears the scene down) can read the loaded data
   const shelfNameRef = useRef({});
   shelfNameRef.current = shelfName;
+  // sku → product name, for the scan-verdict head card: the scanQR event carries
+  // only the sku, and item.id IS the sku (see toShelf on the API side)
+  const skuName = useMemo(
+    () => Object.fromEntries(shelvesDef.flatMap((s) => (s.items ?? []).map((it) => [it.id, it.name]))),
+    [shelvesDef]);
+  const skuNameRef = useRef({});
+  skuNameRef.current = skuName;
   const lockInitRef = useRef(lockInit);
   lockInitRef.current = lockInit;
 
@@ -679,21 +640,32 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     });
     return () => es.close();
   }, []);
-  // shelf-scan sessions feed: a real loadcell pick/return off a shelf plays the
-  // matching gesture on the shopper the session belongs to (userId → 3D body).
-  // Reuses the same inspectItemUser the users `inspectItem` event drives; a
-  // pick maps to 'keep' (into the basket), a return to 'return' (back on shelf).
+  // scan-verdict / pick / return cards above API customers' heads. Armed from
+  // the two feeds below, revealed by the scene when the causing gesture ends —
+  // see HeadCards.jsx for why the reveal is not ours to make. `armCard` is
+  // stable, so the SSE effects that depend on it never re-subscribe.
+  const { cards: headCards, armCard } = useHeadCards(peopleRef);
+
+  // shelf-scan sessions feed — the SINGLE source of pick/return in the scene.
+  // Both the MQTT loadcell and a commanded `inspectItem` land here (the API
+  // routes the command through the session basket so the mock path and the
+  // hardware path are one path), which is why the users feed's own
+  // `inspectItem` event no longer drives anything: it would double the gesture.
+  // Each event plays the gesture (userId → 3D body) and arms a head card that
+  // the scene reveals when that gesture finishes.
   useEffect(() => {
     const es = new EventSource(`${SESSIONS_API_URL}/events`);
     const gesture = (result) => (ev) => {
       let s;
       try { s = JSON.parse(ev.data); } catch { return; }
-      if (s && typeof s.userId === 'number') peopleRef.current?.inspectItemUser?.(s.userId, result);
+      if (!s || typeof s.userId !== 'number') return;
+      peopleRef.current?.inspectItemUser?.(s.userId, result);
+      armCard(pickCard(s.userId, s));
     };
     es.addEventListener('picked', gesture('keep'));
     es.addEventListener('returned', gesture('return'));
     return () => es.close();
-  }, []);
+  }, [armCard]);
   // pull the current target once the scene is ready so it matches the API
   useEffect(() => {
     if (!crowd) return;
@@ -831,12 +803,19 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     // shelf sub-machine: commanded walk-up, scan verdict, per-item picks, and
     // the API-side session end (walkAway command / 30s shelfClose timer)
     es.addEventListener('walkToShelf', fwd((u) => peopleRef.current?.walkToShelfUser?.(u.id, u.shelfId)));
-    es.addEventListener('scanQR', fwd((u) => peopleRef.current?.scanQRUser?.(u.id, u.result)));
-    es.addEventListener('inspectItem', fwd((u) => peopleRef.current?.inspectItemUser?.(u.id, u.result)));
+    es.addEventListener('scanQR', fwd((u) => {
+      peopleRef.current?.scanQRUser?.(u.id, u.result);
+      // verdict card, revealed by the scene once the phone comes back down —
+      // the scanning tag owns that spot above their head until then
+      armCard(scanCard(u.id, u.result, u.sku, skuNameRef.current[u.sku]));
+    }));
+    // `inspectItem` is a command only. Its effect reaches the scene through the
+    // sessions feed above (the API moves an item on the shopper's shelf session,
+    // which emits picked/returned); listening here too would play it twice.
     es.addEventListener('walkAway', fwd((u) => peopleRef.current?.walkAwayUser?.(u.id)));
     es.addEventListener('shelfClose', fwd((u) => peopleRef.current?.shelfCloseUser?.(u.id)));
     return () => { clearTimeout(syncT); es.close(); };
-  }, []);
+  }, [armCard]);
 
   // selected shelf (1–6) drives the stock filter; null = show all shelves.
   // Shelf and person focus are mutually exclusive: picking a shelf clears the
@@ -884,6 +863,21 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   }, [selectedPerson, followedPerson]);
   // scene-side exits (it despawned them, or a shelf/floor hand-off took over)
   const handleFollowPerson = useCallback((id) => { setFollowedPerson(id ?? null); }, []);
+  // ---- the card can be folded away without ending the mode. The invariant is
+  // `cardHidden ⊆ following`: hiding is only reachable while the chip is on
+  // screen, and the chip is the only way back, so a hidden card must never
+  // outlive it — entering or leaving the mode, and switching subject, all
+  // unfold it again. Without this you get a shopper with a glowing ring, no
+  // card, no chip, and nothing on screen to click.
+  const [cardHidden, setCardHidden] = useState(false);
+  useEffect(() => { setCardHidden(false); }, [selectedPerson, followedPerson]);
+  // ✕ on the card is context-dependent: clearing the selection would drag Focus
+  // mode down with it (the rule above), so while following it only folds the
+  // card away. Outside the mode it still closes the inspector outright.
+  const closePersonCard = useCallback(() => {
+    if (followedPerson != null) setCardHidden(true);
+    else setSelectedPerson(null);
+  }, [followedPerson]);
   // Pushed into the scene LAST on purpose. One commit can move the camera three
   // times (shelf focus clearing, Floor 2 collapsing, then this) through a single
   // shared fly tween — going last lets the follow read the others' flight
@@ -908,6 +902,13 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     return () => clearInterval(t);
   }, [selectedPerson]);
   const bindPersonCard = useCallback((el) => { peopleRef.current?.bindCard?.(el); }, []);
+  // The scene fades the card out for the whole time its shopper stands at a
+  // shelf — the scan tag and the pick/return pills need that space above their
+  // head. It decides that per frame off `mode === 'browse'`; React only mirrors
+  // it so the chip stops claiming a card is on screen. These two statuses come
+  // out of that same branch of getPersonData, so the 2 Hz poll costs an
+  // indicator half a second of lag and nothing else — the fade stays exact.
+  const cardAtShelf = personData?.status === 'scanning' || personData?.status === 'browsing';
 
   // ---- live stock (seeded from GET /shelfs, then driven live by MQTT) ----
   // qty seeds from each device's real product.current_qty (0 when the feed omits
@@ -1061,20 +1062,8 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
             </button>
           </>
         )}
-        {/* ===== left column ===== */}
+        {/* ===== left column — CUSTOMERS only ===== */}
         <aside className="col col-left">
-          <section className="card">
-            <div className="card-head"><h2>STORE OVERVIEW</h2><span className="chev">›</span></div>
-            {STAT_CARDS.map((s) => (
-              <div className="stat" key={s.k}>
-                <div className="stat-k">{s.k}</div>
-                <div className="stat-v">{s.v}<small>{s.u}</small></div>
-                <div className="stat-d up">{s.d} <em>vs yesterday</em></div>
-                <Spark data={s.spark} color={s.color} />
-              </div>
-            ))}
-          </section>
-
           {crowd && (
             <CustomersCard
               peopleRef={peopleRef}
@@ -1087,25 +1076,6 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
               shelfName={shelfName}
             />
           )}
-
-          <section className="card">
-            <div className="card-head"><h2>HEATMAP</h2><span className="pill">Today ▾</span></div>
-            <Heatmap />
-            <div className="heat-scale"><span>Low</span><div className="heat-bar" /><span>High</span></div>
-          </section>
-
-          <section className="card">
-            <div className="card-head"><h2>ENVIRONMENT</h2></div>
-            <div className="env-grid">
-              {ENV.map((e) => (
-                <div className="env" key={e[0]}>
-                  <div className="env-k">{e[0]}</div>
-                  <div className="env-v">{e[1]}<small>{e[2]}</small></div>
-                  <div className="env-s ok">{e[3]}</div>
-                </div>
-              ))}
-            </div>
-          </section>
         </aside>
 
         {/* ===== center 3D ===== */}
@@ -1126,10 +1096,16 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
             users={catalog.users}
           />
           {detail && <ShelfDetailCard detail={detail} onClose={() => setSelectedShelf(null)} />}
-          {selectedPerson != null && personData && (
+          {/* folded away = really unmounted, not display:none — the scene sizes
+              the head-card stack off this element's offsetHeight and falls back
+              to a 150px guess when it reads 0, which would float the event cards
+              a card's height above an empty patch of air. Unmounting hands the
+              scene a null through bindCard, the same path a despawn takes. */}
+          {selectedPerson != null && personData && !cardHidden && (
             <PersonDetailCard
               person={personData}
-              onClose={() => setSelectedPerson(null)}
+              onClose={closePersonCard}
+              closeTitle={followedPerson != null ? 'Hide card (keep following)' : 'Close (Esc)'}
               bindEl={bindPersonCard}
               shelfName={shelfName}
             />
@@ -1153,14 +1129,30 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
               </div>
             </div>
           )}
+          {/* scan-verdict / pick / return cards — same head-projection track as
+              the bubble above, one per API customer, scene-revealed */}
+          <HeadCards cards={headCards} peopleRef={peopleRef} />
           {/* Focus mode banner — the only exit that survives both panels being
               collapsed, which is exactly what someone watching a followed
               shopper full-bleed will do. Top-center clears both floating panels. */}
           {followedPerson != null && personData && (
             <div className="follow-chip">
-              <span className="fchip-eye">🎥</span>
-              <span className="fchip-label">Following</span>
-              <b className="fchip-name">{personData.name}</b>
+              {/* the label half doubles as the card's fold/unfold switch — a
+                  real button so it takes keyboard focus; the caret is the only
+                  thing on screen reporting that a card is folded away */}
+              <button
+                className="fchip-toggle"
+                onClick={() => setCardHidden((v) => !v)}
+                disabled={cardAtShelf}
+                title={cardAtShelf
+                  ? 'Card hidden while they are at the shelf'
+                  : cardHidden ? 'Show detail card' : 'Hide detail card'}
+              >
+                <span className="fchip-eye">🎥</span>
+                <span className="fchip-label">Following</span>
+                <b className="fchip-name">{personData.name}</b>
+                <span className="fchip-caret">{cardHidden || cardAtShelf ? '▸' : '▾'}</span>
+              </button>
               <button
                 className="fchip-close"
                 onClick={() => setFollowedPerson(null)}
@@ -1266,13 +1258,15 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
       </div>
 
       {/* ===== bottom nav ===== */}
-      <nav className="dash-bottom">
-        {BOTTOM.map(([label, ico], i) => (
-          <button key={label} className={`bn${i === 0 ? ' active' : ''}`}>
-            <span className="bn-ico">{ico}</span><span>{label}</span>
-          </button>
-        ))}
-      </nav>
+      {SHOW_BOTTOM_NAV && (
+        <nav className="dash-bottom">
+          {BOTTOM.map(([label, ico], i) => (
+            <button key={label} className={`bn${i === 0 ? ' active' : ''}`}>
+              <span className="bn-ico">{ico}</span><span>{label}</span>
+            </button>
+          ))}
+        </nav>
+      )}
 
     </div>
   );
