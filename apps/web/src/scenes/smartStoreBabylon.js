@@ -1302,6 +1302,17 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     dim.active = true;
   }
 
+  // Focus mode's landing borrows the shelf-focus *look* along with the framing:
+  // same dim, same outline, on the same FLY_DUR as the flight. Driven straight
+  // instead of through selectShelf because neither of these touches
+  // `selectedId` — going through selectShelf would hand it the camera and end
+  // the mode, which is the one thing the landing exists to avoid.
+  function setLandingTheme(shelfId) {
+    if (shelfId == null) { selOutline.isVisible = false; setDim(null); return; }
+    frameOutline(selOutline, zoneById.get(shelfId).unit, 0.5);
+    setDim(shelfId);
+  }
+
   // ---------- selection API (React <-> scene) ----------
   let selectedId = null;
   let hoverId = null;
@@ -1802,6 +1813,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const orbit = landedId != null && landHome
       ? { alpha: landHome.alpha, beta: landHome.beta, radius: landHome.radius }
       : null;
+    // The per-frame watcher goes inert the moment followId clears, so it will
+    // never run the unfold branch that would have put the store's lights back
+    // up — a despawn mid-landing would leave the whole shop dimmed for good.
+    // Callers that want the look for themselves (selectShelf) set theirs after
+    // this returns, so clearing here costs them nothing.
+    if (landedId != null) setLandingTheme(null);
     landedId = null;
     landHome = null;
     onFollowPerson?.(null);
@@ -5206,10 +5223,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
           : { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone(), zoom };
         landedId = followId;
         flyTo(personFocusPoseFor(e));
+        setLandingTheme(SLOTS[e.ref.slot].shelfId);
       } else if (!want && landedId != null) {
         const home = landHome;
         landedId = null;
         landHome = null;
+        setLandingTheme(null);
         if (home) flyTo(home);
       }
     }
