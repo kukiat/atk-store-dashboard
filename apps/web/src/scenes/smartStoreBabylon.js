@@ -208,6 +208,22 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const CHAR_SCALE = 0.8;
   const TARGET_HEAD = 2.022 * CHAR_SCALE; // ≈ 1.62 — Casual_Male's `Head` bone height
   const TARGET_H = 3.325 * CHAR_SCALE;    // ≈ 2.66 — fallback: its full silhouette
+  // Deliberate air under the soles, on TOP of the measured origin->sole correction
+  // in makeHuman. That correction only buys contact — sole exactly on the floor
+  // plane — and contact still reads a touch sunk once the floor's own glow and the
+  // contact shadow close in around the foot. This is the one taste number in the
+  // placement; everything else about it is derived.
+  //
+  // Worth knowing before touching it: this number is nearly invisible by design.
+  // The ortho camera is `frustum 17 / zoom` with ZOOM_MAX 2.6, so a world unit
+  // spans 16 px at the default framing and 47 px at the tightest the app reaches.
+  // A 2.66-unit shopper is 42 px tall at overview and 125 px in focus mode, and a
+  // whole foot is under 6 px even there — so 0.02 is about a third of a pixel.
+  // That is deliberate: it is the amount that stops the sole reading as sunk
+  // without ever letting the body separate from its own contact shadow. 0.08 was
+  // tried and rejected on the running scene as too much air.
+  // Dial it live with `__storeBabylon.debug.footLift(v)` before changing it here.
+  let footClearance = 0.02;
   const DONOR_FILE = 'Casual_Male'; // ships the Idle/Walk/PickUp clips we retarget
   const CHAR_FILES = [
     'Casual_Male',
@@ -268,10 +284,16 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const headY = head
       ? head.computeWorldMatrix(true).multiply(toLocal).getTranslation().y - minY
       : 0;
-    return { head: headY, full: maxY - minY };
+    // `foot` is the gap between the model's origin and its actual sole. It is
+    // NOT zero: every file in the Quaternius pack measures minY = -0.01859, so
+    // dropping the root on the floor buries the soles by that much × scale and
+    // the whole crowd reads as standing in the concrete. It was already being
+    // computed here as the baseline for `head` and then thrown away.
+    return { head: headY, full: maxY - minY, foot: -minY };
   }
   const charCache = new Map(); // file -> Promise<AssetContainer>
   const charScale = new Map(); // file -> uniform scale that puts it at TARGET_H
+  const charFoot = new Map();  // file -> origin->sole gap, still in model units
   function loadCharContainer(file) {
     if (!charCache.has(file)) {
       const p = SceneLoader.LoadAssetContainerAsync('/models/', file + '.glb', scene)
@@ -288,6 +310,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
           charScale.set(file, size.head > 0.01 ? TARGET_HEAD / size.head
             : size.full > 0.01 ? TARGET_H / size.full
             : CHAR_SCALE);
+          charFoot.set(file, size.foot);
           return container;
         });
       charCache.set(file, p);
@@ -956,6 +979,39 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // face normal toward the shelf end they stand nearest, so the shelf recedes
   // into frame past them. dist/height keep beta ≈ PI/2.6 through poseFromOffset.
   const PFOCUS = { yaw: 0.61, dist: 13, height: 4.9, targetY: 1.5, zoom: 2.6 };
+  const PFOCUS_MARGIN = 1;      // how far inside the room the camera plane must stay
+  const PFOCUS_MIN_SCALE = 0.3; // ...but never fold the plane into the shopper
+  // ...and how much floor the sideways half of the swing wants beyond its own
+  // reach. 3 is not a taste call: the escalators occupy x −14.7…−11.3 against
+  // the left wall, and a camera needs 10.15 of headroom to clear that band, so
+  // anything less than ~10.45 is the number that let it park on top of them.
+  const PFOCUS_SIDE_CLEAR = 3;
+
+  // 13 units of standoff puts the camera outside the building for any shelf near
+  // an edge — shelf 3's shoppers land the camera ~1.2 past the storefront — and
+  // then the wall is across the shot. Swinging the yaw the other way does not fix
+  // it: the overshoot rides on the shelf's own face normal, so both ends of the
+  // shelf overshoot by the same amount.
+  //
+  // The camera is orthographic, so radius sets nothing but where the camera PLANE
+  // sits — the frame comes from frustum/zoom alone. Shrinking the offset
+  // uniformly therefore leaves alpha, beta and every pixel of the composition
+  // untouched, and only changes what minZ clips off the front. Pulling the plane
+  // back inside the room puts the wall BEHIND the camera rather than across it.
+  // (Occluders between the plane and the shopper — a neighbouring gondola — are a
+  // different problem and untouched by this.)
+  function keepCameraInRoom(target, offset) {
+    const lim = ROOM / 2 - PFOCUS_MARGIN;
+    let s = 1;
+    for (const ax of ['x', 'z']) {
+      const t = target[ax], o = offset[ax];
+      if (o === 0 || Math.abs(t + o) <= lim) continue;
+      if (Math.abs(t) >= lim) return offset; // shopper is out there too: nothing to pull back to
+      s = Math.min(s, ((o > 0 ? lim : -lim) - t) / o);
+    }
+    return s >= 1 ? offset : offset.scale(Math.max(s, PFOCUS_MIN_SCALE));
+  }
+
   let pendingFocusPose = null; // { id, pose } — consumed by the next selectShelf round-trip
   function personFocusPoseFor(e) {
     const s = SLOTS[e.ref.slot];
@@ -963,11 +1019,39 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const along = new Vector3(away.z, 0, -away.x);
     const c = unitBounds(zoneById.get(s.shelfId).unit).center;
     const side = (e.h.position.x - c.x) * along.x + (e.h.position.z - c.z) * along.z >= 0 ? 1 : -1;
-    const dir = away.scale(Math.cos(PFOCUS.yaw)).add(along.scale(side * Math.sin(PFOCUS.yaw)));
-    const pose = poseFromOffset(dir.scale(PFOCUS.dist).add(new Vector3(0, PFOCUS.height, 0)));
+    // `side` answers "which way does the shelf recede" and knows nothing about
+    // the room, so it will happily aim the camera into the left wall — where the
+    // escalators are — over a shopper standing 3cm past the shelf's midpoint.
+    // Both mirrors are legal shots, so let the floor plan veto one: measure, from
+    // where the shopper actually stands, how far you can travel each way before
+    // leaving the room, and swing the other way when the chosen side is short.
+    //
+    // Measured along the swing axis ALONE, not as a distance to the room in
+    // general. A shopper at the back wall is close to it whichever way the camera
+    // swings, and folding that in would drown out the difference on the axis the
+    // choice actually controls — which is how "did the camera leave the box"
+    // missed shelf 6: the far side was inside the box by 0.35 and won on a tie.
+    const need = PFOCUS.dist * Math.sin(PFOCUS.yaw);
+    const headroom = (sd) => {
+      const lim = ROOM / 2 - PFOCUS_MARGIN;
+      let t = Infinity;
+      for (const ax of ['x', 'z']) {
+        const d = along[ax] * sd;
+        if (Math.abs(d) < 1e-6) continue;
+        t = Math.min(t, ((d > 0 ? lim : -lim) - e.h.position[ax]) / d);
+      }
+      return t;
+    };
+    const room = need + PFOCUS_SIDE_CLEAR;
+    // only one arrangement overrules the composition: this side is cramped and
+    // the mirror is not. Both fine, or both cramped, and `side` still decides.
+    const pick = headroom(side) < room && headroom(-side) >= room ? -side : side;
+    const dir = away.scale(Math.cos(PFOCUS.yaw)).add(along.scale(pick * Math.sin(PFOCUS.yaw)));
+    const target = new Vector3(e.h.position.x, PFOCUS.targetY, e.h.position.z);
+    const offset = dir.scale(PFOCUS.dist).add(new Vector3(0, PFOCUS.height, 0));
     return {
-      ...pose,
-      target: new Vector3(e.h.position.x, PFOCUS.targetY, e.h.position.z),
+      ...poseFromOffset(keepCameraInRoom(target, offset)),
+      target,
       zoom: PFOCUS.zoom,
     };
   }
@@ -1091,7 +1175,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     if (show) {
       if (!floorHome) {
         floorHome = {
-          alpha: camera.alpha, beta: camera.beta, radius: camera.radius,
+          // fh carries an orbit only when it took the camera off a landing
+          alpha: fh?.alpha ?? camera.alpha,
+          beta: fh?.beta ?? camera.beta,
+          radius: fh?.radius ?? camera.radius,
           target: fh ? fh.target : camera.target.clone(), zoom: fh ? fh.zoom : zoom,
         };
       }
@@ -1236,7 +1323,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const fh = releaseFollow();
     if (!prev && !homePose) {
       homePose = {
-        alpha: camera.alpha, beta: camera.beta, radius: camera.radius,
+        // fh carries an orbit only when it took the camera off a landing
+        alpha: fh?.alpha ?? camera.alpha,
+        beta: fh?.beta ?? camera.beta,
+        radius: fh?.radius ?? camera.radius,
         target: fh ? fh.target : camera.target.clone(), zoom: fh ? fh.zoom : zoom,
       };
     }
@@ -1395,7 +1485,26 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       // so models authored in different units land the same size in the crowd.
       // The scale was measured once when the file loaded (measureBindPose) —
       // never re-measure per clone, the clone's bounding box lies.
-      root.scaling.setAll(charScale.get(file) ?? CHAR_SCALE);
+      const scale = charScale.get(file) ?? CHAR_SCALE;
+      root.scaling.setAll(scale);
+      // ...then sit the sole on the floor instead of the origin. Lifted on the
+      // ROOT, never on the holder: the holder's y = 0 is read as "this shopper
+      // stands here" by the floor rings (y 0.07), the scan tag (h.y + 2.3), the
+      // head cards (h.y + HEAD_CARD_LIFT), the camera and the pathing — moving
+      // the body inside the holder leaves every one of those honest.
+      // Derived, not tuned: `foot` is measured per file and multiplied by that
+      // file's own scale, because root.position lives in the PARENT's space and
+      // root.scaling never touches it. One shared constant would be wrong for at
+      // least one model already — Casual3_Male's shorter Head bone scales it to
+      // 0.906, so its sole is buried 0.0168 against everyone else's 0.0148 — and
+      // a rig from outside this pack (the Mixamo/Zoro build, authored in cm)
+      // would be off by orders of magnitude. This corrects itself for both.
+      // footClearance rides on top and is flat world units on purpose: it is a
+      // look, not a property of the model, so everyone gets the same gap. The
+      // derived half is kept on the person so debug.footLift can re-lift a body
+      // that is already on the floor without re-deriving anything.
+      u.footBase = (charFoot.get(file) ?? 0) * scale;
+      root.position.y = u.footBase + footClearance;
       const mats = new Set();
       root.getChildMeshes().forEach((m) => {
         m.isPickable = false;
@@ -1463,6 +1572,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     female: u.gender === 'female', apiId: u.id,
     // display-only profile fields carried through to the dashboard cards
     avatarUrl: u.avatar_url ?? '', email: u.email ?? '',
+    // wall-clock start of their visit (API `entered_at`, ms epoch) — the "In
+    // store" timer counts from this, not from when this scene spawned the body,
+    // so the crowd already inside at boot shows how long they've REALLY been
+    // here instead of restarting at 0 on every dashboard reload
+    // `|| null` catches both a missing field and an unparseable date (NaN) —
+    // either way we fall back to the scene clock rather than render NaN
+    enteredAt: Date.parse(u.entered_at ?? '') || null,
   });
   // a freshly minted (apiId-less) walk-in identity — the random crowd. Never
   // touches the roster, so these stay off the users API entirely.
@@ -1504,7 +1620,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   let cardEl = null; // React-owned card wrapper — the scene only writes its transform
   // verify-pass image bubble: a second React-owned wrapper the scene floats
   // above one API customer's head for a few seconds after a verify pass.
-  let flashEl = null;       // the wrapper el (null = React removed it)
   let flashApiId = null;    // API customer the revealed bubble tracks (null = none)
   // armed-but-not-yet-revealed flash: { apiId, onReveal } — held from the SSE
   // pass until the in-scene scan beam sweeps that customer through (or their
@@ -1517,6 +1632,60 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // card blinking back for that last stride reads as a glitch. Only an explicit
   // re-select (or their despawn) brings it back.
   let cardMuteE = null; // person entry whose card stays muted past its pay bubble
+
+  // ---------- head-card registry ----------
+  // Every React-owned node the scene flies over a head is registered here, and
+  // one block in the frame loop projects them all. The face bubble above used to
+  // carry its own near-identical copy of that projection code; only its tracking
+  // moved in here, its arm/reveal/timers/pay-mute are untouched.
+  //   apiIdOf  resolved per frame, so a bubble whose customer despawns hides at
+  //            once and the flash's single slot can point at whoever it likes
+  //   clamp    true  = pinned to the stage edge when the person walks off-frame
+  //                    (the person card and the face bubble: the user asked for
+  //                    those, they must stay findable)
+  //            false = hidden instead (event cards are notifications; better
+  //                    missed than piled up along the edge pointing at nobody)
+  //   stack    lift the card clear of the person card rather than muting it —
+  //            muting would blink the detail card out on every single pick
+  // Shared anchor for the detail card and the event cards, a little clear of the
+  // 2.66-unit silhouette so the pointer nub never grazes the hair. The two MUST
+  // stay on the same lift: `stackLift` below offsets the event card by the detail
+  // card's own height alone, which is only the right number while both hang off
+  // one point. Split them and the event card eats into the card by the pixel
+  // distance between the two anchors — a distance that changes with zoom.
+  const HEAD_CARD_LIFT = 2.9;
+  const headCards = new Map(); // key -> { el, apiIdOf, clamp, stack }
+  function bindHeadCard(key, entry) {
+    if (!entry?.el) { headCards.delete(key); return; }
+    entry.el.style.visibility = 'hidden'; // revealed on the first tracked frame
+    headCards.set(key, entry);
+  }
+
+  // Armed-but-unrevealed event card: ONE slot per person, so a second event
+  // while one is armed replaces it (the same latest-wins rule the visible cards
+  // follow). The scene owns the reveal because the card has to land when the
+  // GESTURE finishes, not when the SSE arrives — those are seconds apart, and a
+  // "+2 picked" floating over someone still walking reads as broken.
+  // Dropping matters as much as revealing: the API hooks below bail silently in
+  // several places (no free seam, wrong phase, a queue discarded by leaveSlot),
+  // and an orphan left armed would surface on that shopper's NEXT visit.
+  const headArmed = new Map(); // apiId -> onReveal(revealed: boolean)
+  function armHeadCard(apiId, onReveal) {
+    if (apiId == null || !shopperByApiId(apiId)) { onReveal?.(false); return; }
+    headArmed.get(apiId)?.(false); // latest wins
+    headArmed.set(apiId, onReveal);
+  }
+  function settleHeadCard(apiId, revealed) {
+    if (apiId == null) return;
+    const cb = headArmed.get(apiId);
+    if (!cb) return;
+    headArmed.delete(apiId);
+    cb(revealed);
+  }
+  // the gesture that earned the card just finished — show it now
+  const revealHeadCard = (p) => settleHeadCard(p?.person?.apiId, true);
+  // their shelf session ended (or their body went): nothing is coming
+  const dropHeadCard = (p) => settleHeadCard(p?.person?.apiId, false);
 
   // invisible pick proxy — rides along and is disposed with the person's body
   function makePickCap(personId, h) {
@@ -1542,6 +1711,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       avatarUrl: ident.avatarUrl ?? '', // '' for walk-ins → card falls back to chip
       email: ident.email ?? '', // '' for walk-ins → card hides the email
       color: cardColor(h.metadata.look.torso),
+      // API customers carry a real entry timestamp; walk-ins have none and fall
+      // back to the scene clock below (see getPersonData)
+      enteredAt: ident.enteredAt ?? null,
       spawnT: elapsed,
       picks: 0,
       nearShelf: zones[0]?.id ?? 1, // set when a browse session starts; walking: computed live in getPersonData
@@ -1587,9 +1759,27 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   let followId = null;
   let followHome = null;     // { target, zoom } — framing from before the mode
   const _followGoal = new Vector3();
+  // ---- landing: the mode borrows the camera for a close-up while its shopper
+  // stands at a shelf, then gives it straight back. This is the one stretch
+  // where Focus mode touches alpha/beta, and it is deliberate — at close range
+  // the angle decides whether you see them at all, and zooming straight in on
+  // whatever orbit the user left would just as often plant the camera behind
+  // the shelf. personFocusPoseFor's yaw is what keeps the shelf receding past
+  // them instead of covering them.
+  // A FOURTH home slot, not a reuse of followHome: the two nest (exiting the
+  // mode mid-landing has to skip the landing's pose and fly all the way back to
+  // the pre-follow one), and a shared slot could only hold one of them.
+  let landedId = null;       // person we are landed on, null when cruising
+  let landHome = null;       // full pose to unfold back to when they leave
 
   function followTargetOf(e) {
     return new Vector3(e.h.position.x, FOLLOW_Y, e.h.position.z);
+  }
+
+  // the same pair the dbl-click close-up demands — personFocusPoseFor reads
+  // SLOTS[slot], so a browse with no slot yet has no pose to fly to
+  function canLand(e) {
+    return !!e && e.ref.mode === 'browse' && e.ref.slot >= 0;
   }
 
   // Hand the camera over without flying anywhere, and report the pre-follow
@@ -1601,13 +1791,28 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     followId = null;
     const home = followHome;
     followHome = null;
+    // A landing in flight is dropped, not flown back through — its pose is a
+    // waypoint inside the mode, and the mode is what just ended. But the orbit
+    // it borrowed has to be handed back with the framing: `followHome` records
+    // target+zoom only, on the old promise that the mode never touched
+    // alpha/beta/radius, and landing is exactly the stretch where it does. Left
+    // out, the next owner banks a close-up angle as its own home and its later
+    // fly-back drops you into the side of a shelf — the same failure this
+    // function exists to prevent, one level down.
+    const orbit = landedId != null && landHome
+      ? { alpha: landHome.alpha, beta: landHome.beta, radius: landHome.radius }
+      : null;
+    landedId = null;
+    landHome = null;
     onFollowPerson?.(null);
-    return home;
+    return home && (orbit ? { ...home, ...orbit } : home);
   }
 
   function followPerson(id) {
     if (id == null) {
       const home = releaseFollow();
+      // spread order matters: `home` carries an orbit when it came off a
+      // landing, and that one has to win over the camera's current pose
       if (home) flyTo({ alpha: camera.alpha, beta: camera.beta, radius: camera.radius, ...home });
       return;
     }
@@ -1623,6 +1828,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
         : { target: camera.target.clone(), zoom };
     }
     followId = id;
+    // switching subject mid-mode: the old shopper's landing is void. Left set,
+    // the watcher below would either unfold to a pose framed on somebody we are
+    // no longer following, or bank it as the new landing's home.
+    landedId = null;
+    landHome = null;
     flyTo({
       alpha: camera.alpha, beta: camera.beta, radius: camera.radius,
       target: followTargetOf(e), zoom: FOLLOW_ZOOM,
@@ -1659,25 +1869,57 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       id, custNo: e.custNo, name: e.name, initials: e.initials, color: e.color,
       avatarUrl: e.avatarUrl, email: e.email,
       kind: e.kind, status, near, picks, api: e.apiId != null, apiId: e.apiId ?? null,
-      inStoreSec: Math.max(0, Math.floor(elapsed - e.spawnT)),
+      inStoreSec: Math.max(0, Math.floor(
+        e.enteredAt != null ? (Date.now() - e.enteredAt) / 1000 : elapsed - e.spawnT,
+      )),
     };
   }
 
+  // the selected shopper's detail card — the only head card that tracks a
+  // person id rather than an apiId, since walk-ins are selectable too
   function bindCard(el) {
     cardEl = el;
-    if (cardEl) cardEl.style.visibility = 'hidden'; // revealed on the first tracked frame
+    bindHeadCard('person', {
+      el,
+      lift: HEAD_CARD_LIFT,
+      clamp: true,
+      targetOf: () => (selectedPersonId ? persons.get(selectedPersonId)?.h ?? null : null),
+    });
   }
 
   // verify/pay-pass image bubble: React hands over its wrapper el (bindFlash)
   // and arms a pending flash (armFlash) on the SSE pass. The bubble only
   // reveals once the in-scene scan beam sweeps that customer through — see
   // notifyScanPass, fired from the entry/exit gate sweep-complete. Shared by
-  // both verify and pay. The frame loop writes the follow transform, mirroring
-  // the person-card track above.
+  // both verify and pay. Tracking is the registry's job; everything about when
+  // it appears and how long it stays is unchanged.
   function bindFlash(el) {
-    flashEl = el;
-    if (flashEl) flashEl.style.visibility = 'hidden'; // revealed on the first tracked frame
-    else flashApiId = null;                            // React unmounted it → stop tracking
+    if (!el) flashApiId = null; // React unmounted it → stop tracking
+    bindHeadCard('flash', {
+      el,
+      lift: 2.7,
+      clamp: true,
+      targetOf: () => {
+        const p = flashApiId != null ? shopperByApiId(flashApiId) : null;
+        // kept through the fade-out too, so a pay pass (they walk out fast)
+        // still gets its moment before the body is fully gone
+        return p && p.h && !p.done ? p.h : null;
+      },
+    });
+  }
+
+  // one event card per API customer — scan verdict, pick, return
+  function bindEventCard(apiId, el) {
+    bindHeadCard('event:' + apiId, {
+      el,
+      lift: HEAD_CARD_LIFT, // same anchor as the detail card — stackLift depends on it
+      clamp: false, // notification, not navigation: hide rather than pin to the edge
+      stack: true,  // rides above the detail card instead of muting it
+      targetOf: () => {
+        const p = shopperByApiId(apiId);
+        return p && p.h && !p.done ? p.h : null;
+      },
+    });
   }
   // arm on the SSE pass; hold until the scan beam clears this customer. No body
   // in the scene means no sweep will ever come, so drop it right away.
@@ -1945,20 +2187,61 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     declinedTag.isVisible = true;
   }
 
-  // PASS/FAILED badge over a shopper's head at a shelf reader (the scanQR
-  // verdict of the API shelf sub-machine). The words never change, so two
-  // shared textures; the billboard itself is per shopper (made in makeShopper)
-  // because several verdicts can float at once at different shelves.
-  const shelfPassTex = new DynamicTexture('shelfPassTag', { width: 384, height: 144 }, scene, true);
-  shelfPassTex.hasAlpha = true;
-  shelfPassTex.uScale = -1; shelfPassTex.uOffset = 1;
-  drawVerdictTag(shelfPassTex.getContext(), 'PASS ✓', '#4caf72');
-  shelfPassTex.update();
-  const shelfFailTex = new DynamicTexture('shelfFailTag', { width: 384, height: 144 }, scene, true);
-  shelfFailTex.hasAlpha = true;
-  shelfFailTex.uScale = -1; shelfFailTex.uOffset = 1;
-  drawVerdictTag(shelfFailTex.getContext(), 'FAILED ✗', '#e2574c');
-  shelfFailTex.update();
+  // ---------- "scanning" tag: QR brackets floating over anyone mid-scan ----------
+  // Deliberately in the 3D layer rather than the HTML head-card layer the scan
+  // verdict and the pick/return cards use. Two reasons, both about *scanning*
+  // specifically: a scanner stands right up against a shelf and gets occluded by
+  // it, and an HTML card (no depth) would advertise someone you cannot see; and
+  // every ambient shopper self-scans, so ten of these can be up at once, which
+  // per-shopper meshes handle for free and tracked DOM nodes do not.
+  //
+  // No text — ten copies of the word SCANNING is a wall of type, and the
+  // brackets read the same in any language. The icon is drawn ONCE into a shared
+  // texture and the "working" motion comes from moving the sweep-line mesh, so
+  // the whole effect costs zero canvas redraws per frame no matter how many
+  // shoppers are scanning.
+  const SCAN_TAG_CYAN = '#5cc8ff';
+  const scanTagTex = new DynamicTexture('scanTag', { width: 256, height: 256 }, scene, true);
+  scanTagTex.hasAlpha = true;
+  {
+    const c = scanTagTex.getContext();
+    c.clearRect(0, 0, 256, 256);
+    c.strokeStyle = SCAN_TAG_CYAN;
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+    // four corner brackets — the viewfinder
+    c.lineWidth = 16;
+    const m = 26, len = 62, far = 256 - m;
+    for (const [x, sx] of [[m, 1], [far, -1]]) {
+      for (const [y, sy] of [[m, 1], [far, -1]]) {
+        c.beginPath();
+        c.moveTo(x + sx * len, y);
+        c.lineTo(x, y);
+        c.lineTo(x, y + sy * len);
+        c.stroke();
+      }
+    }
+    // QR-ish glyph inside: three finder squares + a scatter of modules
+    c.lineWidth = 9;
+    for (const [x, y] of [[86, 86], [140, 86], [86, 140]]) c.strokeRect(x, y, 30, 30);
+    c.fillStyle = SCAN_TAG_CYAN;
+    for (const [x, y] of [[144, 144], [162, 144], [144, 162], [126, 126], [162, 126], [126, 162]])
+      c.fillRect(x, y, 12, 12);
+  }
+  scanTagTex.update();
+  // soft-edged sweep bar: a vertical gradient so the line has no hard ends
+  const scanLineTex = new DynamicTexture('scanTagLine', { width: 4, height: 64 }, scene, true);
+  scanLineTex.hasAlpha = true;
+  {
+    const c = scanLineTex.getContext();
+    const g = c.createLinearGradient(0, 0, 0, 64);
+    g.addColorStop(0, 'rgba(92,200,255,0)');
+    g.addColorStop(0.5, 'rgba(160,230,255,1)');
+    g.addColorStop(1, 'rgba(92,200,255,0)');
+    c.fillStyle = g;
+    c.fillRect(0, 0, 4, 64);
+  }
+  scanLineTex.update();
 
   // ---------- entry verification gate: scan-to-enter on the entrance spur ----------
   // arrivals stop between the posts for an identity sweep before merging onto
@@ -2509,17 +2792,35 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     ring.isPickable = false;
     ring.setEnabled(false);
     ring.parent = world;
-    // PASS/FAILED verdict billboard over the head — texture swapped per
-    // verdict from the shared shelfPassTex/shelfFailTex pair
-    const vtagMat = new StandardMaterial('shelfVtagMat', scene);
-    vtagMat.disableLighting = true;
-    vtagMat.backFaceCulling = false;
-    const vtag = MeshBuilder.CreatePlane('shelfVtag', { width: 1.35, height: 0.5 }, scene);
-    vtag.material = vtagMat;
-    vtag.billboardMode = TransformNode.BILLBOARDMODE_ALL;
-    vtag.isPickable = false;
-    vtag.isVisible = false;
-    vtag.parent = world;
+    // "scanning" billboard over the head (shared textures, per-shopper meshes so
+    // several can float at once). The sweep line is a CHILD of the frame so it
+    // inherits the billboard rotation and its local y reads as straight up on
+    // screen — that motion is the entire animation, hence no canvas redraws.
+    const stagMat = new StandardMaterial('scanTagMat', scene);
+    stagMat.disableLighting = true;
+    stagMat.backFaceCulling = false;
+    stagMat.emissiveTexture = scanTagTex;
+    stagMat.opacityTexture = scanTagTex;
+    stagMat.disableDepthWrite = true; // two coincident planes — let alphaIndex order them
+    const stag = MeshBuilder.CreatePlane('scanTagPlane', { size: 0.72 }, scene);
+    stag.material = stagMat;
+    stag.billboardMode = TransformNode.BILLBOARDMODE_ALL;
+    stag.isPickable = false;
+    stag.isVisible = false;
+    stag.alphaIndex = 0;
+    stag.parent = world;
+    const stagLineMat = new StandardMaterial('scanTagLineMat', scene);
+    stagLineMat.disableLighting = true;
+    stagLineMat.backFaceCulling = false;
+    stagLineMat.emissiveTexture = scanLineTex;
+    stagLineMat.opacityTexture = scanLineTex;
+    stagLineMat.alphaMode = Engine.ALPHA_ADD;
+    stagLineMat.disableDepthWrite = true;
+    const stagLine = MeshBuilder.CreatePlane('scanTagLinePlane', { width: 0.46, height: 0.12 }, scene);
+    stagLine.material = stagLineMat;
+    stagLine.isPickable = false;
+    stagLine.alphaIndex = 1; // drawn after the frame it sweeps across
+    stagLine.parent = stag;
     const p = {
       h,
       pc, // portal config: front (API) or right (random) doorway
@@ -2555,7 +2856,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       slot: -1, mv: null,
       cooldown: elapsed + 3 + Math.random() * 9, // no diving at a shelf right away
       item, itemShapes, itemMat, phone, beam, ring, ringMat, ringT: Infinity,
-      vtag, vtagMat, vtagT: Infinity,
+      stag, stagMat, stagLine, stagLineMat,
       shelfScan: null, access: null, accessSeam: null, idling: false, started: false,
       picksLeft: 0, pickT: 0, nextPick: 0, pickLat: 0, reach: 1,
       // commanded shelf session (API shelf sub-machine): shelfHold suppresses
@@ -2573,7 +2874,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     releaseShelfAccess(p); // last one out re-locks the shelf
     p.item.dispose(); p.itemMat.dispose();
     p.phone.dispose(); p.beam.dispose(); p.ring.dispose(); p.ringMat.dispose();
-    p.vtag.dispose(); p.vtagMat.dispose();
+    p.stagLine.dispose(); p.stagLineMat.dispose();
+    p.stag.dispose(); p.stagMat.dispose();
     disposeHuman(p.h);
   }
   // initial shoppers only: they were "already in the store" when the dashboard
@@ -2718,6 +3020,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     p.slot = -1; p.mv = null; p.idling = false; p.shelfScan = null;
     p.picksLeft = 0; p.ringT = Infinity;
     p.shelfHold = false; p.scanVerdict = null; p.inspect = null; p.inspectQueue = [];
+    dropHeadCard(p); // the gesture that card was waiting on is never going to run
     p.item.setEnabled(false); p.item.scaling.setAll(1); p.phone.setEnabled(false);
     p.beam.setEnabled(false); p.ring.setEnabled(false);
     enterRoam(p);
@@ -2813,15 +3116,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // API-owned shoppers never roll the junction dice, so every shelf visit
   // below is the only way they get one. Events for shoppers in the wrong
   // phase are dropped, mirroring how the other API hooks tolerate skew.
-  function showShelfVerdict(p, pass) {
-    const tex = pass ? shelfPassTex : shelfFailTex;
-    p.vtagMat.emissiveTexture = tex;
-    p.vtagMat.opacityTexture = tex;
-    p.vtagMat.alpha = 1;
-    p.vtag.position.set(p.h.position.x, 2.15, p.h.position.z);
-    p.vtag.isVisible = true;
-    p.vtagT = 0;
-  }
   // walk to a free reader slot on the shelf and hold there (no self-scan)
   function apiWalkToShelfUser(id, shelfId) {
     const p = shopperByApiId(id);
@@ -3248,6 +3542,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     if (u.groups.PickUp) u.groups.PickUp.stop();
     u.movingState = undefined; // let applyGait start the Walk clip cleanly
     p.shelfHold = false; p.scanVerdict = null; p.inspect = null; p.inspectQueue = [];
+    dropHeadCard(p); // browse session over — anything still armed is stale
     p.item.setEnabled(false); p.item.scaling.setAll(1);
     const shelfId = SLOTS[p.slot]?.shelfId;
     if (shelfId != null) {
@@ -3574,7 +3869,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       // the shopper stays at the reader for the next verdict
       const pass = p.shelfHold ? p.scanVerdict === 'pass' : true;
       p.scanVerdict = null;
-      if (p.shelfHold) showShelfVerdict(p, pass);
       if (pass) {
         p.ringT = 0;
         p.ring.position.set(p.h.position.x, 0.07, p.h.position.z);
@@ -3583,7 +3877,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       }
     }
     if (s.t < SCAN_SECS) return;
-    // phone pocketed → Idle is still looping; let the pick cycle take over
+    // phone pocketed → Idle is still looping; let the pick cycle take over.
+    // The verdict card lands HERE, not at SCAN_UNLOCK_AT where the verdict
+    // actually resolves: the scanning tag still occupies that spot above their
+    // head until the hand comes down, and one thing at a time reads far better
+    // than a 0.35s overlap. Ambient scanners have no card armed, so this is a
+    // no-op for them.
+    revealHeadCard(p);
     p.shelfScan = null;
     p.phone.setEnabled(false);
     p.idling = true;
@@ -3740,6 +4040,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       p.item.setEnabled(false);
       p.item.scaling.setAll(1);
       p.inspect = null;
+      revealHeadCard(p); // the pick/return card lands as the hand comes back down
     }
   }
   function heldShelfCycle(p, dt) {
@@ -3956,6 +4257,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const _tmp = new Vector3();
   const _cardAnchor = new Vector3();
   const _cardScreen = new Vector3();
+  const _camFwd = new Vector3();  // camera → target, for the behind-camera test
+  const _camDir = new Vector3();  // camera → card anchor
 
   // free-roaming shoppers cross each other's paths, so there is no leader to
   // follow anymore — the crowd is sparse enough that the odd overlap never
@@ -4454,6 +4757,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
             entryGate.deny = 0.9;
           } else { // verified — green light, ID tag pop, walk on in
             u.scan = undefined; u.verifying = false; u.gateHold = false; u.wp = 1;
+            // clearing the gate IS the entry — mirror the API stamping
+            // entered_at on the verify pass, so a customer who arrives mid
+            // session counts from the door, not from queueing on the street.
+            // Walk-ins have no API row and keep the scene-clock fallback.
+            if (u.person.apiId != null) u.person.enteredAt = Date.now();
             entryGate.flash = 1.4;
             showIdTag();
             entryReticle.succeed();
@@ -4716,11 +5024,20 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
         pk.ringMat.alpha = 0.8 * (1 - k);
         if (k >= 1) pk.ring.setEnabled(false);
       }
-      if (pk.vtagT < 1.6) { // PASS/FAILED verdict pop: drift up, hold, fade
-        pk.vtagT += dt;
-        pk.vtag.position.set(pk.h.position.x, 2.15 + pk.vtagT * 0.45, pk.h.position.z);
-        pk.vtagMat.alpha = pk.vtagT < 1.0 ? 1 : Math.max(0, 1 - (pk.vtagT - 1.0) / 0.6);
-        if (pk.vtagT >= 1.6) pk.vtag.isVisible = false;
+      // scanning tag: no timer of its own — alpha, lift and scale all ride the
+      // gesture's own blend factor `s.k`, the same one that raises the phone and
+      // the arm, so the tag rises with the hand and sinks as it is pocketed.
+      const sk = pk.shelfScan?.k ?? 0;
+      if (sk > 0.01) {
+        pk.stag.isVisible = true;
+        pk.stag.position.set(pk.h.position.x, pk.h.position.y + 2.3 + 0.28 * sk, pk.h.position.z);
+        pk.stag.scaling.setAll(0.82 + 0.18 * sk);
+        pk.stagMat.alpha = sk;
+        // sweep bar tracks up and down inside the brackets
+        pk.stagLine.position.y = Math.sin(time * 5.5) * 0.21;
+        pk.stagLineMat.alpha = sk * 0.9;
+      } else if (pk.stag.isVisible) {
+        pk.stag.isVisible = false;
       }
     }
 
@@ -4765,55 +5082,79 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       } else {
         hoverRing.isVisible = false;
       }
-      if (selE && cardEl) {
-        // project a point above the head → CSS px → clamp inside the stage
-        _cardAnchor.set(selE.h.position.x, selE.h.position.y + 2.5, selE.h.position.z);
-        Vector3.ProjectToRef(
-          _cardAnchor, Matrix.IdentityReadOnly, scene.getTransformMatrix(),
-          camera.viewport.toGlobal(engine.getRenderWidth(), engine.getRenderHeight()), _cardScreen,
-        );
-        const hw = engine.getHardwareScalingLevel(); // render px → CSS px (adaptToDeviceRatio)
-        const W = canvas.clientWidth || 1, H = canvas.clientHeight || 1;
-        const cw = cardEl.offsetWidth || 200, ch = cardEl.offsetHeight || 150;
-        const x = Scalar.Clamp(_cardScreen.x * hw, cw / 2 + 8, Math.max(cw / 2 + 8, W - cw / 2 - 8));
-        const y = Scalar.Clamp(_cardScreen.y * hw, ch + 18, Math.max(ch + 18, H - 10));
-        cardEl.style.transform = `translate(${x}px, ${y}px) translate(-50%, -100%) translateY(-10px)`;
-        cardEl.style.visibility = 'visible';
-        // fade out while this shopper's own verify/pay bubble occupies the same
-        // spot above their head — className is a constant in the JSX, so React
-        // never rewrites the attribute and the class survives its re-renders
-        // (same assumption the transform/visibility writes above already make).
-        cardEl.classList.toggle(
-          'muted',
-          (flashApiId != null && selE.apiId === flashApiId) || cardMuteE === selE,
-        );
-      } else if (cardEl) {
-        cardEl.style.visibility = 'hidden';
-      }
       // armed flash whose body vanished before the sweep → drop it (never shown)
       if (flashPending && !shopperByApiId(flashPending.apiId)) {
         const cb = flashPending.onReveal; flashPending = null; cb?.(false);
       }
-      // verify/pay-pass image bubble — same head-projection as the card,
-      // anchored by apiId (re-looked-up each frame so it hides the moment they
-      // despawn). Kept visible through the fade-out too, so a pay pass (they
-      // walk out fast) still gets its moment before the body is fully gone.
-      const flashP = flashApiId != null ? shopperByApiId(flashApiId) : null;
-      if (flashEl && flashP && flashP.h && !flashP.done) {
-        _cardAnchor.set(flashP.h.position.x, flashP.h.position.y + 2.7, flashP.h.position.z);
+      // same for armed event cards: no body left means no gesture is coming
+      for (const apiId of [...headArmed.keys()])
+        if (!shopperByApiId(apiId)) settleHeadCard(apiId, false);
+
+      // ---- head cards: one projection pass for every tracked DOM node ----
+      // Floor 2 draws an opaque deck over the whole shop floor, so every shopper
+      // is hidden under it — head cards have no depth and would float above that
+      // deck pointing at people nobody can see. Cut them all at the halfway
+      // point of the fade, where the bodies stop reading through.
+      const cardsOff = floor2Anim.value > 0.5;
+      // people behind the camera: the projection silently wraps them to the
+      // wrong side of the screen. Focus mode zooms in close enough for this to
+      // happen for real, so test the sign rather than trusting the projection.
+      _camFwd.copyFrom(camera.target).subtractInPlace(camera.position);
+      const hw = engine.getHardwareScalingLevel(); // render px → CSS px (adaptToDeviceRatio)
+      const W = canvas.clientWidth || 1, H = canvas.clientHeight || 1;
+      // event cards ride above the detail card rather than muting it — a mute
+      // would blink the selected shopper's card out on every single pick, which
+      // is exactly the moment you selected them to watch
+      // …with one exception: a shopper standing at a shelf owns the space above
+      // their own head for the whole session — the scan tag and the pick/return
+      // pills both land there — so the detail card clears out until they leave.
+      // Muting for the whole visit, not per gesture, is what keeps this from
+      // becoming the blink the stacking above was built to avoid.
+      const atShelf = !!selE && selE.ref.mode === 'browse';
+      // derived, not read back off the DOM: the detail card's own entry may not
+      // have been projected yet this frame (Map order is bind order). `atShelf`
+      // has to gate this too: .muted is opacity-only, so a muted card still
+      // measures 196px tall and would lift the pills clear of nothing at all.
+      const stackLift = !cardsOff && selE && cardEl && !atShelf ? (cardEl.offsetHeight || 150) + 8 : 0;
+      for (const [key, hc] of headCards) {
+        const el = hc.el;
+        if (!el) { headCards.delete(key); continue; }
+        const target = cardsOff ? null : hc.targetOf();
+        if (!target) { el.style.visibility = 'hidden'; continue; }
+        _cardAnchor.set(target.position.x, target.position.y + hc.lift, target.position.z);
+        if (!hc.clamp) {
+          _camDir.copyFrom(_cardAnchor).subtractInPlace(camera.position);
+          if (Vector3.Dot(_camFwd, _camDir) <= 0) { el.style.visibility = 'hidden'; continue; }
+        }
         Vector3.ProjectToRef(
           _cardAnchor, Matrix.IdentityReadOnly, scene.getTransformMatrix(),
           camera.viewport.toGlobal(engine.getRenderWidth(), engine.getRenderHeight()), _cardScreen,
         );
-        const hw = engine.getHardwareScalingLevel();
-        const W = canvas.clientWidth || 1, H = canvas.clientHeight || 1;
-        const fw = flashEl.offsetWidth || 150, fh = flashEl.offsetHeight || 180;
-        const fx = Scalar.Clamp(_cardScreen.x * hw, fw / 2 + 8, Math.max(fw / 2 + 8, W - fw / 2 - 8));
-        const fy = Scalar.Clamp(_cardScreen.y * hw, fh + 18, Math.max(fh + 18, H - 10));
-        flashEl.style.transform = `translate(${fx}px, ${fy}px) translate(-50%, -100%) translateY(-10px)`;
-        flashEl.style.visibility = 'visible';
-      } else if (flashEl) {
-        flashEl.style.visibility = 'hidden';
+        const cw = el.offsetWidth || 200, ch = el.offsetHeight || 150;
+        let x = _cardScreen.x * hw, y = _cardScreen.y * hw;
+        if (hc.stack && target === selE?.h) y -= stackLift;
+        if (hc.clamp) {
+          x = Scalar.Clamp(x, cw / 2 + 8, Math.max(cw / 2 + 8, W - cw / 2 - 8));
+          y = Scalar.Clamp(y, ch + 18, Math.max(ch + 18, H - 10));
+        } else if (x < -cw || x > W + cw || y < 0 || y > H + ch) {
+          el.style.visibility = 'hidden';
+          continue;
+        }
+        hc.x = x; hc.y = y; // last placement, for debug.headCards()
+        el.style.transform = `translate(${x}px, ${y}px) translate(-50%, -100%) translateY(-10px)`;
+        el.style.visibility = 'visible';
+      }
+      // the detail card fades out under the verify/pay face bubble, which is tall
+      // enough that stacking would push it off the top of the stage, and for as
+      // long as its shopper is at a shelf (see `atShelf` above).
+      // className is a constant in the JSX, so React never rewrites the
+      // attribute and the class survives its re-renders (the same assumption the
+      // transform/visibility writes above already make).
+      if (cardEl && selE) {
+        cardEl.classList.toggle(
+          'muted',
+          atShelf || (flashApiId != null && selE.apiId === flashApiId) || cardMuteE === selE,
+        );
       }
     }
 
@@ -4843,6 +5184,34 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       }
     } else {
       zoom += (zoomTarget - zoom) * Math.min(1, dt * 9);
+    }
+
+    // Focus mode landing — watched per frame rather than pushed from the shelf
+    // sub-machine, because every road into and out of a browse session (the API
+    // actions, an ambient shopper picking their own shelf, shelfClose, being
+    // pulled away mid-scan) already ends up moving `mode`, and one watcher can
+    // never miss one of them. Runs before the chase so a landing frame flies
+    // instead of lerping.
+    if (followId != null) {
+      const e = persons.get(followId);
+      const want = canLand(e);
+      if (want && landedId !== followId) {
+        // Mid-flight means the camera is on its way somewhere — that somewhere,
+        // not this frame's pose, is what the landing is borrowing. It is also
+        // what makes "start following someone already at a shelf" a single
+        // flight: the entry flight's destination becomes the unfold pose, and
+        // we head straight for the close-up from wherever we happen to be.
+        landHome = fly.active
+          ? { alpha: fly.toAlpha, beta: fly.toBeta, radius: fly.toRadius, target: fly.toTarget.clone(), zoom: fly.toZoom }
+          : { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone(), zoom };
+        landedId = followId;
+        flyTo(personFocusPoseFor(e));
+      } else if (!want && landedId != null) {
+        const home = landHome;
+        landedId = null;
+        landHome = null;
+        if (home) flyTo(home);
+      }
     }
 
     // Focus mode chase — after the fly tween on purpose: the entry flight owns
@@ -4968,6 +5337,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       // verify/pay-pass image bubble: bind the wrapper el + arm on SSE pass
       // (revealed later, when the scan beam clears them — see notifyScanPass)
       bindFlash, armFlash,
+      // scan-verdict / pick / return cards: same arm-then-reveal contract, but
+      // the scene reveals them when the matching GESTURE ends rather than when a
+      // gate beam sweeps — see revealHeadCard's two call sites
+      bindEventCard, armEventCard: armHeadCard,
     },
 
     // shelf locks: the scene owns the state, React mirrors it. set() is the
@@ -5004,15 +5377,59 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       goal: p.mv ? { kind: p.mv.kind ?? 'shelf', x: +p.mv.wps[p.mv.wps.length - 1].x.toFixed(2), z: +p.mv.wps[p.mv.wps.length - 1].z.toFixed(2), legs: p.mv.wps.length } : null,
       speed: +(p.cur ?? 0).toFixed(3), exit: p.exit,
     })),
+    // How much air sits under the soles. This is here because foot placement is
+    // the one tuning job in the scene that a screenshot cannot settle: a world
+    // unit is 16 px at the default framing, so every value worth trying differs
+    // from the last by about a pixel. Call it with a number to re-lift everyone
+    // already on the floor AND set what the next spawn uses; call it with nothing
+    // to read the current value. Only the taste half moves — the measured
+    // origin->sole correction stays per-model.
+    footLift: (v) => {
+      if (typeof v === 'number') footClearance = v;
+      let relifted = 0;
+      for (const node of scene.transformNodes) {
+        const u = node.name === 'human' ? node.metadata : null;
+        if (!u?.entries || u.footBase == null) continue;
+        u.entries.rootNodes[0].position.y = u.footBase + footClearance;
+        relifted++;
+      }
+      return { footClearance, relifted };
+    },
     // who currently owns the camera, and what each owner promised to give back.
     // Three exclusive modes hand it to each other (shelf focus / Floor 2 / Focus
     // mode), so "which home is armed" is the first thing to ask when a fly-back
     // goes to the wrong place.
     camera: () => ({
-      selectedShelf: selectedId, followId, flying: fly.active,
+      selectedShelf: selectedId, followId, landedId, flying: fly.active,
       homePose: homePose && { t: homePose.target.asArray().map((v) => +v.toFixed(2)), zoom: +homePose.zoom.toFixed(2) },
       floorHome: floorHome && { t: floorHome.target.asArray().map((v) => +v.toFixed(2)), zoom: +floorHome.zoom.toFixed(2) },
       followHome: followHome && { t: followHome.target.asArray().map((v) => +v.toFixed(2)), zoom: +followHome.zoom.toFixed(2) },
+      landHome: landHome && { t: landHome.target.asArray().map((v) => +v.toFixed(2)), zoom: +landHome.zoom.toFixed(2) },
+    }),
+    // every DOM node the scene is flying over a head, plus WHY one is not on
+    // screen — these live 1–3s each, so "was it hidden or never revealed" is
+    // otherwise unanswerable from a screenshot
+    headCards: () => ({
+      armed: [...headArmed.keys()],
+      floor2Hiding: floor2Anim.value > 0.5,
+      cards: [...headCards].map(([key, hc]) => {
+        const t = hc.targetOf();
+        let off = null;
+        if (!t) off = 'no target';
+        else if (floor2Anim.value > 0.5) off = 'floor 2';
+        else if (!hc.clamp) {
+          _camFwd.copyFrom(camera.target).subtractInPlace(camera.position);
+          _camDir.set(t.position.x, t.position.y + hc.lift, t.position.z).subtractInPlace(camera.position);
+          if (Vector3.Dot(_camFwd, _camDir) <= 0) off = 'behind camera';
+        }
+        return {
+          key, mode: hc.clamp ? 'clamp' : 'hide', stack: !!hc.stack,
+          visible: hc.el?.style.visibility === 'visible',
+          at: hc.x == null ? null : [Math.round(hc.x), Math.round(hc.y)],
+          transform: hc.el?.style.transform || null,
+          hiddenBy: off,
+        };
+      }),
     }),
     navFree: (x, z) => navFree(x, z),
     // route probes: a stand point sits inside an inflated shelf footprint, so

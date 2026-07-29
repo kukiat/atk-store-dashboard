@@ -51,6 +51,9 @@ export async function fetchBootRoster(): Promise<User[]> {
       gender: guessGender(u.name, u.id),
       status,
       shelf_id: null,
+      // only a visit still in progress carries a start time; an `outside`
+      // (or `exited`) row's entered_at belongs to a finished visit
+      entered_at: status === "outside" ? null : u.entered_at,
       email: u.email,
       avatar_url: u.avatar_url ?? "", // null → "" (UI falls back to initials)
       auth_method: "google", // external only ever shows Google logins

@@ -127,6 +127,7 @@ class UsersService {
       gender: input.gender,
       status: "waiting",
       shelf_id: null,
+      entered_at: null, // holding at the gate — the visit starts on a verify pass
       // defaults filled here (after id) so a bare {name,gender} POST works
       email: input.email ?? `user${id}@demo.local`,
       avatar_url: input.avatar_url ?? "",
@@ -229,6 +230,9 @@ class UsersService {
       );
     if (user.status === "outside") this.enter(id); // → waiting, emits `enter`
     user.status = result === "pass" ? "inside" : "outside";
+    // the visit clock starts here (and only here): a pass is the moment they're
+    // through the door, a fail leaves nothing to count
+    user.entered_at = result === "pass" ? new Date().toISOString() : null;
     // imageURL rides the event untouched (undefined drops out of the JSON) —
     // the dashboard flashes it only on a pass; the store never keeps it.
     this.emit({ type: "verify", user: { id, result, imageURL } });
@@ -310,11 +314,18 @@ class UsersService {
 
   // one full pick cycle per request: keep pockets the item (paid at the exit),
   // return puts it back on the shelf. Status doesn't move.
+  //
+  // This is a command, not a scene driver. It moves one item on the shopper's
+  // open shelf session, which emits picked/returned on the sessions feed — the
+  // single source of both the 3D gesture and the head card, shared with the MQTT
+  // loadcell path. The `inspectItem` event below stays as the record that the
+  // command was issued; nothing on the web side animates off it any more.
   private inspectItem(id: number, result: "keep" | "return") {
     const user = this.mustFind(id);
     if (user.status !== "browsing")
       throw status(409, `User is ${user.status}, inspectItem needs "browsing"`);
     this.emit({ type: "inspectItem", user: { id, result } });
+    this.sessions.recordUserPickReturn(id, result === "keep" ? "pick" : "return");
     return user;
   }
 
@@ -366,7 +377,9 @@ class UsersService {
         `User is ${user.status}, pay needs "paying", "inside", "scanning" or "browsing"`,
       );
     if (user.status !== "paying") this.leave(id); // → paying, emits `leave`
-    if (result === "pass") user.status = "outside";
+    // a pass ends the visit, so the clock stops with it; a fail keeps them at
+    // the gate (still in the store) and the timer keeps running
+    if (result === "pass") { user.status = "outside"; user.entered_at = null; }
     // imageURL rides the event untouched (undefined drops out of the JSON) —
     // the dashboard flashes it only on a pass; the store never keeps it.
     this.emit({ type: "pay", user: { id, result, imageURL } });

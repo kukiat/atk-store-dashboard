@@ -413,6 +413,18 @@ canvas { display: block; }
   border-color: #22406f;
   box-shadow: 0 12px 32px rgba(2, 8, 20, .55);
 }
+/* left panel holds ONE card (CUSTOMERS), so its frame is stretched to the full
+   panel height rather than hugging the roster — a short list would otherwise
+   leave the gutter looking half-empty. The card can't outgrow the panel, so the
+   scroll moves inside it (see .cust-list): the head stays pinned and the frame's
+   bottom edge never moves, however many shoppers are in store. The right panel
+   keeps the default — its three cards overflow and scroll as a stack. */
+.col-left { overflow: hidden; }
+.col-left .card {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+}
+.col-left .card > .card-head { flex: none; }
 /* hidden: slide fully off its edge (+ the 22px padding) and fade out */
 .dash-body.left-collapsed  .col-left  { transform: translateX(calc(-100% - 22px)); opacity: 0; pointer-events: none; }
 .dash-body.right-collapsed .col-right { transform: translateX(calc(100% + 22px));  opacity: 0; pointer-events: none; }
@@ -458,27 +470,17 @@ canvas { display: block; }
   border: 1px solid #21407a; background: rgba(18,32,63,.6); cursor: pointer;
 }
 
-/* stat blocks */
-.stat { padding: 12px 0; border-top: 1px solid #11203c; position: relative; }
-.stat:first-of-type { border-top: none; padding-top: 2px; }
-.stat-k { color: #6f86b8; font-size: 11px; }
-.stat-v { color: #eaf6ff; font-size: 26px; font-weight: 700; letter-spacing: .01em; margin-top: 2px; }
-.stat-v small { font-size: 14px; color: #9fb6e6; margin-left: 3px; font-weight: 500; }
-.stat-d { font-size: 11px; margin-top: 1px; }
-.stat-d.up { color: #4caf72; }
-.stat-d em { color: #5e76a8; font-style: normal; }
-.spark { width: 100%; height: 38px; margin-top: 6px; display: block; }
-
-/* heatmap */
-.heatmap-cv { width: 100%; height: auto; border-radius: 10px; display: block; border: 1px solid #11203c; }
-.heat-scale { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 10px; color: #6f86b8; }
-.heat-bar { flex: 1; height: 6px; border-radius: 3px; background: linear-gradient(90deg, #2f6bff, #4caf72, #efb23a, #e2574c); }
-
-/* customers (V5 only — rendered when the scene exposes a people API) */
+/* customers (V5 only — rendered when the scene exposes a people API).
+   No max-height: the list takes whatever the full-height card gives it (see
+   .col-left .card above) and scrolls internally past that, so the roster uses
+   the entire panel instead of stopping at a fixed row count. */
 .cust-list {
   list-style: none; display: flex; flex-direction: column; gap: 3px;
-  max-height: 264px; overflow-y: auto; padding-right: 2px;
+  flex: 1; min-height: 0; overflow-y: auto; padding-right: 2px;
 }
+/* lone empty-state line: centred in the tall frame so an empty store reads as
+   deliberate rather than as a panel that failed to load */
+.cust-list .stk-empty { margin: auto; }
 .cust-row {
   display: flex; align-items: center; gap: 9px; padding: 5px 7px;
   border-radius: 8px; cursor: pointer; border-left: 2px solid transparent;
@@ -529,14 +531,6 @@ canvas { display: block; }
 }
 .cust-menu-item:hover { background: rgba(53,195,255,.14); color: #fff; }
 
-/* environment */
-.env-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 12px; }
-.env-k { color: #6f86b8; font-size: 11px; }
-.env-v { color: #eaf6ff; font-size: 20px; font-weight: 700; margin-top: 2px; }
-.env-v small { font-size: 12px; color: #9fb6e6; margin-left: 2px; font-weight: 500; }
-.env-s { font-size: 11px; margin-top: 1px; }
-.env-s.ok { color: #4caf72; }
-
 /* center stage */
 .store-stage { position: absolute; inset: 0; border-radius: 16px; overflow: hidden; }
 .store-stage canvas { display: block; }
@@ -563,6 +557,19 @@ canvas { display: block; }
 }
 .dash-body:not(.left-collapsed)  .follow-chip { left: 312px; }
 .dash-body:not(.right-collapsed) .follow-chip { right: 342px; }
+/* label half = fold/unfold switch for the detail card. Negative margins pull it
+   back over the chip's own padding so wrapping the spans in a button doesn't
+   move a single pixel of the chip. */
+.fchip-toggle {
+  display: flex; align-items: center; gap: 8px;
+  border: none; background: none; font: inherit; color: inherit; cursor: pointer;
+  padding: 3px 6px; margin: -3px -3px -3px -8px; border-radius: 999px;
+}
+.fchip-toggle:hover:not(:disabled) { background: rgba(53,195,255,.14); }
+/* disabled = the scene is holding the card back while they're at a shelf, so
+   there is nothing to fold. Stays fully legible: it's still the mode's banner. */
+.fchip-toggle:disabled { cursor: default; }
+.fchip-caret { font-size: 8px; line-height: 1; color: #6f86b8; }
 .fchip-eye { font-size: 12px; line-height: 1; }
 .fchip-label { font-size: 10px; letter-spacing: .12em; color: #6f86b8; text-transform: uppercase; }
 .fchip-name { font-size: 12px; color: #f5b74e; font-weight: 600; }
@@ -907,6 +914,58 @@ canvas { display: block; }
 }
 @keyframes vf-bubble-in { from { opacity: 0; transform: translateY(6px) scale(.9); } to { opacity: 1; transform: none; } }
 @keyframes vf-bubble-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: scale(.95); } }
+
+/* head event cards — shelf scan verdict + each pick/return, floating over an API
+   customer's head. Same family as the bubble above (radius, glass, nub, pop-in
+   timing) but a short horizontal pill instead of its 150x180 portrait box: these
+   stack ON TOP of the person detail card rather than muting it, and a tall card
+   would push the stack off the top of the stage. Colour carries the meaning —
+   the icon inherits it through currentColor. */
+.hcard-track {
+  position: absolute; left: 0; top: 0; z-index: 24;
+  visibility: hidden;            /* revealed by the scene on the first tracked frame */
+  will-change: transform;
+  pointer-events: none;
+}
+.hcard {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 13px 8px 10px;
+  border-radius: 13px; border: 1px solid var(--hc-accent-dim, rgba(120,200,255,.3));
+  background: linear-gradient(180deg, rgba(18,32,48,.96), rgba(10,20,32,.96));
+  box-shadow: 0 10px 28px rgba(0,0,0,.5), 0 0 0 1px var(--hc-accent-dim, rgba(120,200,255,.1));
+  white-space: nowrap;
+  animation: vf-bubble-in .3s cubic-bezier(.2,.9,.25,1.15) both;
+}
+.hcard-track.closing .hcard { animation: vf-bubble-out .4s ease both; }
+.hcard-track::after {            /* pointer nub down toward the shopper */
+  content: ''; position: absolute; left: 50%; bottom: -5px;
+  width: 10px; height: 10px; transform: translateX(-50%) rotate(45deg);
+  background: rgba(10,20,32,.96);
+  border-right: 1px solid var(--hc-accent-dim, rgba(120,200,255,.3));
+  border-bottom: 1px solid var(--hc-accent-dim, rgba(120,200,255,.3));
+}
+.hcard-ico { width: 21px; height: 21px; flex: none; color: var(--hc-accent); }
+.hcard-num {
+  font-size: 19px; font-weight: 800; line-height: 1;
+  letter-spacing: -.01em; color: var(--hc-accent);
+  font-variant-numeric: tabular-nums;
+}
+.hcard-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.hcard-txt b {
+  font-size: 12px; font-weight: 700; letter-spacing: .02em; color: #eaf6ff;
+  max-width: 168px; overflow: hidden; text-overflow: ellipsis;
+}
+.hcard-txt i {
+  font-style: normal; font-size: 10px; font-weight: 600;
+  letter-spacing: .07em; text-transform: uppercase; color: #7d93c4;
+  max-width: 168px; overflow: hidden; text-overflow: ellipsis;
+}
+/* four kinds, four accents. return is amber, deliberately NOT red — putting an
+   item back is not an error, and red next to the scan-fail card would say it is */
+.hcard-pass   { --hc-accent: #4caf72; --hc-accent-dim: rgba(76,175,114,.42); }
+.hcard-fail   { --hc-accent: #e2574c; --hc-accent-dim: rgba(226,87,76,.42); }
+.hcard-pick   { --hc-accent: #5cc8ff; --hc-accent-dim: rgba(92,200,255,.42); }
+.hcard-return { --hc-accent: #f0b45c; --hc-accent-dim: rgba(240,180,92,.42); }
 
 .bd-empty { color: #6f86b8; font-size: 12px; padding: 14px 2px; text-align: center; }
 .bd-error { color: #ff9a92; background: rgba(226,87,76,.12); border-radius: 8px; padding: 10px 12px; font-size: 12px; }

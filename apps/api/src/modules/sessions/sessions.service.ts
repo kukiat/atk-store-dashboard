@@ -77,6 +77,52 @@ class SessionsService {
     return session;
   }
 
+  // Shared tail of both pick/return entry points (hardware and commanded):
+  // rewrite each matching row's basket line to the resolved net-held qty and
+  // emit one picked/returned per row. Deliberately the only place that touches
+  // `items` or shapes the event — the two callers must not be able to drift
+  // apart on sign, line removal or event shape, since the dashboard cart and
+  // the scene gesture read them identically. `lineFor` is per row because the
+  // commanded path derives qty from what that row is already holding.
+  private applyPickReturn(
+    rows: ShelfSession[],
+    action: "pick" | "return",
+    lineFor: (s: ShelfSession) => {
+      sku: string;
+      name: string;
+      unitWeightKg: number;
+      qty: number;
+      deltaQty: number;
+    },
+  ): ShelfSession[] {
+    for (const s of rows) {
+      const { sku, name, unitWeightKg, qty, deltaQty } = lineFor(s);
+      const line = s.items.find((i) => i.sku === sku);
+      if (qty <= 0) {
+        s.items = s.items.filter((i) => i.sku !== sku);
+      } else if (line) {
+        line.qty = qty;
+        line.name = name; // keep the display name fresh
+      } else {
+        s.items.push({ sku, name, qty, unitWeightKg });
+      }
+      this.emit({
+        type: action === "pick" ? "picked" : "returned",
+        session: {
+          id: s.id,
+          userId: s.userId,
+          sku,
+          name,
+          action,
+          deltaQty,
+          qty,
+          items: s.items,
+        },
+      });
+    }
+    return rows;
+  }
+
   // A loadcell pick/return landed: update the basket of every session open at
   // this device for this sku (matched on BOTH device_id and sku), and emit a
   // picked/returned event per match for the scene gesture + dashboard cart.
@@ -95,37 +141,41 @@ class SessionsService {
     const rows = this.list().filter(
       (s) => s.externalDevice.device_id === input.deviceId && s.sku === input.sku,
     );
-    const qty = Math.max(0, input.takenTotal);
-    for (const s of rows) {
-      const line = s.items.find((i) => i.sku === input.sku);
-      if (qty <= 0) {
-        s.items = s.items.filter((i) => i.sku !== input.sku);
-      } else if (line) {
-        line.qty = qty;
-        line.name = input.name; // keep the display name fresh
-      } else {
-        s.items.push({
-          sku: input.sku,
-          name: input.name,
-          qty,
-          unitWeightKg: input.unitWeightKg,
-        });
-      }
-      this.emit({
-        type: input.action === "pick" ? "picked" : "returned",
-        session: {
-          id: s.id,
-          userId: s.userId,
-          sku: input.sku,
-          name: input.name,
-          action: input.action,
-          deltaQty: input.deltaQty,
-          qty,
-          items: s.items,
-        },
-      });
-    }
-    return rows;
+    return this.applyPickReturn(rows, input.action, () => ({
+      sku: input.sku,
+      name: input.name,
+      unitWeightKg: input.unitWeightKg,
+      qty: Math.max(0, input.takenTotal),
+      deltaQty: input.deltaQty,
+    }));
+  }
+
+  // The commanded twin of the above: a users `inspectItem` (Backdoor button /
+  // POST /users/:id/status) is one item on or off the session's own sku. It
+  // lands on the same feed as the hardware so there is a single source of the
+  // pick/return gesture and the head card — without this the mock path would be
+  // untestable without a live broker.
+  //
+  // No loadcell tally to trust here, so qty accumulates from what the row
+  // already holds (floored at 0: returning what you aren't holding is a no-op on
+  // the count, not a negative). Product fields fall back to the shelf's stock
+  // line because the IoT feed ships `product: null` on unconfigured devices.
+  // The `browsing` guard on inspectItem means a row exists; no row → returns [].
+  recordUserPickReturn(userId: number, action: "pick" | "return"): ShelfSession[] {
+    const rows = this.list().filter((s) => s.userId === userId);
+    const deltaQty = action === "pick" ? 1 : -1;
+    return this.applyPickReturn(rows, action, (s) => {
+      const product = s.externalDevice.product;
+      const stock = s.shelf.items.find((i) => i.id === s.sku) ?? s.shelf.items[0];
+      const held = s.items.find((i) => i.sku === s.sku)?.qty ?? 0;
+      return {
+        sku: s.sku,
+        name: product?.item_name ?? stock?.name ?? s.sku,
+        unitWeightKg: product?.unit_weight_kg ?? stock?.weight ?? 0,
+        qty: Math.max(0, held + deltaQty),
+        deltaQty,
+      };
+    });
   }
 
   // tear down every row for a user (normally 0 or 1). The single removal path —
