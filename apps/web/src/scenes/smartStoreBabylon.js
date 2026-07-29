@@ -208,6 +208,22 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const CHAR_SCALE = 0.8;
   const TARGET_HEAD = 2.022 * CHAR_SCALE; // ≈ 1.62 — Casual_Male's `Head` bone height
   const TARGET_H = 3.325 * CHAR_SCALE;    // ≈ 2.66 — fallback: its full silhouette
+  // Deliberate air under the soles, on TOP of the measured origin->sole correction
+  // in makeHuman. That correction only buys contact — sole exactly on the floor
+  // plane — and contact still reads a touch sunk once the floor's own glow and the
+  // contact shadow close in around the foot. This is the one taste number in the
+  // placement; everything else about it is derived.
+  //
+  // Worth knowing before touching it: this number is nearly invisible by design.
+  // The ortho camera is `frustum 17 / zoom` with ZOOM_MAX 2.6, so a world unit
+  // spans 16 px at the default framing and 47 px at the tightest the app reaches.
+  // A 2.66-unit shopper is 42 px tall at overview and 125 px in focus mode, and a
+  // whole foot is under 6 px even there — so 0.02 is about a third of a pixel.
+  // That is deliberate: it is the amount that stops the sole reading as sunk
+  // without ever letting the body separate from its own contact shadow. 0.08 was
+  // tried and rejected on the running scene as too much air.
+  // Dial it live with `__storeBabylon.debug.footLift(v)` before changing it here.
+  let footClearance = 0.02;
   const DONOR_FILE = 'Casual_Male'; // ships the Idle/Walk/PickUp clips we retarget
   const CHAR_FILES = [
     'Casual_Male',
@@ -268,10 +284,16 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const headY = head
       ? head.computeWorldMatrix(true).multiply(toLocal).getTranslation().y - minY
       : 0;
-    return { head: headY, full: maxY - minY };
+    // `foot` is the gap between the model's origin and its actual sole. It is
+    // NOT zero: every file in the Quaternius pack measures minY = -0.01859, so
+    // dropping the root on the floor buries the soles by that much × scale and
+    // the whole crowd reads as standing in the concrete. It was already being
+    // computed here as the baseline for `head` and then thrown away.
+    return { head: headY, full: maxY - minY, foot: -minY };
   }
   const charCache = new Map(); // file -> Promise<AssetContainer>
   const charScale = new Map(); // file -> uniform scale that puts it at TARGET_H
+  const charFoot = new Map();  // file -> origin->sole gap, still in model units
   function loadCharContainer(file) {
     if (!charCache.has(file)) {
       const p = SceneLoader.LoadAssetContainerAsync('/models/', file + '.glb', scene)
@@ -288,6 +310,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
           charScale.set(file, size.head > 0.01 ? TARGET_HEAD / size.head
             : size.full > 0.01 ? TARGET_H / size.full
             : CHAR_SCALE);
+          charFoot.set(file, size.foot);
           return container;
         });
       charCache.set(file, p);
@@ -956,6 +979,39 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // face normal toward the shelf end they stand nearest, so the shelf recedes
   // into frame past them. dist/height keep beta ≈ PI/2.6 through poseFromOffset.
   const PFOCUS = { yaw: 0.61, dist: 13, height: 4.9, targetY: 1.5, zoom: 2.6 };
+  const PFOCUS_MARGIN = 1;      // how far inside the room the camera plane must stay
+  const PFOCUS_MIN_SCALE = 0.3; // ...but never fold the plane into the shopper
+  // ...and how much floor the sideways half of the swing wants beyond its own
+  // reach. 3 is not a taste call: the escalators occupy x −14.7…−11.3 against
+  // the left wall, and a camera needs 10.15 of headroom to clear that band, so
+  // anything less than ~10.45 is the number that let it park on top of them.
+  const PFOCUS_SIDE_CLEAR = 3;
+
+  // 13 units of standoff puts the camera outside the building for any shelf near
+  // an edge — shelf 3's shoppers land the camera ~1.2 past the storefront — and
+  // then the wall is across the shot. Swinging the yaw the other way does not fix
+  // it: the overshoot rides on the shelf's own face normal, so both ends of the
+  // shelf overshoot by the same amount.
+  //
+  // The camera is orthographic, so radius sets nothing but where the camera PLANE
+  // sits — the frame comes from frustum/zoom alone. Shrinking the offset
+  // uniformly therefore leaves alpha, beta and every pixel of the composition
+  // untouched, and only changes what minZ clips off the front. Pulling the plane
+  // back inside the room puts the wall BEHIND the camera rather than across it.
+  // (Occluders between the plane and the shopper — a neighbouring gondola — are a
+  // different problem and untouched by this.)
+  function keepCameraInRoom(target, offset) {
+    const lim = ROOM / 2 - PFOCUS_MARGIN;
+    let s = 1;
+    for (const ax of ['x', 'z']) {
+      const t = target[ax], o = offset[ax];
+      if (o === 0 || Math.abs(t + o) <= lim) continue;
+      if (Math.abs(t) >= lim) return offset; // shopper is out there too: nothing to pull back to
+      s = Math.min(s, ((o > 0 ? lim : -lim) - t) / o);
+    }
+    return s >= 1 ? offset : offset.scale(Math.max(s, PFOCUS_MIN_SCALE));
+  }
+
   let pendingFocusPose = null; // { id, pose } — consumed by the next selectShelf round-trip
   function personFocusPoseFor(e) {
     const s = SLOTS[e.ref.slot];
@@ -963,11 +1019,39 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const along = new Vector3(away.z, 0, -away.x);
     const c = unitBounds(zoneById.get(s.shelfId).unit).center;
     const side = (e.h.position.x - c.x) * along.x + (e.h.position.z - c.z) * along.z >= 0 ? 1 : -1;
-    const dir = away.scale(Math.cos(PFOCUS.yaw)).add(along.scale(side * Math.sin(PFOCUS.yaw)));
-    const pose = poseFromOffset(dir.scale(PFOCUS.dist).add(new Vector3(0, PFOCUS.height, 0)));
+    // `side` answers "which way does the shelf recede" and knows nothing about
+    // the room, so it will happily aim the camera into the left wall — where the
+    // escalators are — over a shopper standing 3cm past the shelf's midpoint.
+    // Both mirrors are legal shots, so let the floor plan veto one: measure, from
+    // where the shopper actually stands, how far you can travel each way before
+    // leaving the room, and swing the other way when the chosen side is short.
+    //
+    // Measured along the swing axis ALONE, not as a distance to the room in
+    // general. A shopper at the back wall is close to it whichever way the camera
+    // swings, and folding that in would drown out the difference on the axis the
+    // choice actually controls — which is how "did the camera leave the box"
+    // missed shelf 6: the far side was inside the box by 0.35 and won on a tie.
+    const need = PFOCUS.dist * Math.sin(PFOCUS.yaw);
+    const headroom = (sd) => {
+      const lim = ROOM / 2 - PFOCUS_MARGIN;
+      let t = Infinity;
+      for (const ax of ['x', 'z']) {
+        const d = along[ax] * sd;
+        if (Math.abs(d) < 1e-6) continue;
+        t = Math.min(t, ((d > 0 ? lim : -lim) - e.h.position[ax]) / d);
+      }
+      return t;
+    };
+    const room = need + PFOCUS_SIDE_CLEAR;
+    // only one arrangement overrules the composition: this side is cramped and
+    // the mirror is not. Both fine, or both cramped, and `side` still decides.
+    const pick = headroom(side) < room && headroom(-side) >= room ? -side : side;
+    const dir = away.scale(Math.cos(PFOCUS.yaw)).add(along.scale(pick * Math.sin(PFOCUS.yaw)));
+    const target = new Vector3(e.h.position.x, PFOCUS.targetY, e.h.position.z);
+    const offset = dir.scale(PFOCUS.dist).add(new Vector3(0, PFOCUS.height, 0));
     return {
-      ...pose,
-      target: new Vector3(e.h.position.x, PFOCUS.targetY, e.h.position.z),
+      ...poseFromOffset(keepCameraInRoom(target, offset)),
+      target,
       zoom: PFOCUS.zoom,
     };
   }
@@ -1091,7 +1175,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     if (show) {
       if (!floorHome) {
         floorHome = {
-          alpha: camera.alpha, beta: camera.beta, radius: camera.radius,
+          // fh carries an orbit only when it took the camera off a landing
+          alpha: fh?.alpha ?? camera.alpha,
+          beta: fh?.beta ?? camera.beta,
+          radius: fh?.radius ?? camera.radius,
           target: fh ? fh.target : camera.target.clone(), zoom: fh ? fh.zoom : zoom,
         };
       }
@@ -1236,7 +1323,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const fh = releaseFollow();
     if (!prev && !homePose) {
       homePose = {
-        alpha: camera.alpha, beta: camera.beta, radius: camera.radius,
+        // fh carries an orbit only when it took the camera off a landing
+        alpha: fh?.alpha ?? camera.alpha,
+        beta: fh?.beta ?? camera.beta,
+        radius: fh?.radius ?? camera.radius,
         target: fh ? fh.target : camera.target.clone(), zoom: fh ? fh.zoom : zoom,
       };
     }
@@ -1395,7 +1485,26 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       // so models authored in different units land the same size in the crowd.
       // The scale was measured once when the file loaded (measureBindPose) —
       // never re-measure per clone, the clone's bounding box lies.
-      root.scaling.setAll(charScale.get(file) ?? CHAR_SCALE);
+      const scale = charScale.get(file) ?? CHAR_SCALE;
+      root.scaling.setAll(scale);
+      // ...then sit the sole on the floor instead of the origin. Lifted on the
+      // ROOT, never on the holder: the holder's y = 0 is read as "this shopper
+      // stands here" by the floor rings (y 0.07), the scan tag (h.y + 2.3), the
+      // head cards (h.y + HEAD_CARD_LIFT), the camera and the pathing — moving
+      // the body inside the holder leaves every one of those honest.
+      // Derived, not tuned: `foot` is measured per file and multiplied by that
+      // file's own scale, because root.position lives in the PARENT's space and
+      // root.scaling never touches it. One shared constant would be wrong for at
+      // least one model already — Casual3_Male's shorter Head bone scales it to
+      // 0.906, so its sole is buried 0.0168 against everyone else's 0.0148 — and
+      // a rig from outside this pack (the Mixamo/Zoro build, authored in cm)
+      // would be off by orders of magnitude. This corrects itself for both.
+      // footClearance rides on top and is flat world units on purpose: it is a
+      // look, not a property of the model, so everyone gets the same gap. The
+      // derived half is kept on the person so debug.footLift can re-lift a body
+      // that is already on the floor without re-deriving anything.
+      u.footBase = (charFoot.get(file) ?? 0) * scale;
+      root.position.y = u.footBase + footClearance;
       const mats = new Set();
       root.getChildMeshes().forEach((m) => {
         m.isPickable = false;
@@ -1650,9 +1759,27 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   let followId = null;
   let followHome = null;     // { target, zoom } — framing from before the mode
   const _followGoal = new Vector3();
+  // ---- landing: the mode borrows the camera for a close-up while its shopper
+  // stands at a shelf, then gives it straight back. This is the one stretch
+  // where Focus mode touches alpha/beta, and it is deliberate — at close range
+  // the angle decides whether you see them at all, and zooming straight in on
+  // whatever orbit the user left would just as often plant the camera behind
+  // the shelf. personFocusPoseFor's yaw is what keeps the shelf receding past
+  // them instead of covering them.
+  // A FOURTH home slot, not a reuse of followHome: the two nest (exiting the
+  // mode mid-landing has to skip the landing's pose and fly all the way back to
+  // the pre-follow one), and a shared slot could only hold one of them.
+  let landedId = null;       // person we are landed on, null when cruising
+  let landHome = null;       // full pose to unfold back to when they leave
 
   function followTargetOf(e) {
     return new Vector3(e.h.position.x, FOLLOW_Y, e.h.position.z);
+  }
+
+  // the same pair the dbl-click close-up demands — personFocusPoseFor reads
+  // SLOTS[slot], so a browse with no slot yet has no pose to fly to
+  function canLand(e) {
+    return !!e && e.ref.mode === 'browse' && e.ref.slot >= 0;
   }
 
   // Hand the camera over without flying anywhere, and report the pre-follow
@@ -1664,13 +1791,28 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     followId = null;
     const home = followHome;
     followHome = null;
+    // A landing in flight is dropped, not flown back through — its pose is a
+    // waypoint inside the mode, and the mode is what just ended. But the orbit
+    // it borrowed has to be handed back with the framing: `followHome` records
+    // target+zoom only, on the old promise that the mode never touched
+    // alpha/beta/radius, and landing is exactly the stretch where it does. Left
+    // out, the next owner banks a close-up angle as its own home and its later
+    // fly-back drops you into the side of a shelf — the same failure this
+    // function exists to prevent, one level down.
+    const orbit = landedId != null && landHome
+      ? { alpha: landHome.alpha, beta: landHome.beta, radius: landHome.radius }
+      : null;
+    landedId = null;
+    landHome = null;
     onFollowPerson?.(null);
-    return home;
+    return home && (orbit ? { ...home, ...orbit } : home);
   }
 
   function followPerson(id) {
     if (id == null) {
       const home = releaseFollow();
+      // spread order matters: `home` carries an orbit when it came off a
+      // landing, and that one has to win over the camera's current pose
       if (home) flyTo({ alpha: camera.alpha, beta: camera.beta, radius: camera.radius, ...home });
       return;
     }
@@ -1686,6 +1828,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
         : { target: camera.target.clone(), zoom };
     }
     followId = id;
+    // switching subject mid-mode: the old shopper's landing is void. Left set,
+    // the watcher below would either unfold to a pose framed on somebody we are
+    // no longer following, or bank it as the new landing's home.
+    landedId = null;
+    landHome = null;
     flyTo({
       alpha: camera.alpha, beta: camera.beta, radius: camera.radius,
       target: followTargetOf(e), zoom: FOLLOW_ZOOM,
@@ -5039,6 +5186,34 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       zoom += (zoomTarget - zoom) * Math.min(1, dt * 9);
     }
 
+    // Focus mode landing — watched per frame rather than pushed from the shelf
+    // sub-machine, because every road into and out of a browse session (the API
+    // actions, an ambient shopper picking their own shelf, shelfClose, being
+    // pulled away mid-scan) already ends up moving `mode`, and one watcher can
+    // never miss one of them. Runs before the chase so a landing frame flies
+    // instead of lerping.
+    if (followId != null) {
+      const e = persons.get(followId);
+      const want = canLand(e);
+      if (want && landedId !== followId) {
+        // Mid-flight means the camera is on its way somewhere — that somewhere,
+        // not this frame's pose, is what the landing is borrowing. It is also
+        // what makes "start following someone already at a shelf" a single
+        // flight: the entry flight's destination becomes the unfold pose, and
+        // we head straight for the close-up from wherever we happen to be.
+        landHome = fly.active
+          ? { alpha: fly.toAlpha, beta: fly.toBeta, radius: fly.toRadius, target: fly.toTarget.clone(), zoom: fly.toZoom }
+          : { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone(), zoom };
+        landedId = followId;
+        flyTo(personFocusPoseFor(e));
+      } else if (!want && landedId != null) {
+        const home = landHome;
+        landedId = null;
+        landHome = null;
+        if (home) flyTo(home);
+      }
+    }
+
     // Focus mode chase — after the fly tween on purpose: the entry flight owns
     // the target until it lands, and whatever ground they covered during those
     // 0.9s is then closed by this lerp (reads as a camera catching up).
@@ -5202,15 +5377,34 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       goal: p.mv ? { kind: p.mv.kind ?? 'shelf', x: +p.mv.wps[p.mv.wps.length - 1].x.toFixed(2), z: +p.mv.wps[p.mv.wps.length - 1].z.toFixed(2), legs: p.mv.wps.length } : null,
       speed: +(p.cur ?? 0).toFixed(3), exit: p.exit,
     })),
+    // How much air sits under the soles. This is here because foot placement is
+    // the one tuning job in the scene that a screenshot cannot settle: a world
+    // unit is 16 px at the default framing, so every value worth trying differs
+    // from the last by about a pixel. Call it with a number to re-lift everyone
+    // already on the floor AND set what the next spawn uses; call it with nothing
+    // to read the current value. Only the taste half moves — the measured
+    // origin->sole correction stays per-model.
+    footLift: (v) => {
+      if (typeof v === 'number') footClearance = v;
+      let relifted = 0;
+      for (const node of scene.transformNodes) {
+        const u = node.name === 'human' ? node.metadata : null;
+        if (!u?.entries || u.footBase == null) continue;
+        u.entries.rootNodes[0].position.y = u.footBase + footClearance;
+        relifted++;
+      }
+      return { footClearance, relifted };
+    },
     // who currently owns the camera, and what each owner promised to give back.
     // Three exclusive modes hand it to each other (shelf focus / Floor 2 / Focus
     // mode), so "which home is armed" is the first thing to ask when a fly-back
     // goes to the wrong place.
     camera: () => ({
-      selectedShelf: selectedId, followId, flying: fly.active,
+      selectedShelf: selectedId, followId, landedId, flying: fly.active,
       homePose: homePose && { t: homePose.target.asArray().map((v) => +v.toFixed(2)), zoom: +homePose.zoom.toFixed(2) },
       floorHome: floorHome && { t: floorHome.target.asArray().map((v) => +v.toFixed(2)), zoom: +floorHome.zoom.toFixed(2) },
       followHome: followHome && { t: followHome.target.asArray().map((v) => +v.toFixed(2)), zoom: +followHome.zoom.toFixed(2) },
+      landHome: landHome && { t: landHome.target.asArray().map((v) => +v.toFixed(2)), zoom: +landHome.zoom.toFixed(2) },
     }),
     // every DOM node the scene is flying over a head, plus WHY one is not on
     // screen — these live 1–3s each, so "was it hidden or never revealed" is
