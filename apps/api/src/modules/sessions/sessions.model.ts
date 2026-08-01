@@ -55,6 +55,19 @@ const ExternalDevice = t.Object({
   }),
 });
 
+// Running tally for the session (ShelfSessionSummary in ../../models). Every
+// field is required: the MQTT adapter normalizes the wire's optional event
+// counts away before a summary ever reaches the ledger.
+const SessionSummary = t.Object({
+  openingQty: t.Number(),
+  currentQty: t.Number(),
+  eventPickedQty: t.Number(),
+  eventAddedQty: t.Number(),
+  pickedOutTotal: t.Number(),
+  addedInTotal: t.Number(),
+  takenTotal: t.Number(),
+});
+
 const SessionEntity = t.Object({
   id: t.String(),
   userId: t.Integer(),
@@ -70,6 +83,7 @@ const SessionEntity = t.Object({
       unitWeightKg: t.Number(),
     }),
   ),
+  summary: SessionSummary,
 });
 
 export const sessionsModel = new Elysia({ name: "sessions.model" }).model({

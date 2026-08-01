@@ -1682,10 +1682,34 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     headArmed.delete(apiId);
     cb(revealed);
   }
+  // The browse card is the other half of the arming contract, and it inverts it.
+  // An armed card is a one-shot: revealed once, then it expires on React's own
+  // clock. The browse card opens at the scanQR pass and is REWRITTEN in place on
+  // every pick until the shelf visit is over — so nothing on React's side knows
+  // when it should stop. The scene owes it a close signal, fired on exactly the
+  // events that drop an armed card, plus despawn. Miss one and the card outlives
+  // the visit, floating a stale basket over someone already back in the aisle.
+  const headHeld = new Map(); // apiId -> onEnd()
+  function holdEventCard(apiId, onEnd) {
+    if (apiId == null) return;
+    headHeld.get(apiId)?.(); // latest wins, same as the armed slot
+    headHeld.set(apiId, onEnd);
+  }
+  function endHeldCard(apiId) {
+    if (apiId == null) return;
+    const cb = headHeld.get(apiId);
+    if (!cb) return;
+    headHeld.delete(apiId);
+    cb();
+  }
   // the gesture that earned the card just finished — show it now
   const revealHeadCard = (p) => settleHeadCard(p?.person?.apiId, true);
-  // their shelf session ended (or their body went): nothing is coming
-  const dropHeadCard = (p) => settleHeadCard(p?.person?.apiId, false);
+  // their shelf session ended (or their body went): nothing is coming, and
+  // whatever is still floating over their head belongs to a visit that is over
+  const dropHeadCard = (p) => {
+    settleHeadCard(p?.person?.apiId, false);
+    endHeldCard(p?.person?.apiId);
+  };
 
   // invisible pick proxy — rides along and is disposed with the person's body
   function makePickCap(personId, h) {
@@ -2891,6 +2915,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     return p;
   }
   function disposeShopper(p) {
+    dropHeadCard(p); // the body is going: close the browse card, drop anything armed
     releaseShelfAccess(p); // last one out re-locks the shelf
     p.item.dispose(); p.itemMat.dispose();
     p.phone.dispose(); p.beam.dispose(); p.ring.dispose(); p.ringMat.dispose();
@@ -5406,8 +5431,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       bindFlash, armFlash,
       // scan-verdict / pick / return cards: same arm-then-reveal contract, but
       // the scene reveals them when the matching GESTURE ends rather than when a
-      // gate beam sweeps — see revealHeadCard's two call sites
-      bindEventCard, armEventCard: armHeadCard,
+      // gate beam sweeps — see revealHeadCard's two call sites.
+      // holdEventCard registers the browse card's closer: that one card is armed
+      // once and then rewritten per pick, so only the scene can say when it dies.
+      bindEventCard, armEventCard: armHeadCard, holdEventCard,
       bindNameTag, // NAME TAGS mode — one per body, no arming (there is no event)
     },
 

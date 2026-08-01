@@ -41,11 +41,17 @@ export type ShelfClosedStatus = {
   takenTotal: number; // net taken over the whole session
 };
 
-// Rolling per-session tally the device ships alongside every event.
+// Rolling per-session tally the device ships alongside every event. The two
+// `event*Qty` fields are the ONE-EVENT counts and are mutually exclusive: a pick
+// frame carries `eventPickedQty` only, an add frame `eventAddedQty` only — hence
+// both optional. Everything else is a running total for the shelf session.
+// Normalized into the required-field ShelfSessionSummary (../models/sessions)
+// before it is stored; nothing downstream should see the optionality.
 export type LoadcellSessionSummary = {
   addedInTotal: number;
   currentQty: number;
-  eventPickedQty: number;
+  eventPickedQty?: number;
+  eventAddedQty?: number;
   openingQty: number;
   pickedOutTotal: number;
   takenTotal: number;

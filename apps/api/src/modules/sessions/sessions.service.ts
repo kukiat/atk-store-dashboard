@@ -1,6 +1,7 @@
 import { Elysia } from "elysia";
 import type {
   ShelfSession,
+  ShelfSessionSummary,
   SessionEvent,
   Shelf,
   ExternalDevice,
@@ -54,16 +55,35 @@ class SessionsService {
     );
   }
 
-  // scanQR pass: enrich and stash a new session. Idempotent per user — any stale
-  // row for the same shopper is dropped first, so one user never holds two rows
-  // (guards against an orphan lingering past a prior browse). Returns the row.
+  // scanQR pass: enrich and stash a new session. Idempotent on TWO keys — any
+  // stale row for the same shopper is dropped first (an orphan lingering past a
+  // prior browse), and so is any row already open at this device.
+  //
+  // The device rule is not tidiness, it is what makes `summary` truthful: the
+  // loadcell's tally belongs to the SCALE, not to a shopper — one pan cannot
+  // tell two pairs of hands apart, and it publishes one set of totals per
+  // device. Two rows on one device would each be handed those same totals, and
+  // the head card over the second shopper would claim picks they never made.
+  // One row per device makes the summary single-owner by construction rather
+  // than by luck. The newcomer wins: they are the one physically at the shelf.
+  //
+  // `summary` is seeded from the shelf's own stock so it is complete from the
+  // first frame — the card reads it before any pick has happened, and the
+  // commanded path has no loadcell to quote and advances this seed itself.
   open(input: {
     userId: number;
     sku: string;
     shelf: Shelf;
     device: ExternalDevice;
   }): ShelfSession {
-    this.closeByUser(input.userId); // replace-if-exists
+    this.closeByUser(input.userId); // replace-if-exists, per shopper
+    this.drop(
+      this.list().filter(
+        (s) => s.externalDevice.device_id === input.device.device_id,
+      ),
+    ); // …and per device
+    const stock =
+      input.shelf.items.find((i) => i.id === input.sku)?.qty ?? 0;
     const session: ShelfSession = {
       id: crypto.randomUUID(),
       userId: input.userId,
@@ -71,6 +91,15 @@ class SessionsService {
       shelf: input.shelf,
       externalDevice: input.device,
       items: [], // filled as loadcell pick/return events arrive
+      summary: {
+        openingQty: stock,
+        currentQty: stock,
+        eventPickedQty: 0,
+        eventAddedQty: 0,
+        pickedOutTotal: 0,
+        addedInTotal: 0,
+        takenTotal: 0,
+      },
     };
     this.store.set(session.id, session);
     this.emit({ type: "opened", session });
@@ -91,12 +120,13 @@ class SessionsService {
       sku: string;
       name: string;
       unitWeightKg: number;
-      qty: number;
-      deltaQty: number;
+      summary: ShelfSessionSummary;
     },
   ): ShelfSession[] {
     for (const s of rows) {
-      const { sku, name, unitWeightKg, qty, deltaQty } = lineFor(s);
+      const { sku, name, unitWeightKg, summary } = lineFor(s);
+      s.summary = summary; // whole-object overwrite: no field survives an event
+      const qty = summary.takenTotal; // the basket line IS the net-held tally
       const line = s.items.find((i) => i.sku === sku);
       if (qty <= 0) {
         s.items = s.items.filter((i) => i.sku !== sku);
@@ -114,8 +144,7 @@ class SessionsService {
           sku,
           name,
           action,
-          deltaQty,
-          qty,
+          summary,
           items: s.items,
         },
       });
@@ -126,17 +155,19 @@ class SessionsService {
   // A loadcell pick/return landed: update the basket of every session open at
   // this device for this sku (matched on BOTH device_id and sku), and emit a
   // picked/returned event per match for the scene gesture + dashboard cart.
-  // `qty` is set from the loadcell's own net-taken tally (takenTotal) rather
-  // than accumulated here, so a dropped MQTT frame can't drift the count; a line
-  // is removed when it falls to 0. No open session at the device → returns [].
+  // The whole tally is taken from the device's own summary rather than
+  // accumulated here, so a dropped MQTT frame can't drift any of the counts; a
+  // line is removed when the net-held falls to 0. The summary arrives already
+  // normalized (see normalizeSummary in ../../mqtt/mqtt.client) — the wire's
+  // optional event counts are filled in before they reach the ledger.
+  // No open session at the device → returns [].
   recordPickReturn(input: {
     deviceId: string;
     sku: string;
     name: string;
     unitWeightKg: number;
     action: "pick" | "return";
-    deltaQty: number;
-    takenTotal: number; // authoritative net-taken from the loadcell
+    summary: ShelfSessionSummary; // authoritative tally from the loadcell
   }): ShelfSession[] {
     const rows = this.list().filter(
       (s) => s.externalDevice.device_id === input.deviceId && s.sku === input.sku,
@@ -145,8 +176,7 @@ class SessionsService {
       sku: input.sku,
       name: input.name,
       unitWeightKg: input.unitWeightKg,
-      qty: Math.max(0, input.takenTotal),
-      deltaQty: input.deltaQty,
+      summary: input.summary,
     }));
   }
 
@@ -156,24 +186,40 @@ class SessionsService {
   // pick/return gesture and the head card — without this the mock path would be
   // untestable without a live broker.
   //
-  // No loadcell tally to trust here, so qty accumulates from what the row
-  // already holds (floored at 0: returning what you aren't holding is a no-op on
-  // the count, not a negative). Product fields fall back to the shelf's stock
-  // line because the IoT feed ships `product: null` on unconfigured devices.
-  // The `browsing` guard on inspectItem means a row exists; no row → returns [].
+  // No loadcell tally to trust here, so the summary is SYNTHESIZED: each command
+  // advances the row's own seed by one unit. Product fields fall back to the
+  // shelf's stock line because the IoT feed ships `product: null` on
+  // unconfigured devices. The `browsing` guard on inspectItem means a row
+  // exists; no row → returns [].
+  //
+  // Returning what you aren't holding clamps the EVENT to 0 units rather than
+  // flooring the running total. Flooring `takenTotal` while still counting the
+  // return would break `takenTotal === pickedOutTotal − addedInTotal`, and the
+  // head card now prints all three side by side — numbers that visibly fail to
+  // add up. Zero units moved, so nothing is counted; the event is still emitted
+  // (the operator asked for the gesture) and the card simply doesn't flash a
+  // badge for it.
   recordUserPickReturn(userId: number, action: "pick" | "return"): ShelfSession[] {
     const rows = this.list().filter((s) => s.userId === userId);
-    const deltaQty = action === "pick" ? 1 : -1;
     return this.applyPickReturn(rows, action, (s) => {
       const product = s.externalDevice.product;
       const stock = s.shelf.items.find((i) => i.id === s.sku) ?? s.shelf.items[0];
-      const held = s.items.find((i) => i.sku === s.sku)?.qty ?? 0;
+      const prev = s.summary;
+      const picked = action === "pick" ? 1 : 0;
+      const added = action === "return" ? Math.min(1, prev.takenTotal) : 0;
       return {
         sku: s.sku,
         name: product?.item_name ?? stock?.name ?? s.sku,
         unitWeightKg: product?.unit_weight_kg ?? stock?.weight ?? 0,
-        qty: Math.max(0, held + deltaQty),
-        deltaQty,
+        summary: {
+          openingQty: prev.openingQty,
+          currentQty: Math.max(0, prev.currentQty - picked + added),
+          eventPickedQty: picked,
+          eventAddedQty: added,
+          pickedOutTotal: prev.pickedOutTotal + picked,
+          addedInTotal: prev.addedInTotal + added,
+          takenTotal: prev.takenTotal + picked - added,
+        },
       };
     });
   }
@@ -183,12 +229,17 @@ class SessionsService {
   // leave / walkAway), so MQTT and force-close reach it via the shelfClose
   // action rather than deleting rows themselves.
   closeByUser(userId: number): ShelfSession[] {
-    const gone = this.list().filter((s) => s.userId === userId);
-    for (const s of gone) {
+    return this.drop(this.list().filter((s) => s.userId === userId));
+  }
+
+  // the one place a row leaves the store — closeByUser and open()'s per-device
+  // eviction both come through here so every removal emits `closed` exactly once
+  private drop(rows: ShelfSession[]): ShelfSession[] {
+    for (const s of rows) {
       this.store.delete(s.id);
       this.emit({ type: "closed", session: { id: s.id, userId: s.userId } });
     }
-    return gone;
+    return rows;
   }
 }
 

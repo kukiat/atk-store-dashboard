@@ -919,12 +919,17 @@ canvas { display: block; }
 @keyframes vf-bubble-in { from { opacity: 0; transform: translateY(6px) scale(.9); } to { opacity: 1; transform: none; } }
 @keyframes vf-bubble-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: scale(.95); } }
 
-/* head event cards — shelf scan verdict + each pick/return, floating over an API
-   customer's head. Same family as the bubble above (radius, glass, nub, pop-in
-   timing) but a short horizontal pill instead of its 150x180 portrait box: these
-   stack ON TOP of the person detail card rather than muting it, and a tall card
-   would push the stack off the top of the stage. Colour carries the meaning —
-   the icon inherits it through currentColor. */
+/* head event cards — the scan verdict and then the shopper's basket at that
+   shelf, floating over an API customer's head. Same family as the bubble above
+   (radius, glass, nub, pop-in timing) but a short horizontal pill instead of its
+   150x180 portrait box: these stack ON TOP of the person detail card rather than
+   muting it, and a tall card would push the stack off the top of the stage.
+   Colour carries the meaning — the icon inherits it through currentColor.
+
+   The browse card lives for the whole shelf visit rather than 2.4s, which is why
+   the accent TRANSITIONS: it opens green on the scan pass and settles to blue
+   when the first item moves, and a hard cut on a card you are already looking at
+   reads as a glitch. */
 .hcard-track {
   position: absolute; left: 0; top: 0; z-index: 24;
   visibility: hidden;            /* revealed by the scene on the first tracked frame */
@@ -932,6 +937,7 @@ canvas { display: block; }
   pointer-events: none;
 }
 .hcard {
+  position: relative;              /* the delta badge flies over it */
   display: flex; align-items: center; gap: 9px;
   padding: 8px 13px 8px 10px;
   border-radius: 13px; border: 1px solid var(--hc-accent-dim, rgba(120,200,255,.3));
@@ -939,6 +945,7 @@ canvas { display: block; }
   box-shadow: 0 10px 28px rgba(0,0,0,.5), 0 0 0 1px var(--hc-accent-dim, rgba(120,200,255,.1));
   white-space: nowrap;
   animation: vf-bubble-in .3s cubic-bezier(.2,.9,.25,1.15) both;
+  transition: border-color .45s ease, box-shadow .45s ease;
 }
 .hcard-track.closing .hcard { animation: vf-bubble-out .4s ease both; }
 .hcard-track::after {            /* pointer nub down toward the shopper */
@@ -948,26 +955,64 @@ canvas { display: block; }
   border-right: 1px solid var(--hc-accent-dim, rgba(120,200,255,.3));
   border-bottom: 1px solid var(--hc-accent-dim, rgba(120,200,255,.3));
 }
-.hcard-ico { width: 21px; height: 21px; flex: none; color: var(--hc-accent); }
+.hcard-ico {
+  width: 21px; height: 21px; flex: none; color: var(--hc-accent);
+  transition: color .45s ease;
+}
 .hcard-num {
   font-size: 19px; font-weight: 800; line-height: 1;
   letter-spacing: -.01em; color: var(--hc-accent);
   font-variant-numeric: tabular-nums;
+  transition: color .45s ease;
 }
 .hcard-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .hcard-txt b {
   font-size: 12px; font-weight: 700; letter-spacing: .02em; color: #eaf6ff;
-  max-width: 168px; overflow: hidden; text-overflow: ellipsis;
+  max-width: 190px; overflow: hidden; text-overflow: ellipsis;
 }
+/* wider than the title above it: this line carries up to three counts
+   ("HELD 2 · OUT 3 · IN 1") at 10px with .07em tracking, and an ellipsis here
+   would eat the very numbers the card exists to show. The pill is nowrap and
+   centred on the head, so it just grows symmetrically. */
 .hcard-txt i {
   font-style: normal; font-size: 10px; font-weight: 600;
   letter-spacing: .07em; text-transform: uppercase; color: #7d93c4;
-  max-width: 168px; overflow: hidden; text-overflow: ellipsis;
+  max-width: 230px; overflow: hidden; text-overflow: ellipsis;
 }
-/* four kinds, four accents. return is amber, deliberately NOT red — putting an
-   item back is not an error, and red next to the scan-fail card would say it is */
+/* an emptied basket is still worth reading — the OUT/IN counts beside it say
+   what happened — but HELD 0 should not compete with them for attention */
+.hcard-txt i .dim { color: #55638c; }
+
+/* the delta for ONE event, flying in over a card that otherwise holds still.
+   Absolutely positioned so it cannot reflow the pill (and therefore cannot
+   shift the stack under it) while it animates. */
+.hcard-badge {
+  position: absolute; right: 8px; top: -13px;
+  display: flex; align-items: center; gap: 3px;
+  padding: 2px 7px 2px 5px; border-radius: 9px;
+  font-size: 11px; font-weight: 800; line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  color: #08131f; background: var(--hc-accent);
+  box-shadow: 0 4px 12px rgba(0,0,0,.45);
+  animation: hc-badge .3s cubic-bezier(.2,.9,.25,1.15) both,
+             hc-badge-out .35s ease .75s both;
+}
+.hcard-badge-ico { width: 12px; height: 12px; flex: none; }
+@keyframes hc-badge {
+  from { opacity: 0; transform: translateY(6px) scale(.8); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes hc-badge-out {
+  from { opacity: 1; transform: none; }
+  to   { opacity: 0; transform: translateY(-7px); }
+}
+
+/* four accents. return is amber, deliberately NOT red — putting an item back is
+   not an error, and red next to the scan-reject card would say it is. `pass` is
+   the browse card's opening state only; from the first pick it wears `pick` for
+   the rest of the visit and only the badge changes colour. */
 .hcard-pass   { --hc-accent: #4caf72; --hc-accent-dim: rgba(76,175,114,.42); }
-.hcard-fail   { --hc-accent: #e2574c; --hc-accent-dim: rgba(226,87,76,.42); }
+.hcard-reject { --hc-accent: #e2574c; --hc-accent-dim: rgba(226,87,76,.42); }
 .hcard-pick   { --hc-accent: #5cc8ff; --hc-accent-dim: rgba(92,200,255,.42); }
 .hcard-return { --hc-accent: #f0b45c; --hc-accent-dim: rgba(240,180,92,.42); }
 

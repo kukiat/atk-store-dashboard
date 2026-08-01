@@ -5,7 +5,7 @@ import { useGSAP } from '@gsap/react';
 import { Flip } from 'gsap/Flip';
 import { createSmartStoreBabylonScene, validateShelfLayout, validateUsers } from '../scenes/smartStoreBabylon.js';
 import BootSplash, { useBootProgress } from './BootSplash.jsx';
-import { HeadCards, useHeadCards, scanCard, pickCard } from './HeadCards.jsx';
+import { HeadCards, useHeadCards } from './HeadCards.jsx';
 import { NameTags, useNameTagMode } from './NameTags.jsx';
 import PersonAvatar from './PersonAvatar.jsx';
 import { apiFetch } from '../api';
@@ -628,32 +628,35 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     });
     return () => es.close();
   }, []);
-  // scan-verdict / pick / return cards above API customers' heads. Armed from
-  // the two feeds below, revealed by the scene when the causing gesture ends —
-  // see HeadCards.jsx for why the reveal is not ours to make. `armCard` is
-  // stable, so the SSE effects that depend on it never re-subscribe.
-  const { cards: headCards, armCard } = useHeadCards(peopleRef);
+  // scan-verdict / browse cards above API customers' heads. Armed from the two
+  // feeds below, revealed by the scene when the causing gesture ends — see
+  // HeadCards.jsx for why the reveal is not ours to make, and why the browse
+  // card's DEATH is not ours either. Both arms are stable, so the SSE effects
+  // that depend on them never re-subscribe.
+  const { cards: headCards, armScan, armPickReturn } = useHeadCards(peopleRef);
 
   // shelf-scan sessions feed — the SINGLE source of pick/return in the scene.
   // Both the MQTT loadcell and a commanded `inspectItem` land here (the API
   // routes the command through the session basket so the mock path and the
   // hardware path are one path), which is why the users feed's own
   // `inspectItem` event no longer drives anything: it would double the gesture.
-  // Each event plays the gesture (userId → 3D body) and arms a head card that
-  // the scene reveals when that gesture finishes.
+  // Each event plays the gesture (userId → 3D body) and rewrites the browse card
+  // already floating over them, which the scene reveals when that gesture ends.
+  // Every number on the card comes off `s.summary` — the API's single tally for
+  // the shelf visit — so nothing here counts anything.
   useEffect(() => {
     const es = new EventSource(`${SESSIONS_API_URL}/events`);
     const gesture = (result) => (ev) => {
       let s;
       try { s = JSON.parse(ev.data); } catch { return; }
-      if (!s || typeof s.userId !== 'number') return;
+      if (!s || typeof s.userId !== 'number' || !s.summary) return;
       peopleRef.current?.inspectItemUser?.(s.userId, result);
-      armCard(pickCard(s.userId, s));
+      armPickReturn(s.userId, s);
     };
     es.addEventListener('picked', gesture('keep'));
     es.addEventListener('returned', gesture('return'));
     return () => es.close();
-  }, [armCard]);
+  }, [armPickReturn]);
   // pull the current target once the scene is ready so it matches the API
   useEffect(() => {
     if (!crowd) return;
@@ -793,9 +796,10 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     es.addEventListener('walkToShelf', fwd((u) => peopleRef.current?.walkToShelfUser?.(u.id, u.shelfId)));
     es.addEventListener('scanQR', fwd((u) => {
       peopleRef.current?.scanQRUser?.(u.id, u.result);
-      // verdict card, revealed by the scene once the phone comes back down —
-      // the scanning tag owns that spot above their head until then
-      armCard(scanCard(u.id, u.result, u.sku, skuNameRef.current[u.sku]));
+      // revealed by the scene once the phone comes back down — the scanning tag
+      // owns that spot above their head until then. A pass OPENS the browse card
+      // that stays up for the whole shelf visit; a fail is a 2s flash.
+      armScan(u.id, u.result, u.sku, skuNameRef.current[u.sku]);
     }));
     // `inspectItem` is a command only. Its effect reaches the scene through the
     // sessions feed above (the API moves an item on the shopper's shelf session,
@@ -803,7 +807,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     es.addEventListener('walkAway', fwd((u) => peopleRef.current?.walkAwayUser?.(u.id)));
     es.addEventListener('shelfClose', fwd((u) => peopleRef.current?.shelfCloseUser?.(u.id)));
     return () => { clearTimeout(syncT); es.close(); };
-  }, [armCard]);
+  }, [armScan]);
 
   // selected shelf (1–6) drives the stock filter; null = show all shelves.
   // Shelf and person focus are mutually exclusive: picking a shelf clears the

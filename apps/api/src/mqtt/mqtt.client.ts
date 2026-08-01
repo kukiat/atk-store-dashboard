@@ -4,6 +4,7 @@ import type {
   LoadcellStatus,
   ShelfClosedStatus,
 } from "./mqtt.types";
+import type { ShelfSessionSummary } from "../models";
 // raw service instances (this handler lives outside the Elysia graph). The
 // sessions ledger resolves a device_id → the shopper(s) browsing it; the users
 // service runs the shelfClose action that tears the row down and closes the
@@ -105,9 +106,37 @@ function onLoadcellEvent(e: LoadcellEvent) {
   console.log(`[mqtt] ${e.event} ${e.deviceId} — ignored (no handler)`);
 }
 
+// Turn a frame's ragged tally into the ledger's ShelfSessionSummary. This is the
+// only place the wire's shape is allowed to matter; downstream — the session
+// row, the SSE payload, the head card — sees seven numbers that are always
+// present. Three things are reconciled here:
+//
+//  - `sessionSummary` is the modern nested shape. The flat `session*Total` twins
+//    on the frame are the older spelling of the same numbers and stand in when
+//    it is missing (the pattern the takenTotal read already used).
+//  - `eventPickedQty` / `eventAddedQty` are mutually exclusive on the wire — a
+//    pick frame carries only the first, an add frame only the second — and
+//    older firmware sends neither. The ACTING one falls back to |deltaQty|,
+//    which is the same magnitude seen from the shelf's side.
+//  - the idle one is pinned to 0 rather than left absent. Stored summaries are
+//    overwritten whole on every event, so an absent field would let the previous
+//    event's count survive into this one and the card would flash a stale badge.
+export function normalizeSummary(e: LoadcellEvent): ShelfSessionSummary {
+  const s = e.sessionSummary;
+  const moved = Math.abs(e.deltaQty ?? 0);
+  return {
+    openingQty: s?.openingQty ?? e.sessionOpeningQty ?? 0,
+    currentQty: s?.currentQty ?? e.sessionCurrentQty ?? e.currentQty ?? 0,
+    eventPickedQty: e.action === "pick" ? (s?.eventPickedQty ?? moved) : 0,
+    eventAddedQty: e.action === "add" ? (s?.eventAddedQty ?? moved) : 0,
+    pickedOutTotal: s?.pickedOutTotal ?? e.sessionPickedOutTotal ?? 0,
+    addedInTotal: s?.addedInTotal ?? e.sessionAddedInTotal ?? 0,
+    takenTotal: s?.takenTotal ?? e.sessionTakenTotal ?? 0,
+  };
+}
+
 // Route a pick/return into the sessions ledger. Matched on device_id AND sku;
-// the loadcell's own net-taken tally (sessionSummary.takenTotal) drives the held
-// qty so a missed frame can't drift it.
+// the loadcell's own tally drives every count so a missed frame can't drift it.
 function recordPickReturn(e: LoadcellEvent) {
   const rows = sessionsServiceInstance.recordPickReturn({
     deviceId: e.deviceId,
@@ -115,8 +144,7 @@ function recordPickReturn(e: LoadcellEvent) {
     name: e.itemName,
     unitWeightKg: e.unitWeightKg,
     action: e.action as "pick" | "return",
-    deltaQty: e.deltaQty,
-    takenTotal: e.sessionSummary?.takenTotal ?? e.sessionTakenTotal ?? 0,
+    summary: normalizeSummary(e),
   });
   if (rows.length === 0) {
     console.log(`[mqtt] ${e.action} ${e.deviceId}/${e.sku} — no open session, dropped`);
