@@ -6,27 +6,13 @@ import { Flip } from 'gsap/Flip';
 import { createSmartStoreBabylonScene, validateShelfLayout, validateUsers } from '../scenes/smartStoreBabylon.js';
 import BootSplash, { useBootProgress } from './BootSplash.jsx';
 import { HeadCards, useHeadCards, scanCard, pickCard } from './HeadCards.jsx';
+import { NameTags, useNameTagMode } from './NameTags.jsx';
+import PersonAvatar from './PersonAvatar.jsx';
 import { apiFetch } from '../api';
 
 gsap.registerPlugin(Flip);
 
 /* ---------- tiny presentational helpers ---------- */
-
-// Person avatar chip: the API customer's `avatar_url` as an <img>, falling back
-// to the initials chip (torso-tinted) when there's no url, it fails to load, or
-// the person is a walk-in (avatarUrl ''). Key this by url at the call site so a
-// changed url remounts and clears a stale onError.
-function PersonAvatar({ person, className = '' }) {
-  const [broken, setBroken] = useState(false);
-  const cls = `pc-avatar${className ? ` ${className}` : ''}`;
-  return person.avatarUrl && !broken ? (
-    // no-referrer: googleusercontent avatars 403 hotlinked requests that carry a
-    // Referer header — without this the photo errors out to the chip fallback
-    <img className={`${cls} pc-avatar-img`} src={person.avatarUrl} alt="" referrerPolicy="no-referrer" onError={() => setBroken(true)} />
-  ) : (
-    <span className={cls} style={{ background: person.color }}>{person.initials}</span>
-  );
-}
 
 // Donut chart for online / offline shelves.
 function Donut({ online, offline }) {
@@ -496,12 +482,14 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   const rootRef = useRef(null);
   const [tab, setTab] = useState(0);
   const [floor, setFloor] = useState(0);
-  const [view3d, setView3d] = useState(true);
   // sidebar collapse — independent, visual-only (CSS hide, no unmount) so
   // polling underneath keeps running and a re-open shows live data. Not
   // persisted: every load starts with both panels open.
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
+  // NAME TAGS mode — a pill over every head at once (bottom bar). Persisted, so
+  // unlike the two above this one does survive a reload; see useNameTagMode.
+  const [nameTags, setNameTags] = useNameTagMode();
 
   // ---- mock data (shelf catalogue + customer roster): fetched, validated,
   // then everything derives ----
@@ -1132,6 +1120,10 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
           {/* scan-verdict / pick / return cards — same head-projection track as
               the bubble above, one per API customer, scene-revealed */}
           <HeadCards cards={headCards} peopleRef={peopleRef} />
+          {/* NAME TAGS mode — a pill per body, on the same head projection as
+              everything above. Mounted only while the mode is on, so its roster
+              poll costs nothing when it's off. */}
+          {nameTags && <NameTags peopleRef={peopleRef} />}
           {/* Focus mode banner — the only exit that survives both panels being
               collapsed, which is exactly what someone watching a followed
               shopper full-bleed will do. Top-center clears both floating panels. */}
@@ -1162,14 +1154,30 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
           )}
           <div className="floor-ctrl">
             <span className="fc-label">FLOOR PLAN</span>
-            <div className="seg">
-              <button className={!view3d ? 'active' : ''} onClick={() => setView3d(false)}>2D</button>
-              <button className={view3d ? 'active' : ''} onClick={() => setView3d(true)}>3D</button>
-            </div>
             <div className="floors">
               {['Floor 1', 'Floor 2', 'Floor 3'].map((f, i) => (
                 <button key={f} className={`floor-btn${i === floor ? ' active' : ''}`} onClick={() => setFloor(i)}>{f}</button>
               ))}
+            </div>
+            {/* Kept with the controls rather than out by the crowd meters: this
+                bar splits into controls-then-readouts, and it `flex-wrap`s — a
+                switch parked after the meters would break to its own row away
+                from the buttons it belongs with on a narrow window.
+                Label + segment, the shape the retired 2D/3D control used: the
+                caption says what is being switched so the two buttons don't have
+                to repeat it, and it reads as a pair with FLOOR PLAN's group. */}
+            <span className="fc-label">NAME TAGS</span>
+            <div className="seg">
+              <button
+                className={nameTags ? 'active' : ''}
+                onClick={() => setNameTags(true)}
+                title="Show a name tag over every shopper"
+              >ON</button>
+              <button
+                className={!nameTags ? 'active' : ''}
+                onClick={() => setNameTags(false)}
+                title="Hide the name tags"
+              >OFF</button>
             </div>
             {crowd && (
               <>

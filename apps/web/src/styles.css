@@ -579,6 +579,10 @@ canvas { display: block; }
 }
 .fchip-close:hover { color: #eaf6ff; background: rgba(53,195,255,.14); }
 .fc-label { font-size: 11px; letter-spacing: .14em; color: #6f86b8; }
+/* `.seg` is the bar's two-choice switch (NAME TAGS ON|OFF). It used to carry a
+   2D/3D pair that was never wired to anything and was deleted with it; the shape
+   stayed because the fill reads as "this is the current state", which is exactly
+   what a mode switch needs — including when the lit side is OFF. */
 .seg, .floors {
   display: flex; gap: 4px; padding: 4px; border-radius: 999px;
   background: rgba(9,16,33,.8); border: 1px solid #1c3563; backdrop-filter: blur(8px);
@@ -966,6 +970,52 @@ canvas { display: block; }
 .hcard-fail   { --hc-accent: #e2574c; --hc-accent-dim: rgba(226,87,76,.42); }
 .hcard-pick   { --hc-accent: #5cc8ff; --hc-accent-dim: rgba(92,200,255,.42); }
 .hcard-return { --hc-accent: #f0b45c; --hc-accent-dim: rgba(240,180,92,.42); }
+
+/* ===== NAME TAGS mode — a photo + name pill over every body at once ===== */
+/* The layer is not decoration: the scene writes a depth-derived z-index onto
+   each tag (near shopper covers far one — they queue up single file at the doors
+   and the fare gate), and `position + z-index` here opens the stacking context
+   that keeps that free-range value from competing with the rest of the stage.
+   Deliberately UNDER the bottom bar (6), the side panels (15) and the other head
+   cards (22/24): a dozen ambient pills must never cover the chrome. */
+.ntag-layer {
+  position: absolute; inset: 0; z-index: 5;
+  pointer-events: none;
+}
+.ntag-track {
+  position: absolute; left: 0; top: 0;
+  visibility: hidden;            /* revealed by the scene on the first tracked frame */
+  will-change: transform;
+  pointer-events: none;          /* the body underneath is the click target, not this */
+}
+/* fade, not the `vf-bubble-in` overshoot the event cards use: that bounce is the
+   grammar of a notification ("this just happened"), and a tag is standing state.
+   A dozen of them bouncing in off one button press reads as an explosion — and
+   again every time someone walks through the door. On the INNER node, since the
+   scene owns the track's transform and an animation there would fight it. */
+.ntag {
+  display: flex; align-items: center; gap: 7px;
+  padding: 4px 11px 4px 5px;
+  border-radius: 999px; border: 1px solid rgba(120,200,255,.28);
+  background: linear-gradient(180deg, rgba(18,32,48,.93), rgba(10,20,32,.93));
+  box-shadow: 0 6px 18px rgba(0,0,0,.45);
+  white-space: nowrap;
+  animation: ntag-in .18s ease-out both;
+}
+.ntag-track::after {             /* pointer nub down toward the shopper */
+  content: ''; position: absolute; left: 50%; bottom: -4px;
+  width: 8px; height: 8px; transform: translateX(-50%) rotate(45deg);
+  background: rgba(10,20,32,.93);
+  border-right: 1px solid rgba(120,200,255,.28);
+  border-bottom: 1px solid rgba(120,200,255,.28);
+}
+/* smaller than the person card's 30px chip — this one repeats a dozen times */
+.ntag-av { width: 22px; height: 22px; font-size: 9px; box-shadow: none; }
+.ntag-name {
+  font-size: 11px; font-weight: 700; letter-spacing: .02em; color: #eaf6ff;
+  max-width: 132px; overflow: hidden; text-overflow: ellipsis;
+}
+@keyframes ntag-in { from { opacity: 0; } to { opacity: 1; } }
 
 .bd-empty { color: #6f86b8; font-size: 12px; padding: 14px 2px; text-align: center; }
 .bd-error { color: #ff9a92; background: rgba(226,87,76,.12); border-radius: 8px; padding: 10px 12px; font-size: 12px; }

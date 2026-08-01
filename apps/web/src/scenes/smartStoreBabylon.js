@@ -1921,6 +1921,26 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       },
     });
   }
+  // NAME TAGS mode: one pill per body, tracked by person id (walk-ins have no
+  // apiId, and the mode covers everyone). Lowest-priority tenant of the head —
+  // see the occupancy set in the projection pass for what outranks it.
+  let nameTagN = 0; // >0 skips nothing; ==0 skips the occupancy pass entirely
+  function bindNameTag(personId, el) {
+    bindHeadCard('tag:' + personId, el && {
+      el,
+      personId,
+      lift: HEAD_CARD_LIFT,
+      clamp: false, // ambient, and there can be a dozen: hide off-frame, never pile up on the edge
+      tag: true,
+      targetOf: () => persons.get(personId)?.h ?? null,
+    });
+    // recounted rather than incremented: bind runs on mount/unmount only (a
+    // dozen entries at most), and a count that can't drift is worth more here
+    // than the arithmetic it saves.
+    nameTagN = 0;
+    for (const hc of headCards.values()) if (hc.tag) nameTagN++;
+  }
+
   // arm on the SSE pass; hold until the scan beam clears this customer. No body
   // in the scene means no sweep will ever come, so drop it right away.
   function armFlash(apiId, onReveal) {
@@ -4259,6 +4279,11 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const _cardScreen = new Vector3();
   const _camFwd = new Vector3();  // camera → target, for the behind-camera test
   const _camDir = new Vector3();  // camera → card anchor
+  // bodies that already have a non-tag head card bound to them this frame.
+  // Rebuilt (cleared, not reallocated) once per frame in the head-card pass —
+  // per-frame garbage in the render loop is what this file's `_`-prefixed
+  // scratch values exist to avoid.
+  const _tagBlocked = new Set();
 
   // free-roaming shoppers cross each other's paths, so there is no leader to
   // follow anymore — the crowd is sparse enough that the odd overlap never
@@ -5116,11 +5141,40 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       // has to gate this too: .muted is opacity-only, so a muted card still
       // measures 196px tall and would lift the pills clear of nothing at all.
       const stackLift = !cardsOff && selE && cardEl && !atShelf ? (cardEl.offsetHeight || 150) + 8 : 0;
+      // NAME TAGS mode: a name tag is the lowest-priority tenant of a head, so
+      // it stands down for any other card BOUND to the same body — bound, not
+      // merely visible. A card that has been folded away by the follow chip, or
+      // muted after a pay pass, is still that head's occupant: the user closed
+      // the card to clear the space, and dropping a tag into it one frame later
+      // would undo exactly what they asked for.
+      _tagBlocked.clear();
+      if (nameTagN) {
+        for (const hc of headCards.values()) {
+          if (hc.tag) continue;
+          const t = hc.targetOf();
+          if (t) _tagBlocked.add(t);
+        }
+      }
       for (const [key, hc] of headCards) {
         const el = hc.el;
         if (!el) { headCards.delete(key); continue; }
         const target = cardsOff ? null : hc.targetOf();
         if (!target) { el.style.visibility = 'hidden'; continue; }
+        if (hc.tag) {
+          if (_tagBlocked.has(target)) { el.style.visibility = 'hidden'; continue; }
+          // The one head-owner the set above cannot see: a selected (or followed)
+          // shopper standing at a shelf owns their head for the whole session —
+          // the scan tag and the pick/return pills land there — and their detail
+          // card is what usually blocks the tag. But the follow chip can UNMOUNT
+          // that card, which un-blocks it right as the camera lands in the
+          // close-up. `atShelf` alone isn't enough: it only knows the selected
+          // shopper, and following without selecting is reachable.
+          if ((hc.personId === selectedPersonId || hc.personId === followId)
+            && persons.get(hc.personId)?.ref.mode === 'browse') {
+            el.style.visibility = 'hidden';
+            continue;
+          }
+        }
         _cardAnchor.set(target.position.x, target.position.y + hc.lift, target.position.z);
         if (!hc.clamp) {
           _camDir.copyFrom(_cardAnchor).subtractInPlace(camera.position);
@@ -5141,6 +5195,19 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
           continue;
         }
         hc.x = x; hc.y = y; // last placement, for debug.headCards()
+        // Depth order for the tags: two shoppers queueing at a door or the fare
+        // gate stand one behind the other, which puts their tags on the same
+        // pixel — the near one has to win, and without this the winner is bind
+        // order (i.e. spawn order, reshuffled every time someone walks out).
+        // `_cardScreen.z` is the projected depth this pass already produced, so
+        // the ordering costs one style write. The range is this free only because
+        // .ntag-layer opens its own stacking context: nothing here can climb over
+        // the bar, the panels or the other head cards.
+        // 1e6, not 1e3: the projected depth of a shop-floor-sized scene only uses
+        // a sliver of the 0-1 range, so a thousand steps came out at roughly one
+        // step per metre — and queue spacing is well under that, which is the one
+        // case this exists for.
+        if (hc.tag) el.style.zIndex = `${1e6 - Math.round(Scalar.Clamp(_cardScreen.z, 0, 1) * 1e6)}`;
         el.style.transform = `translate(${x}px, ${y}px) translate(-50%, -100%) translateY(-10px)`;
         el.style.visibility = 'visible';
       }
@@ -5341,6 +5408,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       // the scene reveals them when the matching GESTURE ends rather than when a
       // gate beam sweeps — see revealHeadCard's two call sites
       bindEventCard, armEventCard: armHeadCard,
+      bindNameTag, // NAME TAGS mode — one per body, no arming (there is no event)
     },
 
     // shelf locks: the scene owns the state, React mirrors it. set() is the
