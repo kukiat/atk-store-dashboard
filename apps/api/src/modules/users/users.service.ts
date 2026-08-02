@@ -63,6 +63,7 @@ class UsersService {
   // Swap the whole store for a fresh roster — boot and refreshRoster share this.
   private resetRoster(roster: User[]) {
     this.store = new Map(roster.map((u) => [u.id, u]));
+    console.log("this.store", JSON.stringify(this.store, null, 2));
     this.nextId = Math.max(0, ...this.store.keys()) + 1;
   }
 
@@ -72,6 +73,7 @@ class UsersService {
   // was — there is nothing to roll back.
   async refreshRoster() {
     const roster = await fetchBootRoster();
+    console.log("refreshRoster", JSON.stringify(roster, null, 2));
     // Every current body is dropped and none are re-announced: to the scene
     // `added` means "walk in the front door and hold for verify" (it ignores
     // status), so replaying the new roster would march `outside` users inside
@@ -84,7 +86,10 @@ class UsersService {
       this.sessions.closeByUser(id); // drop any browse rows the wiped roster left behind
       this.emit({ type: "removed", user: { id } });
     }
-    return this.list();
+    console.log("refreshRoster done", JSON.stringify(this.store, null, 2));
+    const res = this.list();
+    console.log("refreshRoster res", JSON.stringify(res, null, 2));
+    return res;
   }
 
   // event hub — the SSE route subscribes, mutations broadcast
