@@ -168,11 +168,33 @@ function StockRow({ item }) {
     return () => clearTimeout(t);
   }, [item.qty]);
 
+  // The product photo takes the colour dot's slot; the dot is the fallback, and
+  // all three ways of having no picture — no product, an empty image_url, a URL
+  // that fails to load — land on it, so there is only ever one alternative to
+  // draw. Keyed reset: a row whose image once failed must try again when the
+  // shelf's product changes (the stock list is reseeded on every catalog load).
+  const [imgFailed, setImgFailed] = useState(false);
+  useEffect(() => { setImgFailed(false); }, [item.image]);
+  const showImg = !!item.image && !imgFailed;
+
   const status = statusOf(item.qty, item.reorder);
   const pct = Math.max(0, Math.min(100, (item.qty / item.capacity) * 100));
   return (
     <li className={`stk-row${flash ? ' flash' : ''}`}>
-      <span className="stk-dot" style={{ background: item.color }} />
+      {showImg ? (
+        <img
+          className="stk-thumb"
+          src={item.image}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          width="28"
+          height="28"
+          onError={() => setImgFailed(true)}
+        />
+      ) : (
+        <span className="stk-dot" style={{ background: item.color }} />
+      )}
       <div className="stk-main">
         <div className="stk-top">
           <span className="stk-name">{item.name}</span>
@@ -538,13 +560,16 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   // identity, or StoreStage tears the scene down) can read the loaded data
   const shelfNameRef = useRef({});
   shelfNameRef.current = shelfName;
-  // sku → product name, for the scan-verdict head card: the scanQR event carries
-  // only the sku, and item.id IS the sku (see toShelf on the API side)
-  const skuName = useMemo(
-    () => Object.fromEntries(shelvesDef.flatMap((s) => (s.items ?? []).map((it) => [it.id, it.name]))),
+  // sku → what the head card needs to say about the product: the scanQR event
+  // carries only the sku, and item.id IS the sku (see toShelf on the API side).
+  // One entry per sku rather than a map per field, so a card that later wants
+  // another product detail doesn't need a third parallel lookup.
+  const skuInfo = useMemo(
+    () => Object.fromEntries(shelvesDef.flatMap((s) =>
+      (s.items ?? []).map((it) => [it.id, { name: it.name, image: it.image }]))),
     [shelvesDef]);
-  const skuNameRef = useRef({});
-  skuNameRef.current = skuName;
+  const skuInfoRef = useRef({});
+  skuInfoRef.current = skuInfo;
   const lockInitRef = useRef(lockInit);
   lockInitRef.current = lockInit;
 
@@ -799,7 +824,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
       // revealed by the scene once the phone comes back down — the scanning tag
       // owns that spot above their head until then. A pass OPENS the browse card
       // that stays up for the whole shelf visit; a fail is a 2s flash.
-      armScan(u.id, u.result, u.sku, skuNameRef.current[u.sku]);
+      armScan(u.id, u.result, u.sku, skuInfoRef.current[u.sku]);
     }));
     // `inspectItem` is a command only. Its effect reaches the scene through the
     // sessions feed above (the API moves an item on the shopper's shelf session,

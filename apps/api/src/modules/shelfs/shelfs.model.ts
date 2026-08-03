@@ -11,6 +11,9 @@ const ShelfItem = t.Object({
   reorder: t.Number(),
   // per-unit product weight in kg (from the loadcell device's product record)
   weight: t.Number(),
+  // product photo URL, "" when there is none (no product, or an empty
+  // image_url in the feed — both occur)
+  image: t.String(),
 });
 
 /**
