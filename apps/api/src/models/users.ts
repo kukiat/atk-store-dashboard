@@ -10,7 +10,15 @@ export type UserStatus =
   | "paying";
 export type AuthMethod = "google" | "outlook" | "facebook";
 export type User = {
-  id: number;
+  // OUR key: a uuid we mint (crypto.randomUUID()), never accepted from a
+  // request body. Addresses GET/PATCH/DELETE /users/:id.
+  id: string;
+  // THEIR key: the outside world's id for this same customer — the external
+  // roster's row id, or a generated stand-in (EXTERNAL_ID_BASE+) for someone
+  // born in the Backdoor with no counterpart out there. Unique, and the ONLY
+  // thing POST /users/:externalId/status accepts. A uuid can never be mistaken
+  // for one of these at a glance, which is the point of the split.
+  external_id: number;
   name: string;
   gender: "male" | "female";
   status: UserStatus;
@@ -23,24 +31,32 @@ export type User = {
   // `outside`. The dashboard counts its "In store" timer from here, so it has
   // to survive a page reload (a scene-clock counter would restart at 0).
   entered_at: string | null;
+  // ISO 8601, restamped by UsersService.touch on EVERY mutation — create,
+  // update and every status action. The dashboard sorts its Exited list on it
+  // (newest first), which is why it has to be a real clock and not a stand-in
+  // like the id: uuids carry no order and `entered_at` is null on both a
+  // never-entered customer and one who paid and left.
+  updated_at: string;
   // display-only profile fields (see ../modules/users/users.model.ts)
   email: string;
   avatar_url: string;
   auth_method: AuthMethod;
 };
+// every `id` below is the uuid User.id — external_id never rides the feed as a
+// key, it is only a field on the User payloads
 export type UserEvent =
   | { type: "added" | "updated" | "enter"; user: User }
-  | { type: "removed" | "leave" | "walkAway" | "shelfClose"; user: { id: number } }
+  | { type: "removed" | "leave" | "walkAway" | "shelfClose"; user: { id: string } }
   // verify carries an optional, transient imageURL (the face photo to flash on
   // a pass) — it rides the event only, never lands on the stored User.
   | {
     type: "verify" | "pay";
-    user: { id: number; result: "pass" | "fail"; imageURL?: string };
+    user: { id: string; result: "pass" | "fail"; imageURL?: string };
   }
   // scanQR carries the scanned sku too, so the feed reflects what was scanned
-  | { type: "scanQR"; user: { id: number; result: "pass" | "fail"; sku: string } }
-  | { type: "walkToShelf"; user: { id: number; shelfId: string } }
-  | { type: "inspectItem"; user: { id: number; result: "keep" | "return" } }
+  | { type: "scanQR"; user: { id: string; result: "pass" | "fail"; sku: string } }
+  | { type: "walkToShelf"; user: { id: string; shelfId: string } }
+  | { type: "inspectItem"; user: { id: string; result: "keep" | "return" } }
   // roster refresh: the whole store in one event, not a per-user delta. The
   // only variant that carries `users` (an array) instead of `user` — the SSE
   // route picks the right field. See refreshRoster for why it isn't a
@@ -66,6 +82,8 @@ export type ActionInput =
 // One row from GET {ATK_STORE_API_URL}/animation-api/users. Only a subset
 // maps onto our User; disabled_*/exited_at have no home here.
 export type ExternalUser = {
+  // lands on User.external_id, NOT User.id — every boot row gets a freshly
+  // minted uuid like anyone else (see fetchBootRoster)
   id: number;
   name: string;
   email: string;

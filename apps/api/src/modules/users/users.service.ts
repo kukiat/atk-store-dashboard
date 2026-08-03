@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Elysia, status } from "elysia";
 import type { ActionInput, AuthMethod, User, UserEvent } from "../../models";
 import { fetchBootRoster } from "../../utils";
@@ -33,20 +34,43 @@ import { sessionsServiceInstance } from "../sessions/sessions.service";
 // `scanQR` does the same on the shelf sub-machine: from `inside` it runs the
 // walkToShelf step (to the shelf its `sku` resolves to, emitting `walkToShelf`)
 // before the scan verdict (emitting `scanQR`). `walkToShelf` stays standalone.
-// POST /users is "roster entry + auto-enter" in one call: a freshly created
-// user starts `waiting` (holding at the entrance scanner for a verify verdict),
-// the same place an `enter` action lands them — not walking straight in.
+// POST /users is a plain roster insert — nothing more. A freshly created user
+// starts `outside` with no body in the 3D scene at all; `verify` (which rolls
+// the enter step in) is the only way anyone gets through the door. It used to
+// auto-enter and park them at the scanner, which made POST a command rather
+// than a record: the external system registers customers ahead of time, and
+// they should sit known-but-outside until it says the face scan passed.
 // The boot roster is the exception: those users start at the status mapped
 // from the external feed's `visit_status` (inside/outside), the start crowd.
+//
+// ── two ids ───────────────────────────────────────────────────────────
+// `id` is a uuid we mint and never accept from a request body; `external_id`
+// is a number the outside world knows this customer by (its own row id, or a
+// generated EXTERNAL_ID_BASE+ stand-in for a Backdoor-born user with no
+// counterpart out there). GET/PATCH/DELETE /users/:id take the uuid;
+// POST /users/:externalId/status takes the external id and nothing else. The
+// two shapes can't be confused by eye, so the same path prefix meaning two
+// different keys is safe here in a way two numeric ids would not have been.
+// `byExternal` is the index behind that lookup, and it enforces external_id
+// uniqueness structurally — every insert path has to go through it.
 //
 // The domain types (User, UserStatus, AuthMethod, UserEvent, ActionInput,
 // ExternalUser) live in ../../models; the boot-roster helpers (mapVisitStatus,
 // guessGender, fetchBootRoster) and name dictionaries live in ../../utils and
 // ../../constants — imported above.
 
+// Generated external ids start here, well clear of the external system's own
+// serial (auth.users.id counts up from 1). Sharing that range would mean
+// handing a Backdoor user the number external legitimately POSTs later, and
+// the 409 would land on the integrator, who cannot change their own primary key.
+const EXTERNAL_ID_BASE = 1_000_000;
+
 class UsersService {
-  private store = new Map<number, User>();
-  private nextId = 1;
+  private store = new Map<string, User>(); // uuid → user
+  // external_id → the same user object. Second index, not a copy: every
+  // mutation writes through the entity both maps point at.
+  private byExternal = new Map<number, User>();
+  private nextExternalId = EXTERNAL_ID_BASE;
   private listeners = new Set<(e: UserEvent) => void>();
 
   // the shelf-session ledger this service tears rows out of whenever a shopper
@@ -61,9 +85,27 @@ class UsersService {
   }
 
   // Swap the whole store for a fresh roster — boot and refreshRoster share this.
+  // Both indexes are rebuilt together; nothing from the old roster survives.
   private resetRoster(roster: User[]) {
     this.store = new Map(roster.map((u) => [u.id, u]));
-    this.nextId = Math.max(0, ...this.store.keys()) + 1;
+    this.byExternal = new Map(roster.map((u) => [u.external_id, u]));
+    // back to the base, not max+1: external ids from the feed live far below
+    // EXTERNAL_ID_BASE, and nextExternalId() skips anything already taken.
+    this.nextExternalId = EXTERNAL_ID_BASE;
+  }
+
+  // ISO stamp for "something about this user just changed". Called by every
+  // mutation right before it emits, so a listener never sees a stale clock —
+  // the Exited list in the dashboard is ordered by exactly this field.
+  private touch(user: User) {
+    user.updated_at = new Date().toISOString();
+  }
+
+  // next free generated external id. Walks past anything the feed or an
+  // earlier create already claimed, so the caller never has to retry.
+  private nextFreeExternalId() {
+    while (this.byExternal.has(this.nextExternalId)) this.nextExternalId++;
+    return this.nextExternalId++;
   }
 
   // Backdoor's "Reload from External" button: put the store back to the state a
@@ -98,7 +140,7 @@ class UsersService {
     for (const fn of this.listeners) fn(e);
   }
 
-  private mustFind(id: number) {
+  private mustFind(id: string) {
     const user = this.store.get(id);
     if (!user) throw status(404, "User not found");
     return user;
@@ -108,51 +150,72 @@ class UsersService {
     return [...this.store.values()];
   }
 
-  findById(id: number) {
+  findById(id: string) {
     return this.mustFind(id);
   }
 
+  // the /:externalId/status route's door into the store. Same 404 as an
+  // unknown uuid — from the caller's side "no such customer" either way.
+  findByExternalId(externalId: number) {
+    const user = this.byExternal.get(externalId);
+    if (!user) throw status(404, "User not found");
+    return user;
+  }
+
   create(input: {
+    id?: number; // the CALLER's id → external_id; ours is always generated
     name: string;
     gender: User["gender"];
     email?: string;
     avatar_url?: string;
     auth_method?: AuthMethod;
   }) {
-    // land at the entrance queue for a verify verdict, like enter —
-    // the scene spawns `added` users holding at the gate, not walking in
-    const id = this.nextId++;
+    // A new customer is registered, not admitted: they start `outside` with no
+    // body in the scene and hold there until a verify verdict arrives.
+    const external_id = input.id ?? this.nextFreeExternalId();
+    // 409 rather than upsert: the id may belong to someone mid-browse, and
+    // overwriting them would leave a body walking the floor with no event able
+    // to reconcile it (`added` deliberately does nothing in the scene).
+    if (this.byExternal.has(external_id))
+      throw status(409, `external_id ${external_id} already exists`);
     const user: User = {
-      id,
+      id: randomUUID(),
+      external_id,
       name: input.name,
       gender: input.gender,
-      status: "waiting",
+      status: "outside",
       shelf_id: null,
-      entered_at: null, // holding at the gate — the visit starts on a verify pass
-      // defaults filled here (after id) so a bare {name,gender} POST works
-      email: input.email ?? `user${id}@demo.local`,
+      entered_at: null, // outside the store — the visit starts on a verify pass
+      updated_at: new Date().toISOString(),
+      // defaults filled here so a bare {name,gender} POST works. The email uses
+      // external_id, not our uuid — `user<uuid>@demo.local` is unreadable.
+      email: input.email ?? `user${external_id}@demo.local`,
       avatar_url: input.avatar_url ?? "",
       auth_method: input.auth_method ?? "google",
     };
     this.store.set(user.id, user);
+    this.byExternal.set(user.external_id, user);
     this.emit({ type: "added", user });
     return user;
   }
 
   update(
-    id: number,
+    id: string,
     input: Partial<
       Pick<User, "name" | "gender" | "email" | "avatar_url" | "auth_method">
     >,
   ) {
     const user = this.mustFind(id);
     Object.assign(user, input);
+    this.touch(user);
     this.emit({ type: "updated", user });
     return user;
   }
 
-  remove(id: number) {
-    if (!this.store.delete(id)) throw status(404, "User not found");
+  remove(id: string) {
+    const user = this.mustFind(id);
+    this.store.delete(id);
+    this.byExternal.delete(user.external_id); // both indexes or neither
     this.sessions.closeByUser(id); // a browsing user deleted mid-session leaves no orphan row
     this.emit({ type: "removed", user: { id } });
     return { id };
@@ -169,14 +232,18 @@ class UsersService {
   }
 
   // The four status transitions all enter through one door now: POST
-  // /:id/status → applyAction, which switches on `action` and delegates to the
-  // matching step below. The steps stay private (guard + emit each own their
-  // slice) so the switch is the only public entry and the SSE contract — one
-  // distinct event per transition — is untouched.
+  // /:externalId/status → applyAction, which switches on `action` and delegates
+  // to the matching step below. The steps stay private (guard + emit each own
+  // their slice) so the switch is the only public entry and the SSE contract —
+  // one distinct event per transition — is untouched.
+  // `id` here is our uuid, NOT the external id in the route path: the route
+  // resolves one to the other before calling in. That keeps every internal
+  // caller (the MQTT loadcell handler closes sessions this way) on a single
+  // key, so only the HTTP edge knows external ids exist at all.
   // scanQR needs the shelf its sku resolves to; the route owns the shelfs
   // service, so it does the findBySku (+ online/checkout gating) and hands the
   // resolved shelf id in here. Every other action ignores it.
-  applyAction(id: number, input: ActionInput, skuShelfId?: string): User {
+  applyAction(id: string, input: ActionInput, skuShelfId?: string): User {
     switch (input.action) {
       case "enter":
         return this.enter(id);
@@ -206,11 +273,12 @@ class UsersService {
   }
 
   // walk up to the entrance and wait in line for a verify verdict
-  private enter(id: number) {
+  private enter(id: string) {
     const user = this.mustFind(id);
     if (user.status !== "outside")
       throw status(409, `User is ${user.status}, enter needs "outside"`);
     user.status = "waiting";
+    this.touch(user);
     this.emit({ type: "enter", user });
     return user;
   }
@@ -222,7 +290,7 @@ class UsersService {
   // events still fire in order (enter then verify): the feed stays per-step,
   // only the HTTP surface collapses. A `fail` from outside is a no-op round
   // trip (outside → waiting → outside) that reads as "rejected at the door".
-  private verify(id: number, result: "pass" | "fail", imageURL?: string) {
+  private verify(id: string, result: "pass" | "fail", imageURL?: string) {
     const user = this.mustFind(id);
     if (user.status !== "waiting" && user.status !== "outside")
       throw status(
@@ -234,6 +302,7 @@ class UsersService {
     // the visit clock starts here (and only here): a pass is the moment they're
     // through the door, a fail leaves nothing to count
     user.entered_at = result === "pass" ? new Date().toISOString() : null;
+    this.touch(user);
     // imageURL rides the event untouched (undefined drops out of the JSON) —
     // the dashboard flashes it only on a pass; the store never keeps it.
     this.emit({ type: "verify", user: { id, result, imageURL } });
@@ -246,7 +315,7 @@ class UsersService {
   // (scanning/browsing) — an item still in hand counts as taken.
   // Returns the full user (the /status route responds with the entity for
   // every action); the SSE `leave` event still carries just { id }.
-  private leave(id: number) {
+  private leave(id: string) {
     const user = this.mustFind(id);
     if (
       user.status !== "inside" &&
@@ -259,6 +328,7 @@ class UsersService {
       );
     this.endShelfSession(user);
     user.status = "paying";
+    this.touch(user);
     this.emit({ type: "leave", user: { id } });
     return user;
   }
@@ -269,12 +339,13 @@ class UsersService {
 
   // walk up to the shelf and hold there for a scanQR verdict — no self-scan,
   // the shelf-side mirror of enter/waiting
-  private walkToShelf(id: number, shelfId: string) {
+  private walkToShelf(id: string, shelfId: string) {
     const user = this.mustFind(id);
     if (user.status !== "inside")
       throw status(409, `User is ${user.status}, walkToShelf needs "inside"`);
     user.status = "scanning";
     user.shelf_id = shelfId;
+    this.touch(user);
     this.emit({ type: "walkToShelf", user: { id, shelfId } });
     return user;
   }
@@ -289,7 +360,7 @@ class UsersService {
   // stand at — a mismatch is rejected rather than silently walking them off.
   // `walkToShelf` stays standalone for parking someone at a reader first.
   private scanQR(
-    id: number,
+    id: string,
     result: "pass" | "fail",
     sku: string,
     targetShelfId: string,
@@ -309,6 +380,7 @@ class UsersService {
       );
     }
     if (result === "pass") user.status = "browsing"; // held open until shelfClose/leave
+    this.touch(user);
     this.emit({ type: "scanQR", user: { id, result, sku } });
     return user;
   }
@@ -321,10 +393,11 @@ class UsersService {
   // single source of both the 3D gesture and the head card, shared with the MQTT
   // loadcell path. The `inspectItem` event below stays as the record that the
   // command was issued; nothing on the web side animates off it any more.
-  private inspectItem(id: number, result: "keep" | "return") {
+  private inspectItem(id: string, result: "keep" | "return") {
     const user = this.mustFind(id);
     if (user.status !== "browsing")
       throw status(409, `User is ${user.status}, inspectItem needs "browsing"`);
+    this.touch(user); // status doesn't move, but the basket did
     this.emit({ type: "inspectItem", user: { id, result } });
     this.sessions.recordUserPickReturn(id, result === "keep" ? "pick" : "return");
     return user;
@@ -332,12 +405,13 @@ class UsersService {
 
   // give up waiting for a verdict and rejoin the loop. Only valid while
   // scanning — an open session (browsing) ends via shelfClose or leave.
-  private walkAway(id: number) {
+  private walkAway(id: string) {
     const user = this.mustFind(id);
     if (user.status !== "scanning")
       throw status(409, `User is ${user.status}, walkAway needs "scanning"`);
     this.endShelfSession(user);
     user.status = "inside";
+    this.touch(user);
     this.emit({ type: "walkAway", user: { id } });
     return user;
   }
@@ -346,12 +420,13 @@ class UsersService {
   // via SSE). The browse session has no auto-close timer — it holds open until
   // this action (or leave) fires. Only valid while browsing; scanning bails via
   // walkAway instead.
-  private shelfClose(id: number) {
+  private shelfClose(id: string) {
     const user = this.mustFind(id);
     if (user.status !== "browsing")
       throw status(409, `User is ${user.status}, shelfClose needs "browsing"`);
     this.endShelfSession(user);
     user.status = "inside";
+    this.touch(user);
     this.emit({ type: "shelfClose", user: { id } });
     return user;
   }
@@ -365,7 +440,7 @@ class UsersService {
   // surface collapses — the exit-side mirror of verify rolling in enter.
   // Unlike verify's fail (a no-op round trip), a `fail` here still moved the
   // shopper to the gate: net inside → paying, holding to retry.
-  private pay(id: number, result: "pass" | "fail", imageURL?: string) {
+  private pay(id: string, result: "pass" | "fail", imageURL?: string) {
     const user = this.mustFind(id);
     if (
       user.status !== "paying" &&
@@ -381,6 +456,7 @@ class UsersService {
     // a pass ends the visit, so the clock stops with it; a fail keeps them at
     // the gate (still in the store) and the timer keeps running
     if (result === "pass") { user.status = "outside"; user.entered_at = null; }
+    this.touch(user);
     // imageURL rides the event untouched (undefined drops out of the JSON) —
     // the dashboard flashes it only on a pass; the store never keeps it.
     this.emit({ type: "pay", user: { id, result, imageURL } });

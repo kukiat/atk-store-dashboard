@@ -43,7 +43,7 @@ export type ShelfSessionSummary = {
 
 export type ShelfSession = {
   id: string; // crypto.randomUUID()
-  userId: number; // == User.id (the shopper who scanned in)
+  userId: string; // == User.id, the uuid (NOT external_id — see UsersService)
   sku: string; // the scanned sku (scanQR payload)
   shelf: Shelf;
   externalDevice: ExternalDevice; // externalDevice.device_id == MQTT deviceId
@@ -70,12 +70,12 @@ export type ShelfSession = {
 // prevent. Consumers read summary.* and do no arithmetic.
 export type SessionEvent =
   | { type: "opened"; session: ShelfSession }
-  | { type: "closed"; session: { id: string; userId: number } }
+  | { type: "closed"; session: { id: string; userId: string } }
   | {
       type: "picked" | "returned";
       session: {
         id: string;
-        userId: number;
+        userId: string;
         sku: string;
         name: string;
         action: "pick" | "return";

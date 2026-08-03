@@ -70,7 +70,7 @@ const SessionSummary = t.Object({
 
 const SessionEntity = t.Object({
   id: t.String(),
-  userId: t.Integer(),
+  userId: t.String(), // User.id — a uuid
   sku: t.String(),
   shelf: Shelf,
   externalDevice: ExternalDevice,

@@ -71,7 +71,7 @@ class SessionsService {
   // first frame — the card reads it before any pick has happened, and the
   // commanded path has no loadcell to quote and advances this seed itself.
   open(input: {
-    userId: number;
+    userId: string;
     sku: string;
     shelf: Shelf;
     device: ExternalDevice;
@@ -199,7 +199,7 @@ class SessionsService {
   // add up. Zero units moved, so nothing is counted; the event is still emitted
   // (the operator asked for the gesture) and the card simply doesn't flash a
   // badge for it.
-  recordUserPickReturn(userId: number, action: "pick" | "return"): ShelfSession[] {
+  recordUserPickReturn(userId: string, action: "pick" | "return"): ShelfSession[] {
     const rows = this.list().filter((s) => s.userId === userId);
     return this.applyPickReturn(rows, action, (s) => {
       const product = s.externalDevice.product;
@@ -228,7 +228,7 @@ class SessionsService {
   // UsersService.endShelfSession calls this on every browse exit (shelfClose /
   // leave / walkAway), so MQTT and force-close reach it via the shelfClose
   // action rather than deleting rows themselves.
-  closeByUser(userId: number): ShelfSession[] {
+  closeByUser(userId: string): ShelfSession[] {
     return this.drop(this.list().filter((s) => s.userId === userId));
   }
 

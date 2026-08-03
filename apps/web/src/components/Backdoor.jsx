@@ -84,9 +84,12 @@ const initials = (name) =>
     .join('')
     .toUpperCase() || '?';
 
-// stable per-id avatar tint so rows are easy to tell apart at a glance
+// stable per-customer avatar tint so rows are easy to tell apart at a glance.
+// Keyed on external_id, the numeric one — `uuid % n` is NaN and would leave
+// every chip unpainted.
 const AVATAR_HUES = [200, 150, 280, 24, 330, 96, 250, 12];
-const avatarColor = (id) => `hsl(${AVATAR_HUES[id % AVATAR_HUES.length]} 70% 60%)`;
+const avatarColor = (externalId) =>
+  `hsl(${AVATAR_HUES[Math.abs(externalId ?? 0) % AVATAR_HUES.length]} 70% 60%)`;
 
 // avatar_url → <img> (with onError fallback to the initials chip); empty → chip.
 // keyed by url at the call site so a changed url remounts and clears any error.
@@ -98,7 +101,7 @@ function Avatar({ user }) {
     // Referer header — without this the photo errors out to the chip fallback
     <img className="bd-avatar bd-avatar-img" src={user.avatar_url} alt="" referrerPolicy="no-referrer" onError={() => setBroken(true)} />
   ) : (
-    <span className="bd-avatar" style={{ background: avatarColor(user.id) }}>
+    <span className="bd-avatar" style={{ background: avatarColor(user.external_id) }}>
       {initials(user.name)}
     </span>
   );
@@ -226,6 +229,17 @@ export default function Backdoor() {
     [pushToast, refresh],
   );
 
+  // The row prints only the first 6 chars of the uuid, so the full value needs
+  // a way out of the page for a curl / PATCH / DELETE.
+  const copyUserId = useCallback(async (id) => {
+    try {
+      await navigator.clipboard.writeText(id);
+      pushToast(`คัดลอก id แล้ว · ${id}`, 'ok');
+    } catch {
+      pushToast('คัดลอกไม่สำเร็จ — เบราว์เซอร์ไม่อนุญาต clipboard', 'err');
+    }
+  }, [pushToast]);
+
   // Hard reset: re-run the API's own boot fetch against the external service and
   // replace the roster wholesale. Deliberately not wired through `fire` — this
   // returns the fresh list, so it seeds state straight from the response instead
@@ -255,11 +269,14 @@ export default function Backdoor() {
   // { action, payload? } body. enter/leave carry no payload; verify/
   // pay nest a pass/fail result; scanQR nests result + sku. Thin wrapper over
   // fire so the path and body shape live in one place.
+  // NOTE the id: this is the one route keyed on `external_id`, not the uuid —
+  // the system that drives it in production knows customers only by its own
+  // row id. Every other call below (PATCH/DELETE) still uses `u.id`.
   const act = useCallback(
     (u, action, ok, payload) =>
       fire({
         method: 'POST',
-        path: `/${u.id}/status`,
+        path: `/${u.external_id}/status`,
         body: payload ? { action, payload } : { action },
         ok,
       }),
@@ -425,11 +442,31 @@ export default function Backdoor() {
                 <li className="bd-row" key={u.id}>
                   <Avatar key={u.avatar_url || 'chip'} user={u} />
 
+                  {/* Both ids sit on the name line because both get used from
+                      here and they are NOT interchangeable: `ext` drives every
+                      action button (POST /users/:externalId/status) while the
+                      uuid is what PATCH/DELETE take. Showing them side by side
+                      is the only way the difference is obvious at a glance.
+                      The uuid is cut to the same 6 chars the 3D head card
+                      prints ("CUSTOMER 3f2a1c"), so a body in the scene can be
+                      traced to a row here — click it for the full value. */}
                   <div className="bd-idcol">
-                    <span className="bd-name">{u.name}</span>
-                    <span className="bd-sub">
-                      <span className="bd-uid">#{u.id}</span>
+                    <span className="bd-nameline">
+                      <span className="bd-name">{u.name}</span>
                       <span className="bd-gmark">{u.gender === 'male' ? '♂' : '♀'}</span>
+                      <span className="bd-extid" title="external_id — POST /users/:externalId/status">
+                        ext {u.external_id}
+                      </span>
+                      <button
+                        type="button"
+                        className="bd-uid"
+                        title={`${u.id}\nคลิกเพื่อคัดลอก id เต็ม`}
+                        onClick={() => copyUserId(u.id)}
+                      >
+                        {String(u.id).slice(0, 6)}
+                      </button>
+                    </span>
+                    <span className="bd-sub">
                       <span className="bd-email">{u.email}</span>
                     </span>
                   </div>
@@ -598,7 +635,7 @@ export default function Backdoor() {
         <div className="bd-modal-backdrop" onClick={closeModal}>
           <div className="bd-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
             <div className="bd-modal-head">
-              <h3>{modalMode === 'create' ? 'Add User' : `Edit User #${editUser.id}`}</h3>
+              <h3>{modalMode === 'create' ? 'Add User' : `Edit User · ext ${editUser.external_id}`}</h3>
               <button className="detail-close" onClick={closeModal} title="Close (Esc)">✕</button>
             </div>
             <div className="bd-modal-body">

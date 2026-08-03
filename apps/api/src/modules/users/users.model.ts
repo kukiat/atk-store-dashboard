@@ -19,7 +19,8 @@ const Result = t.Union([t.Literal("pass"), t.Literal("fail")]);
 const InspectResult = t.Union([t.Literal("keep"), t.Literal("return")]);
 
 const UserEntity = t.Object({
-  id: t.Integer(),
+  id: t.String(), // uuid we mint — see User in ../../models
+  external_id: t.Integer(), // the outside world's key; POST /:externalId/status
   name: t.String(),
   gender: Gender,
   status: Status,
@@ -30,6 +31,8 @@ const UserEntity = t.Object({
   // ISO 8601 start of the current visit, null when they're outside — the
   // dashboard's "In store" timer counts from here (see User in ../../models)
   entered_at: t.Nullable(t.String()),
+  // ISO 8601, restamped on every mutation — the Exited list sorts on it
+  updated_at: t.String(),
   // display-only profile fields — required on the entity, defaulted on create
   email: t.String({ format: "email" }),
   avatar_url: t.String(), // may be "" → UI falls back to initials chip
@@ -37,11 +40,19 @@ const UserEntity = t.Object({
 });
 
 export const usersModel = new Elysia({ name: "users.model" }).model({
-  // path ids arrive as strings — t.Numeric coerces before validation
-  "users.params": t.Object({ id: t.Numeric() }),
-  // profile fields optional on create — service fills defaults (email from id,
-  // avatar "", auth "google") so a bare {name,gender} POST still works
+  // GET/PATCH/DELETE /users/:id — the uuid, taken as-is (no coercion)
+  "users.params": t.Object({ id: t.String({ minLength: 1 }) }),
+  // POST /users/:externalId/status — the ONLY route keyed on the external id.
+  // Deliberately a different param name from "users.params" above: same path
+  // shape, different key space, and a mix-up would hit a different person.
+  // t.Numeric coerces the path string before validation.
+  "users.params.external": t.Object({ externalId: t.Numeric() }),
+  // profile fields optional on create — service fills defaults (email from the
+  // external id, avatar "", auth "google") so a bare {name,gender} POST works.
+  // `id` is the CALLER's id and lands on external_id; omit it and the service
+  // generates one. Our own uuid is never accepted from here.
   "users.create": t.Object({
+    id: t.Optional(t.Integer()),
     name: t.String({ minLength: 1 }),
     gender: Gender,
     email: t.Optional(t.String({ format: "email" })),
@@ -104,5 +115,5 @@ export const usersModel = new Elysia({ name: "users.model" }).model({
   // delete is a 404).
   "users.res.entity": envelope(UserEntity),
   "users.res.list": envelope(t.Array(UserEntity)),
-  "users.res.deleted": envelope(t.Object({ id: t.Integer() })),
+  "users.res.deleted": envelope(t.Object({ id: t.String() })),
 });
