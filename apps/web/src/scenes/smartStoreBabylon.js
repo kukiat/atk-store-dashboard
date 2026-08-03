@@ -3155,6 +3155,43 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     else if (result === 'fail') applyVerdict(p, result); // turned away from anywhere in line
     else p.verdict = result; // pre-approved: sweeps the moment they reach the scanner
   }
+  // POST /users/roster/refresh → one `roster` SSE carrying the whole store.
+  // Wholesale replace, never a diff: the button's contract is "put the store
+  // back to how a fresh boot would leave it", so every API body is thrown away
+  // and the floor is rebuilt from `next` with the same recipe boot uses below.
+  // Customers whose id survives into the new roster still get a new body — they
+  // lose their spot on the floor, which is the accepted cost of not having to
+  // define a transition for every status pair.
+  // The dispose is instant (no fadeStart): a fading old body still answers
+  // shopperByApiId, so a same-id user in the new roster would land in
+  // pendingReenters and not appear until the fade finished.
+  // The random crowd (apiId == null) is a separate population owned by
+  // crowdTarget — it is deliberately left walking.
+  function reseedUsers(next) {
+    users = next;
+    rosterIdx = 0;
+    if (!booted) return; // nothing spawned yet; boot's seed block reads the fresh pool
+    pendingApiEntries.length = 0; // queued arrivals belong to the old roster
+    pendingReenters.clear();
+    for (let i = shoppers.length - 1; i >= 0; i--) {
+      const p = shoppers[i];
+      if (p.person?.apiId == null) continue;
+      if (entryGate.user === p) entryGate.user = null; // don't wedge the scanner
+      if (gate.user === p) gate.user = null;           // …or the fare-gate
+      // disposeShopper → disposeHuman → unregisterPerson also drops the head
+      // card, re-locks the shelf, and ends any selection/follow on this body
+      disposeShopper(p);
+      shoppers.splice(i, 1);
+    }
+    // …then seed exactly like boot: `inside` lands on the floor (a user caught
+    // mid shelf-session seeds as a plain walker — the session's visuals can't be
+    // reconstructed), `waiting` resumes the queue at the gate, and `paying` /
+    // `outside` get no body at all, same as a restart.
+    const seedCount = users.filter((u) =>
+      !u.status || u.status === 'inside' || u.status === 'scanning' || u.status === 'browsing').length;
+    for (let i = 0; i < seedCount; i++) spawnOnFloor();
+    users.filter((u) => u.status === 'waiting').forEach((u) => apiEnterUser(u));
+  }
   // ---------- users API shelf sub-machine ----------
   // walkToShelf / scanQR / inspectItem / walkAway arrive over SSE like the
   // gate verdicts above; shelfClose is the API's own 30s browse timer firing.
@@ -5401,6 +5438,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       // users API control channel: Dashboard forwards SSE events here
       addUser: apiAddUser, updateUser: apiUpdateUser, removeUser: apiRemoveUser,
       leaveUser: apiLeaveUser, payUser: apiPayUser,
+      // roster refresh: whole-store replace, not a per-user delta
+      reseedUsers,
       enterUser: apiEnterUser, verifyUser: apiVerifyUser,
       // shelf sub-machine (walkToShelf → scanQR → inspectItem…; shelfClose =
       // the API's 30s browse timer, walkAway = gave up waiting for a verdict)

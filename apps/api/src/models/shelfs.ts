@@ -10,6 +10,10 @@ export type ShelfItem = {
   reorder: number;
   // per-unit product weight in kg (from the loadcell device's product record)
   weight: number;
+  // product photo URL, "" when the device has no product or the feed ships an
+  // empty image_url (both happen). Empty means "no image" — same contract as
+  // `sku` on Shelf; the dashboard falls back to the colour dot.
+  image: string;
 };
 
 export type Shelf = {
@@ -58,6 +62,9 @@ export type ExternalDeviceProduct = {
   item_name: string;
   unit_weight_kg: number;
   max_qty: number;
+  // product photo (Supabase public storage URL). Ships as "" on some products,
+  // so presence of the key is not presence of an image.
+  image_url?: string;
   // on-shelf quantity — only present on configured devices (placeholder
   // "Default Item" rows omit it); seeds Shelf item stock and is updated live by
   // the loadcell pick/return feed (ShelfsService.setStock).

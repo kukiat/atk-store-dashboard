@@ -40,7 +40,12 @@ export type UserEvent =
   // scanQR carries the scanned sku too, so the feed reflects what was scanned
   | { type: "scanQR"; user: { id: number; result: "pass" | "fail"; sku: string } }
   | { type: "walkToShelf"; user: { id: number; shelfId: string } }
-  | { type: "inspectItem"; user: { id: number; result: "keep" | "return" } };
+  | { type: "inspectItem"; user: { id: number; result: "keep" | "return" } }
+  // roster refresh: the whole store in one event, not a per-user delta. The
+  // only variant that carries `users` (an array) instead of `user` — the SSE
+  // route picks the right field. See refreshRoster for why it isn't a
+  // removed/added storm.
+  | { type: "roster"; users: User[] };
 
 // body of POST /:id/status — mirror of the "users.action" model union.
 // enter/leave/walkAway/shelfClose carry no data; verify/pay nest a pass/fail

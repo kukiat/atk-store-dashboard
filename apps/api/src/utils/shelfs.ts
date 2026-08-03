@@ -25,24 +25,14 @@ function colorFor(deviceId: string): string {
   return PALETTE[h % PALETTE.length];
 }
 
-// Per-device position fixups for devices the IoT feed ships half-configured
-// (e.g. BF6600 comes through with length 0, which renders as nothing and trips
-// the scene's length >= 3 guard). Keyed by device_id; the override replaces the
-// device's whole position block. Drop an entry once the device is fixed upstream.
-const POSITION_OVERRIDES: Record<string, ExternalDevice["position"]> = {
-  "BF6600": { x: -3, z: -13.4, rotation: 0, length: 16 },
-  "10005": { x: 7, z: 9, rotation: 0, length: 5.5 },
-  "10003": { x: 1.5, z: 0, rotation: 0, length: 8 },
-  "10002": { x: 13, z: -5, rotation: 270, length: 12 },
-  "10001": { x: -8.5, z: 4, rotation: 0, length: 9 },
-  "BF67EC": { x: -6, z: 10, rotation: 90, length: 7 },
-};
-
 // The IoT feed carries no shelf type (every row is device_type "loadcell"), so
 // type is assigned here per device_id. Anything not listed defaults to
 // "gondola" (a two-sided island); the two named devices are the exceptions —
-// BF6600 hugs the back wall (single-faced "wall") and 10005 is the checkout
-// counter. Drop or add entries as the store layout changes.
+// BF6600 hugs the back wall (single-faced "wall") and 10005 was the checkout
+// counter. NOTE: 10005 no longer exists upstream (the feed replaced it with
+// A81A70 at the same coordinates), so the store currently has no checkout
+// counter — point the entry at the new device_id to bring it back. Drop or add
+// entries as the store layout changes.
 const TYPE_OVERRIDES: Record<string, Shelf["type"]> = {
   "BF6600": "wall",
   "10005": "checkout",
@@ -80,33 +70,35 @@ export function toShelf(d: ExternalDevice): Shelf {
         qty: p?.current_qty ?? 0,
         reorder: Math.max(1, Math.round(capacity * 0.1)),
         weight: p?.unit_weight_kg ?? 0,
+        image: p?.image_url ?? "", // "" = no photo; the dashboard shows the colour dot
       }
     ],
   };
 }
 
-// Apply the per-device position fixup (if any) so callers never see the
-// half-configured raw block. Shared by both the Shelf mapping and the raw
-// device lookup so a shelf and its ExternalDevice stay in lockstep.
-function withOverrides(d: ExternalDevice): ExternalDevice {
-  const position = POSITION_OVERRIDES[d.device_id];
-  return position ? { ...d, position } : d;
-}
-
-// Fetch the raw loadcell devices from the external IoT API (overrides applied,
-// non-loadcell rows dropped). The shelfs service calls this once to seed its
-// ExternalDevice cache, then owns the list from there on (MQTT status flips
-// online in place — see ShelfsService). A non-2xx or network failure rejects;
-// the caller turns that into a 502.
+// Fetch the raw loadcell devices from the external IoT API (non-loadcell rows
+// dropped). Called on EVERY read — the shelfs service keeps no copy — so the
+// layout, the roster and the product rows are always the live ones; the service
+// only lays its MQTT overlays on top. Position comes straight from the feed now
+// (the per-device fixups are gone — upstream ships real coordinates).
+//
+// IMPORTANT: IOT_API_URL must be https. The host 301s http → https, and fetch
+// strips `Authorization` across a cross-origin redirect (a scheme change counts)
+// — the bearer would be silently dropped and every call would 401. The IoT API
+// accepts either credential, so both are sent.
+//
+// A non-2xx or network failure rejects; the caller turns that into a 502 and,
+// with no cached fallback, that is the end of the request.
 export async function fetchLoadcellDevices(): Promise<ExternalDevice[]> {
   const url = `${process.env.IOT_API_URL}/devices`;
   const res = await fetch(url, {
-    headers: { "x-iot-api-key": process.env.IOT_API_KEY ?? "" },
+    headers: {
+      Authorization: `Bearer ${process.env.IOT_ACCESS_TOKEN ?? ""}`,
+      "x-iot-api-key": process.env.IOT_API_KEY ?? "",
+    },
   });
   if (!res.ok)
     throw new Error(`shelfs devices fetch failed: ${res.status} ${res.statusText}`);
   const body = (await res.json()) as { data: ExternalDevice[] };
-  return (body.data ?? [])
-    .filter((d) => d.device_type === "loadcell")
-    .map(withOverrides);
+  return (body.data ?? []).filter((d) => d.device_type === "loadcell");
 }

@@ -91,6 +91,18 @@ function HeadCard({ card, peopleRef }) {
     (el) => { peopleRef.current?.bindEventCard?.(card.apiId, el); },
     [peopleRef, card.apiId],
   );
+  // The product photo sits BESIDE the status icon, never instead of it: the
+  // photo answers "which product", the icon answers "what happened", and the
+  // badge needs the icon to tell a pick from a return at a glance. Fixed 28px in
+  // CSS so the slot is its final width from the first frame — this card is
+  // centred over a head, so a late-arriving image would push it open from both
+  // sides at once, which is exactly the flinch the rest of this file avoids.
+  // No fallback element when there is no photo (or it fails): the icon is
+  // already there, so the card simply reverts to the layout it has always had.
+  const [imgFailed, setImgFailed] = useState(false);
+  useEffect(() => { setImgFailed(false); }, [card.image]);
+  const showImg = !!card.image && !imgFailed;
+
   const browsing = card.kind === 'browse';
   // green while the scan verdict is all it has to say; blue once the first item
   // moves, and it STAYS blue — flipping to amber on every return would make a
@@ -102,6 +114,10 @@ function HeadCard({ card, peopleRef }) {
     // it sets have to be inherited by the track's own ::after nub too
     <div className={`hcard-track hcard-${accent}${card.closing ? ' closing' : ''}`} ref={bind}>
       <div className="hcard">
+        {showImg && (
+          <img className="hcard-thumb" src={card.image} alt="" width="28" height="28"
+            decoding="async" onError={() => setImgFailed(true)} />
+        )}
         <Icon className="hcard-ico" name={browsing ? (card.summary ? 'basket' : 'scanned') : 'reject'} />
         {card.summary && <span className="hcard-num">{card.summary.takenTotal}</span>}
         <span className="hcard-txt">
@@ -200,11 +216,15 @@ export function useHeadCards(peopleRef) {
 
   // ---- the three things the dashboard calls ----
 
-  // scanQR verdict. A pass opens the browse card; a fail is a flash.
-  const armScan = useCallback((apiId, result, sku, productName) => {
-    const title = productName || sku || 'Item';
-    if (result === 'pass') arm({ apiId, kind: 'browse', title, sub: 'SCANNED' }, open);
-    else arm({ apiId, kind: 'reject', title, sub: 'SCAN REJECTED' }, show);
+  // scanQR verdict. A pass opens the browse card; a fail is a flash. `product`
+  // is the catalogue entry for this sku ({ name, image }) — both cards get the
+  // photo, since they are the same scan seen from two outcomes and "which
+  // product was refused" is the point of the red one.
+  const armScan = useCallback((apiId, result, sku, product) => {
+    const title = product?.name || sku || 'Item';
+    const image = product?.image || '';
+    if (result === 'pass') arm({ apiId, kind: 'browse', title, image, sub: 'SCANNED' }, open);
+    else arm({ apiId, kind: 'reject', title, image, sub: 'SCAN REJECTED' }, show);
   }, [arm, open, show]);
 
   // pick/return off the loadcell (or the Backdoor). The card is already up — this

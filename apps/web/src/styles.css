@@ -375,11 +375,6 @@ canvas { display: block; }
 .status-dot { display: flex; align-items: center; gap: 7px; color: #4caf72; font-size: 12px; }
 .status-dot i { width: 7px; height: 7px; border-radius: 50%; background: #4caf72; box-shadow: 0 0 8px #4caf72; }
 .clock { color: #9fb6e6; font-size: 13px; font-variant-numeric: tabular-nums; }
-.avatar {
-  width: 34px; height: 34px; border-radius: 50%;
-  background: linear-gradient(135deg, #3a6bd0, #1a2745);
-  border: 2px solid #2a4c86;
-}
 
 /* body grid — the three tracks are FIXED and never change, so toggling a
    sidebar never reflows/resizes the center stage (nor the Babylon canvas).
@@ -663,9 +658,22 @@ canvas { display: block; }
 .stk-offline { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #e2574c; background: rgba(226,87,76,.12); border-radius: 8px; padding: 7px 10px; margin-bottom: 10px; }
 .stk-empty { color: #6f86b8; font-size: 12px; padding: 8px 2px; }
 .stock-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
-.stk-row { display: flex; align-items: center; gap: 10px; padding: 4px 6px; border-radius: 8px; transition: background .45s ease; }
+/* min-height pins every row to the thumbnail's height so rows with no photo —
+   which have no leading element at all — keep the same height as rows that do */
+.stk-row { display: flex; align-items: center; gap: 10px; padding: 4px 6px; min-height: 36px; border-radius: 8px; transition: background .45s ease; }
 .stk-row.flash { background: rgba(53,195,255,.12); }
-.stk-dot { width: 12px; height: 12px; border-radius: 4px; flex: none; box-shadow: 0 0 8px rgba(53,195,255,.2); }
+/* product photo, and the row's only leading element — a product with no picture
+   draws nothing here and starts at its name instead. Fixed 28px box (the row's
+   content is 27px tall; .stk-row's min-height absorbs the difference) with
+   object-fit: cover: the feed's photos are a tall transparent cutout and a wide
+   near-black packshot, and letterboxing the latter into a dark panel would
+   render it invisible. Borderless — the photo fills the whole box; the glow is
+   the one .ti-dot wears, so the thumbnail still reads as part of the panel. */
+.stk-thumb {
+  width: 28px; height: 28px; flex: none; border-radius: 6px;
+  object-fit: cover; background: #0d1a35;
+  box-shadow: 0 0 8px rgba(53,195,255,.2);
+}
 .stk-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
 .stk-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .stk-name { color: #eaf6ff; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -954,6 +962,15 @@ canvas { display: block; }
   background: rgba(10,20,32,.96);
   border-right: 1px solid var(--hc-accent-dim, rgba(120,200,255,.3));
   border-bottom: 1px solid var(--hc-accent-dim, rgba(120,200,255,.3));
+}
+/* product photo, beside the status icon rather than in place of it. Deliberately
+   borderless: every other coloured edge on this card rides --hc-accent and
+   transitions with it, so a rim in the item's own colour would be the one part
+   that sits out the green→blue change. The dark backing does the job a border
+   would have — it bounds a transparent cutout against the card gradient. */
+.hcard-thumb {
+  width: 28px; height: 28px; flex: none;
+  border-radius: 7px; object-fit: cover; background: #0b1728;
 }
 .hcard-ico {
   width: 21px; height: 21px; flex: none; color: var(--hc-accent);
