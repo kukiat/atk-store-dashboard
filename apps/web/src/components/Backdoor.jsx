@@ -234,7 +234,8 @@ export default function Backdoor() {
     if (!window.confirm(
       'ล้าง roster ทั้งหมดแล้วดึงใหม่จาก external?\n\n'
       + 'สถานะของทุกคนจะหายหมด (คนที่กำลังจ่ายเงิน/เปิดชั้นวางอยู่ก็ด้วย) '
-      + 'และคนในฉาก 3D จะ fade ออกทั้งหมด',
+      + 'และคนในฉาก 3D จะถูกสร้างใหม่ทั้งหมดตามสถานะชุดใหม่ — '
+      + 'คนที่กำลังเลือก/ตามด้วยกล้องอยู่จะหลุด',
     )) return;
     setReloadBusy(true);
     try {
@@ -242,7 +243,7 @@ export default function Backdoor() {
       const list = Array.isArray(data) ? data : [];
       setUsers(list);
       setLoadError(null);
-      pushToast(`โหลดใหม่แล้ว ${list.length} คน · reload /v5 เพื่อดูในฉาก`, 'ok');
+      pushToast(`โหลดใหม่แล้ว ${list.length} คน · ฉาก 3D อัปเดตเองผ่าน SSE`, 'ok');
     } catch (e) {
       pushToast(String(e?.message || e), 'err');
     } finally {

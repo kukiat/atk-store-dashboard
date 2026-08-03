@@ -63,7 +63,6 @@ class UsersService {
   // Swap the whole store for a fresh roster — boot and refreshRoster share this.
   private resetRoster(roster: User[]) {
     this.store = new Map(roster.map((u) => [u.id, u]));
-    console.log("this.store", JSON.stringify(this.store, null, 2));
     this.nextId = Math.max(0, ...this.store.keys()) + 1;
   }
 
@@ -73,23 +72,20 @@ class UsersService {
   // was — there is nothing to roll back.
   async refreshRoster() {
     const roster = await fetchBootRoster();
-    console.log("refreshRoster", JSON.stringify(roster, null, 2));
-    // Every current body is dropped and none are re-announced: to the scene
-    // `added` means "walk in the front door and hold for verify" (it ignores
-    // status), so replaying the new roster would march `outside` users inside
-    // and wedge them at the scanner. The scene has no SSE vocabulary for
-    // reseeding a roster — it seeds from GET /users at construction, so the
-    // fresh crowd shows up on the next dashboard reload.
     const gone = [...this.store.keys()];
     this.resetRoster(roster);
-    for (const id of gone) {
-      this.sessions.closeByUser(id); // drop any browse rows the wiped roster left behind
-      this.emit({ type: "removed", user: { id } });
-    }
-    console.log("refreshRoster done", JSON.stringify(this.store, null, 2));
-    const res = this.list();
-    console.log("refreshRoster res", JSON.stringify(res, null, 2));
-    return res;
+    // ledger cleanup only — closeByUser emits `closed` on the sessions feed,
+    // which is a different pipe from the user events below
+    for (const id of gone) this.sessions.closeByUser(id);
+    // ONE event carrying the whole store, not a removed/added storm. Per-user
+    // deltas can't express this: `added` means "walk in the front door and hold
+    // for verify" to the scene (it ignores status), and a re-announced id whose
+    // old body is still fading gets parked instead of appearing. The scene
+    // treats `roster` as "wipe every API body and rebuild from this array",
+    // which is what a fresh boot would have left behind.
+    const users = this.list();
+    this.emit({ type: "roster", users });
+    return users;
   }
 
   // event hub — the SSE route subscribes, mutations broadcast

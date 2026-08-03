@@ -375,11 +375,6 @@ canvas { display: block; }
 .status-dot { display: flex; align-items: center; gap: 7px; color: #4caf72; font-size: 12px; }
 .status-dot i { width: 7px; height: 7px; border-radius: 50%; background: #4caf72; box-shadow: 0 0 8px #4caf72; }
 .clock { color: #9fb6e6; font-size: 13px; font-variant-numeric: tabular-nums; }
-.avatar {
-  width: 34px; height: 34px; border-radius: 50%;
-  background: linear-gradient(135deg, #3a6bd0, #1a2745);
-  border: 2px solid #2a4c86;
-}
 
 /* body grid — the three tracks are FIXED and never change, so toggling a
    sidebar never reflows/resizes the center stage (nor the Babylon canvas).
@@ -663,18 +658,17 @@ canvas { display: block; }
 .stk-offline { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #e2574c; background: rgba(226,87,76,.12); border-radius: 8px; padding: 7px 10px; margin-bottom: 10px; }
 .stk-empty { color: #6f86b8; font-size: 12px; padding: 8px 2px; }
 .stock-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
-/* min-height pins every row to the thumbnail's height so rows that fall back to
-   the 12px colour dot don't sit 1px shorter than rows carrying a photo */
+/* min-height pins every row to the thumbnail's height so rows with no photo —
+   which have no leading element at all — keep the same height as rows that do */
 .stk-row { display: flex; align-items: center; gap: 10px; padding: 4px 6px; min-height: 36px; border-radius: 8px; transition: background .45s ease; }
 .stk-row.flash { background: rgba(53,195,255,.12); }
-.stk-dot { width: 12px; height: 12px; border-radius: 4px; flex: none; box-shadow: 0 0 8px rgba(53,195,255,.2); }
-/* product photo — same slot as .stk-dot, which stays as the no-image fallback.
-   Fixed 28px box (the row's content is 27px tall; .stk-row's min-height absorbs
-   the difference) with object-fit: cover: the feed's photos are a tall
-   transparent cutout and a wide near-black packshot, and letterboxing the latter
-   into a dark panel would render it invisible. Borderless — the photo fills the
-   whole box; the glow is the same one .stk-dot and .ti-dot wear, so the
-   thumbnail still reads as part of the panel. */
+/* product photo, and the row's only leading element — a product with no picture
+   draws nothing here and starts at its name instead. Fixed 28px box (the row's
+   content is 27px tall; .stk-row's min-height absorbs the difference) with
+   object-fit: cover: the feed's photos are a tall transparent cutout and a wide
+   near-black packshot, and letterboxing the latter into a dark panel would
+   render it invisible. Borderless — the photo fills the whole box; the glow is
+   the one .ti-dot wears, so the thumbnail still reads as part of the panel. */
 .stk-thumb {
   width: 28px; height: 28px; flex: none; border-radius: 6px;
   object-fit: cover; background: #0d1a35;

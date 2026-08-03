@@ -124,7 +124,10 @@ curl -X POST http://localhost:3004/users/roster/refresh
 ```
 
 - external ล่ม/ตอบ error → **502** และ **store เดิมไม่กระเทือน** (fetch ให้เสร็จก่อนถึงแตะ store) — ต่างจากตอน boot ที่ตั้งใจให้ server ตาย
-- SSE: ยิง `removed` ให้ทุกคนใน roster เดิม และ **ไม่ยิง `added`** ให้ roster ใหม่ — ฉาก 3D จึงเหลือแต่ ambient crowd, คนชุดใหม่จะโผล่ตอน reload `/v5` (scene seed roster ตอนสร้างจาก `GET /users` เท่านั้น ไม่มีช่องทาง reseed ผ่าน SSE)
+- SSE: ยิง **`roster` ตัวเดียว** ที่แบก roster ชุดใหม่ทั้ง array (ไม่ใช่ `removed`/`added` รายคน — ดูหัวข้อ SSE ท้ายไฟล์) dashboard จะ replace ตารางทั้งก้อน และฉาก 3D รื้อ body ของ user ทุกตัวทิ้งแล้วสร้างใหม่ตามสถานะในชุดใหม่ทันที **ไม่ต้อง reload `/v5`**
+  - คนที่ `inside` ไปยืนบนพื้น, `waiting` ไปต่อคิวหน้าประตู, `outside`/`paying` ไม่มีตัวในฉาก (เหมือนตอน boot เป๊ะ)
+  - ambient crowd (walk-in ที่ไม่อยู่ใน roster) ไม่โดนแตะ — คนละประชากรกัน
+  - คนที่ id ยังอยู่ใน roster ใหม่ก็โดนสร้าง body ใหม่เหมือนกัน (เสียตำแหน่งเดิม) — เป็น replace ทั้งก้อน ไม่ใช่ diff
 - ปุ่ม `⤓ Reload from External` บนหน้า `/backdoor` ยิง endpoint นี้ (มี confirm ก่อน)
 
 ## เปลี่ยน status (POST /users/:id/status)
@@ -256,7 +259,7 @@ curl -X POST http://localhost:3004/users/4/status \
 
 ## ฟัง event สด (SSE)
 
-stream เดียวกับที่ dashboard ใช้ — event: `added` / `updated` / `removed` / `leave` / `enter` / `verify` / `pay` / `walkToShelf` / `scanQR` / `inspectItem` / `walkAway` / `shelfClose` (มี `ping` ทุก ~8 วิเป็น keepalive) — event เหล่านี้ไม่ได้ยุบตาม HTTP route: service ยังยิงแยกต่อ transition เหมือนเดิม
+stream เดียวกับที่ dashboard ใช้ — event: `added` / `updated` / `removed` / `leave` / `enter` / `verify` / `pay` / `walkToShelf` / `scanQR` / `inspectItem` / `walkAway` / `shelfClose` / `roster` (มี `ping` ทุก ~8 วิเป็น keepalive) — event เหล่านี้ไม่ได้ยุบตาม HTTP route: service ยังยิงแยกต่อ transition เหมือนเดิม
 
 **SSE frame ไม่ห่อ response envelope** — `data:` ของแต่ละ frame คือ payload ดิบ (`{"id":6,...}`) ไม่ใช่ `{ data, error, success }` (event-stream มี framing ของตัวเองอยู่แล้ว)
 
@@ -264,6 +267,7 @@ stream เดียวกับที่ dashboard ใช้ — event: `added` 
 - `scanQR` → `{ id, result, sku }` / `inspectItem` → `{ id, result }`
 - `walkAway` → `{ id }`
 - `shelfClose` → `{ id }` — ยิงตอนสั่ง action `shelfClose` (browsing → inside)
+- `roster` → **array ของ user ทั้ง roster** (`[{ id, name, status, ... }, ...]`) — ตัวเดียวที่ `data:` ไม่ใช่ object ของคนเดียว. ยิงจาก `POST /users/roster/refresh` อย่างเดียว แปลว่า "roster ตอนนี้คือชุดนี้เป๊ะ ให้ล้างแล้วสร้างใหม่"
 
 ```bash
 curl -N http://localhost:3004/users/events

@@ -168,11 +168,11 @@ function StockRow({ item }) {
     return () => clearTimeout(t);
   }, [item.qty]);
 
-  // The product photo takes the colour dot's slot; the dot is the fallback, and
-  // all three ways of having no picture — no product, an empty image_url, a URL
-  // that fails to load — land on it, so there is only ever one alternative to
-  // draw. Keyed reset: a row whose image once failed must try again when the
-  // shelf's product changes (the stock list is reseeded on every catalog load).
+  // The product photo leads the row, and there is no stand-in: all three ways of
+  // having no picture — no product, an empty image_url, a URL that fails to load
+  // — draw nothing at all, and the row starts at its text. Keyed reset: a row
+  // whose image once failed must try again when the shelf's product changes (the
+  // stock list is reseeded on every catalog load).
   const [imgFailed, setImgFailed] = useState(false);
   useEffect(() => { setImgFailed(false); }, [item.image]);
   const showImg = !!item.image && !imgFailed;
@@ -181,7 +181,7 @@ function StockRow({ item }) {
   const pct = Math.max(0, Math.min(100, (item.qty / item.capacity) * 100));
   return (
     <li className={`stk-row${flash ? ' flash' : ''}`}>
-      {showImg ? (
+      {showImg && (
         <img
           className="stk-thumb"
           src={item.image}
@@ -192,8 +192,6 @@ function StockRow({ item }) {
           height="28"
           onError={() => setImgFailed(true)}
         />
-      ) : (
-        <span className="stk-dot" style={{ background: item.color }} />
       )}
       <div className="stk-main">
         <div className="stk-top">
@@ -714,6 +712,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   // events (verify/pay/scanQR/…) carry only { id, result } — they say an
   // action happened but not where the user's status landed, so those trigger
   // one debounced re-fetch instead of this code guessing the lifecycle.
+  // `roster` is the odd one out: a whole-store replace (see its listener below).
   const [outsideUsers, setOutsideUsers] = useState([]);
 
   // verify/pay-pass image flash: an API `verify` or `pay` (result pass) that
@@ -794,6 +793,26 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     // so one sync here both boots the roster and repairs whatever events were
     // missed while the connection was down.
     es.addEventListener('open', sync);
+    // roster refresh (Backdoor's "Reload from External"): one event carrying the
+    // whole store, not a per-user delta — `fwd` can't touch it. The mirror is
+    // replaced outright and the scene rebuilds every API body from the array.
+    // Deliberately NOT hung off `open` as well: a reconnect is silent and
+    // frequent (dev restarts, sleep, hot reload) and this is destructive.
+    es.addEventListener('roster', (ev) => {
+      let list;
+      try { list = JSON.parse(ev.data); } catch { return; }
+      if (!Array.isArray(list)) return;
+      roster.clear();
+      for (const u of list) roster.set(u.id, u);
+      publish();
+      peopleRef.current?.reseedUsers?.(list);
+      // every body on the floor is a new one, so nothing that pointed at a body
+      // survives: drop the follow, the selection and any armed face bubble
+      setFollowedPerson(null);
+      setSelectedPerson(null);
+      setCardHidden(false);
+      closeVerifyFlash();
+    });
     es.addEventListener('added', fwd((u) => peopleRef.current?.addUser?.(u)));
     es.addEventListener('updated', fwd((u) => peopleRef.current?.updateUser?.(u)));
     es.addEventListener('removed', fwd((u) => peopleRef.current?.removeUser?.(u.id), true));
@@ -832,7 +851,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     es.addEventListener('walkAway', fwd((u) => peopleRef.current?.walkAwayUser?.(u.id)));
     es.addEventListener('shelfClose', fwd((u) => peopleRef.current?.shelfCloseUser?.(u.id)));
     return () => { clearTimeout(syncT); es.close(); };
-  }, [armScan]);
+  }, [armScan, closeVerifyFlash]);
 
   // selected shelf (1–6) drives the stock filter; null = show all shelves.
   // Shelf and person focus are mutually exclusive: picking a shelf clears the
@@ -1056,7 +1075,6 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
         <div className="head-right">
           <span className="status-dot"><i /> Connected</span>
           <span className="clock">10:42 AM</span>
-          <div className="avatar" />
         </div>
       </header>
 

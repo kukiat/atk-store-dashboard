@@ -17,7 +17,9 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
   .onError(envelopeError)
 
   // Live feed for the 3D dashboard: added → walks in through the scan gate,
-  // updated → card refresh / body respawn, removed → fades out in place.
+  // updated → card refresh / body respawn, removed → fades out in place,
+  // roster → wipe every API body and rebuild the floor from the array it
+  // carries (the only whole-store event; see /roster/refresh below).
   // Declared before /:id so the path doesn't get captured as an id.
   .get("/events", async function* ({ request, usersService }) {
     const queue: UserEvent[] = [];
@@ -33,7 +35,9 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
       while (!request.signal.aborted) {
         while (queue.length) {
           const e = queue.shift()!;
-          yield sse({ event: e.type, data: e.user });
+          // every variant carries `user` except `roster`, which carries the
+          // whole store as `users` (see UserEvent in ../../models)
+          yield sse({ event: e.type, data: "users" in e ? e.users : e.user });
         }
         // keepalive: Bun closes streams idle for ~10s, and events emitted
         // while the client reconnects are simply lost — ping keeps the pipe
@@ -55,7 +59,9 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
 
   // Re-run the boot roster fetch on demand (the Backdoor's reload button) and
   // replace the store wholesale — every local lifecycle status is thrown away
-  // for what external says, exactly as a restart would. Also declared before
+  // for what external says, exactly as a restart would. The dashboard follows
+  // along live off the single `roster` SSE this emits: no page reload needed.
+  // Also declared before
   // /:id, whose t.Numeric param would 422 on "roster".
   .post(
     "/roster/refresh",
