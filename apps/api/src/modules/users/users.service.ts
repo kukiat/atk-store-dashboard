@@ -87,6 +87,7 @@ class UsersService {
   // Swap the whole store for a fresh roster — boot and refreshRoster share this.
   // Both indexes are rebuilt together; nothing from the old roster survives.
   private resetRoster(roster: User[]) {
+    console.log('resetRoster', JSON.stringify(roster, null, 2));
     this.store = new Map(roster.map((u) => [u.id, u]));
     this.byExternal = new Map(roster.map((u) => [u.external_id, u]));
     // back to the base, not max+1: external ids from the feed live far below
@@ -114,11 +115,15 @@ class UsersService {
   // was — there is nothing to roll back.
   async refreshRoster() {
     const roster = await fetchBootRoster();
+    console.log('roster', JSON.stringify(roster, null, 2));
     const gone = [...this.store.keys()];
     this.resetRoster(roster);
     // ledger cleanup only — closeByUser emits `closed` on the sessions feed,
     // which is a different pipe from the user events below
-    for (const id of gone) this.sessions.closeByUser(id);
+    for (const id of gone) {
+      this.sessions.closeByUser(id);
+      console.log('closed session for user', id);
+    }
     // ONE event carrying the whole store, not a removed/added storm. Per-user
     // deltas can't express this: `added` means "walk in the front door and hold
     // for verify" to the scene (it ignores status), and a re-announced id whose
@@ -126,6 +131,7 @@ class UsersService {
     // treats `roster` as "wipe every API body and rebuild from this array",
     // which is what a fresh boot would have left behind.
     const users = this.list();
+    console.log('users', JSON.stringify(users, null, 2));
     this.emit({ type: "roster", users });
     return users;
   }

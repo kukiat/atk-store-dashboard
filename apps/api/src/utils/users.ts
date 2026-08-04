@@ -56,7 +56,7 @@ export async function fetchBootRoster(): Promise<User[]> {
       // UsersService.refreshRoster), so nothing survives a reload that could
       // notice the uuids changed — no cross-refresh id map is needed.
       id: randomUUID(),
-      external_id: 1,
+      external_id: u.id,
       name: u.name,
       gender: guessGender(u.name, u.id),
       status,
