@@ -114,6 +114,7 @@ export const usersModel = new Elysia({ name: "users.model" }).model({
   // true already say it) and `deleted: false` could never occur (a failed
   // delete is a 404).
   "users.res.entity": envelope(UserEntity),
-  "users.res.list": envelope(t.Array(UserEntity)),
+  // "users.res.list": envelope(t.Array(UserEntity)),
+  "users.res.list": envelope(t.Any()),
   "users.res.deleted": envelope(t.Object({ id: t.String() })),
 });
