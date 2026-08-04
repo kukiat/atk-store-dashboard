@@ -44,12 +44,13 @@ export async function fetchBootRoster(): Promise<User[]> {
       `users boot roster fetch failed: ${res.status} ${res.statusText}`,
     );
   const rows = (await res.json()) as ExternalUser[];
-  console.log('rows', JSON.stringify(rows, null, 2));
 
   const fetchedAt = new Date().toISOString();
   return rows.flatMap((u) => {
     const status = mapVisitStatus(u.visit_status);
     if (status === null) return []; // drop visit_status null / unrecognized
+    console.log('id', u.id)
+
     const user: User = {
       // external's row id is THEIR key, so it lands on external_id; ours is a
       // fresh uuid every fetch. refreshRoster wipes the store wholesale (see
