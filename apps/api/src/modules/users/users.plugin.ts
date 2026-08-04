@@ -80,7 +80,7 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
         );
       }
     },
-    { response: "users.res.list" },
+    // { response: "users.res.list" },
   )
 
   .get("/", ({ usersService }) => ok(usersService.list()), {
@@ -197,6 +197,6 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
     {
       params: "users.params.external",
       body: "users.action",
-      // response: "users.res.entity",
+      response: "users.res.entity",
     },
   );
