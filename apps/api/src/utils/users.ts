@@ -44,7 +44,7 @@ export async function fetchBootRoster(): Promise<User[]> {
       `users boot roster fetch failed: ${res.status} ${res.statusText}`,
     );
   const rows = (await res.json()) as ExternalUser[];
-
+  console.log('rowsrowsrowsrows', JSON.stringify(rows, null, 2))
   const fetchedAt = new Date().toISOString();
   return rows.flatMap((u) => {
     const status = mapVisitStatus(u.visit_status);
