@@ -38,6 +38,7 @@ export function guessGender(name: string, id: number): User["gender"] {
 // the process.
 export async function fetchBootRoster(): Promise<User[]> {
   const url = `${process.env.ATK_STORE_API_URL}/animation-api/users`;
+  console.log('url urlurlurl', url)
   const res = await fetch(url);
   if (!res.ok)
     throw new Error(
