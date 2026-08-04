@@ -87,6 +87,8 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
     response: "users.res.list",
   })
 
+  .get("/raw", async ({ usersService }) => ok(await usersService.rawUser()))
+
   .get(
     "/:id",
     ({ usersService, params }) => ok(usersService.findById(params.id)),

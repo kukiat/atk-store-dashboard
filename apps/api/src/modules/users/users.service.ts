@@ -108,6 +108,12 @@ class UsersService {
     return this.nextExternalId++;
   }
 
+  async rawUser() {
+    const roster = await fetchBootRoster();
+    console.log('roster', roster)
+    return roster
+  }
+
   // Backdoor's "Reload from External" button: put the store back to the state a
   // fresh boot would leave it in, without restarting. The await lands before
   // anything is touched, so an external failure leaves the store exactly as it
