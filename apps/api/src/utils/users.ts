@@ -43,7 +43,7 @@ export async function fetchBootRoster(): Promise<User[]> {
     throw new Error(
       `users boot roster fetch failed: ${res.status} ${res.statusText}`,
     );
-  const rows = [] as ExternalUser[];
+  const rows = (await res.json()) as ExternalUser[];
   console.log('rows', JSON.stringify(rows, null, 2));
 
   const fetchedAt = new Date().toISOString();
