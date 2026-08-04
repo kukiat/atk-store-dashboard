@@ -54,12 +54,20 @@ function drain() {
   const out = events.splice(0);
   return out.filter((e) => e.type === "picked" || e.type === "returned");
 }
+// The ledger keys on User.id, which is a uuid. Full uuids would drown these
+// cases in noise, so the harness works in small numbers and converts at the
+// boundary — every svc.* call below goes through one of these.
+const uid = (n: number) => `user-${n}`;
 function open(userId: number, sku: string, hasProduct = true) {
-  svc.open({ userId, sku, shelf: shelf(sku, "Milk (shelf name)"), device: device(sku, hasProduct) });
+  svc.open({ userId: uid(userId), sku, shelf: shelf(sku, "Milk (shelf name)"), device: device(sku, hasProduct) });
   drain();
 }
+const rowOf = (userId: number) => svc.list().find((s) => s.userId === uid(userId));
+const pick = (userId: number, action: "pick" | "return") =>
+  svc.recordUserPickReturn(uid(userId), action);
+const close = (userId: number) => svc.closeByUser(uid(userId));
 const basket = (userId: number) =>
-  svc.list().find((s) => s.userId === userId)?.items.map((i) => [i.sku, i.qty]) ?? [];
+  rowOf(userId)?.items.map((i) => [i.sku, i.qty]) ?? [];
 // the three numbers the head card actually prints, in card order:
 // big number (HELD), then the OUT · IN breakdown, then this event's own count
 const tally = (s: {
@@ -75,51 +83,51 @@ console.log("commanded path (inspectItem) synthesizes a summary:");
 {
   open(1, "BEV-001");
   const e1 = drain(); // no events from open itself
-  check("open seeds the summary off the shelf stock", tally(svc.list().find((s) => s.userId === 1)!.summary), [0, 0, 0, 0, 0]);
+  check("open seeds the summary off the shelf stock", tally(rowOf(1)!.summary), [0, 0, 0, 0, 0]);
   check("…with openingQty = currentQty = shelf qty", [
-    svc.list().find((s) => s.userId === 1)!.summary.openingQty,
-    svc.list().find((s) => s.userId === 1)!.summary.currentQty,
+    rowOf(1)!.summary.openingQty,
+    rowOf(1)!.summary.currentQty,
   ], [5, 5]);
-  svc.recordUserPickReturn(1, "pick");
+  pick(1, "pick");
   check("first pick: held 1, out 1, event picked 1", drain().map(shape), [
     { type: "picked", action: "pick", sku: "BEV-001", name: "Fresh Milk", tally: [1, 1, 0, 1, 0] },
   ]);
   check("open emitted no pick events", e1.length, 0);
-  svc.recordUserPickReturn(1, "pick");
+  pick(1, "pick");
   check("second pick accumulates to held 2 / out 2", drain().map(shape), [
     { type: "picked", action: "pick", sku: "BEV-001", name: "Fresh Milk", tally: [2, 2, 0, 1, 0] },
   ]);
   check("basket holds 2", basket(1), [["BEV-001", 2]]);
-  svc.recordUserPickReturn(1, "return");
+  pick(1, "return");
   check("return: held 1, out 2, in 1 — and the pick count is cleared", drain().map(shape), [
     { type: "returned", action: "return", sku: "BEV-001", name: "Fresh Milk", tally: [1, 2, 1, 0, 1] },
   ]);
-  svc.recordUserPickReturn(1, "return");
+  pick(1, "return");
   check("returning the last one empties the line", basket(1), []);
-  check("…and the card can still tell the whole story at held 0", tally(svc.list().find((s) => s.userId === 1)!.summary), [0, 2, 2, 0, 1]);
+  check("…and the card can still tell the whole story at held 0", tally(rowOf(1)!.summary), [0, 2, 2, 0, 1]);
   drain();
-  svc.recordUserPickReturn(1, "return");
+  pick(1, "return");
   check("returning what you don't hold moves 0 units, still emits", drain().map(shape), [
     { type: "returned", action: "return", sku: "BEV-001", name: "Fresh Milk", tally: [0, 2, 2, 0, 0] },
   ]);
-  svc.closeByUser(1);
+  close(1);
   drain();
 }
 
 console.log("unconfigured device (product: null) falls back to the shelf line:");
 {
   open(2, "BEV-002", false);
-  svc.recordUserPickReturn(2, "pick");
+  pick(2, "pick");
   check("name comes off the shelf item", drain().map(shape), [
     { type: "picked", action: "pick", sku: "BEV-002", name: "Milk (shelf name)", tally: [1, 1, 0, 1, 0] },
   ]);
-  svc.closeByUser(2);
+  close(2);
   drain();
 }
 
 console.log("no open session:");
 {
-  check("commanded pick with no row is a no-op", svc.recordUserPickReturn(99, "pick").length, 0);
+  check("commanded pick with no row is a no-op", pick(99, "pick").length, 0);
   check("…and emits nothing", drain().length, 0);
 }
 
@@ -143,7 +151,7 @@ console.log("hardware path still keyed on device+sku, tally-driven:");
     { type: "picked", action: "pick", sku: "BEV-001", name: "Fresh Milk", tally: [3, 3, 0, 3, 0] },
   ]);
   check("commanded and hardware share one basket", basket(3), [["BEV-001", 3]]);
-  svc.recordUserPickReturn(3, "pick");
+  pick(3, "pick");
   check("a commanded pick continues from the loadcell's count", drain().map(shape), [
     { type: "picked", action: "pick", sku: "BEV-001", name: "Fresh Milk", tally: [4, 4, 0, 1, 0] },
   ]);
@@ -155,7 +163,7 @@ console.log("hardware path still keyed on device+sku, tally-driven:");
       summary: { openingQty: 0, currentQty: 0, eventPickedQty: 1, eventAddedQty: 0, pickedOutTotal: 1, addedInTotal: 0, takenTotal: 1 },
     }).length;
   }
-  svc.closeByUser(3);
+  close(3);
   drain();
 }
 
@@ -185,9 +193,9 @@ console.log("1 device = 1 session:");
 {
   open(4, "BEV-001");
   open(5, "BEV-001"); // same device_id "10001"
-  check("the incumbent row is gone", svc.list().filter((s) => s.userId === 4).length, 0);
-  check("only the newcomer holds the device", svc.list().map((s) => s.userId), [5]);
-  svc.closeByUser(5);
+  check("the incumbent row is gone", svc.list().filter((s) => s.userId === uid(4)).length, 0);
+  check("only the newcomer holds the device", svc.list().map((s) => s.userId), [uid(5)]);
+  close(5);
   drain();
 }
 

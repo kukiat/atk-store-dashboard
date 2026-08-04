@@ -21,10 +21,15 @@ API จำลอง (in-memory, ไม่มี DB) สำหรับจัด�
 ตัวอย่าง output ด้านล่างแสดง entity แบบ**ยังไม่ห่อ** เพื่อความกระชับ ของจริงอยู่ใน `data` เสมอ
 
 - Prefix: `http://localhost:3004/users`
-- ข้อมูลหายเมื่อ restart process — boot roster ถูก fetch ใหม่จาก external `${ATK_STORE_API_URL}/animation-api/users` (เก็บเฉพาะคนที่ `visit_status` ไม่ใช่ null, map `exited`→`outside`, `inside`→`inside`, ดึง `entered_at` มาด้วย) — ถ้า external ล่มตอน boot server จะไม่ขึ้นเลย (ตั้งใจ)
+- ข้อมูลหายเมื่อ restart process — boot roster ถูก fetch ใหม่จาก external `${ATK_STORE_API_URL}/animation-api/users` (เก็บเฉพาะคนที่ `visit_status` ไม่ใช่ null, map `exited`→`outside`, `inside`→`inside`, ดึง `entered_at` มาด้วย, `id` ของ external ลงที่ `external_id` ส่วน `id` ของเราสร้าง uuid ใหม่ทุกครั้ง) — ถ้า external ล่มตอน boot server จะไม่ขึ้นเลย (ตั้งใจ)
 - ล้าง+ดึง roster ใหม่ได้โดยไม่ต้อง restart ผ่าน `POST /users/roster/refresh` (ดูท้ายไฟล์)
-- schema ของ user: `{ "id": number, "name": string, "gender": "male" | "female", "status": "outside" | "waiting" | "inside" | "scanning" | "browsing" | "paying", "shelf_id": number | null, "entered_at": string | null }`
+- schema ของ user: `{ "id": string, "external_id": number, "name": string, "gender": "male" | "female", "status": "outside" | "waiting" | "inside" | "scanning" | "browsing" | "paying", "shelf_id": string | null, "entered_at": string | null, "updated_at": string }`
+  - **id สองตัว อย่าสลับกัน**
+    - `id` — uuid ที่ API สร้างเอง **ไม่รับจาก body** ใช้กับ `GET`/`PATCH`/`DELETE /users/:id`
+    - `external_id` — id ของ**ระบบภายนอก** (ส่งมาตอน create ผ่าน field `id`) ใช้กับ `POST /users/:externalId/status` **ทางเดียว** ไม่ส่งมา = API gen ให้เองเริ่มที่ `1000000` (ช่วงแยก เพื่อไม่ไปนั่งทับ id จริงของภายนอกที่นับจาก 1) · ซ้ำ = **409**
+    - รูปทรงต่างกันชัด (uuid กับเลข) ยิงผิด route จึงเป็น 422/404 ไม่ใช่โดนคนอื่นเงียบ ๆ
   - `shelf_id` — shelf ที่กำลังมี session อยู่ (ตอน `scanning`/`browsing`), นอกนั้น null
+  - `updated_at` — ISO 8601 ประทับใหม่ทุกครั้งที่ user เปลี่ยน (create / PATCH / ทุก status action) — dashboard เรียงลิสต์ Exited จากค่านี้ (ใหม่สุดขึ้นบน)
   - `entered_at` — เวลาเริ่มรอบเข้าร้าน (ISO 8601), `null` ตอนอยู่นอกร้าน
     - boot roster เอาค่ามาจาก external ตรง ๆ (เฉพาะคนที่ยังไม่ออกจากร้าน — สถานะ `outside` ถูกล้างเป็น null เพราะเป็นค่าของรอบก่อน)
     - `verify pass` = ประทับเวลาใหม่, `verify fail` / `pay pass` = ล้างเป็น null (`pay fail` ยังอยู่ในร้าน นาฬิกาเดินต่อ)
@@ -59,9 +64,9 @@ browsing --shelfClose------------->  inside     (ดูของเสร็จ 
 - `leave` มีอำนาจสูงสุด: สั่งได้จาก `inside` / `scanning` / `browsing` — ทิ้ง shelf session ทันทีแล้วเดินไปประตูออก
 - ตัวละคร ambient (walk-in ที่ไม่อยู่ใน roster) วน machine เดียวกันเองอัตโนมัติ — action พวกนี้ใช้กับ user ใน roster เท่านั้น
 
-transition ทั้งหมดยิงผ่าน endpoint เดียว: `POST /users/:id/status` body `{ action, payload? }` (ดูหัวข้อ status ด้านล่าง)
+transition ทั้งหมดยิงผ่าน endpoint เดียว: `POST /users/:externalId/status` body `{ action, payload? }` — **ใช้ `external_id` ไม่ใช่ uuid** (ดูหัวข้อ status ด้านล่าง)
 
-POST /users (สร้างใหม่) = ไปต่อคิวที่ scanner หน้าประตู → เริ่มที่ `waiting` (เหมือน `enter` รอ verify verdict ไม่ได้เดินเข้าตรง ๆ)
+POST /users (สร้างใหม่) = **ลงทะเบียนเฉย ๆ ไม่ได้พาเข้าร้าน** → เริ่มที่ `outside` และ**ไม่มีตัวละครในฉาก 3D เลย** จนกว่าจะมี `verify` เข้ามา (ซึ่งรวบ step `enter` ให้เอง) — คนใหม่จะไปกองรออยู่ในลิสต์ Exited ของ dashboard
 
 ## ดูรายชื่อลูกค้า
 
@@ -70,15 +75,21 @@ curl http://localhost:3004/users
 ```
 
 ```bash
-# รายคน (id ไม่มี → 404)
-curl http://localhost:3004/users/1
+# รายคน — ใช้ uuid (id ไม่มี → 404)
+curl http://localhost:3004/users/0d37d2ec-3b85-44f7-b2d0-3046121d26a3
 ```
 
 ## เพิ่มลูกค้า (POST)
 
-คนใหม่จะเดิน scan เข้าร้านทันที — ถ้าร้านเต็ม (8 คน) จะรอคิวหน้าประตูจนมีที่ว่าง (API ตอบ 201 เสมอ)
+คนใหม่**ยังไม่เข้าร้าน**: ได้ `status: "outside"` และไม่มีตัวละครในฉาก 3D ต้องยิง `verify` ตามมาถึงจะเดินเข้า (ดูหัวข้อ verify) — API ตอบ 201
 
 ```bash
+# จากระบบภายนอก: ส่ง id ของตัวเองมาด้วย → ลง external_id
+curl -X POST http://localhost:3004/users \
+  -H 'Content-Type: application/json' \
+  -d '{"id":900,"name":"อนันดา มีสุข","gender":"female"}'
+
+# จาก Backdoor: ไม่ส่ง id → API gen external_id ให้ (1000000, 1000001, …)
 curl -X POST http://localhost:3004/users \
   -H 'Content-Type: application/json' \
   -d '{"name":"อนันดา มีสุข","gender":"female"}'
@@ -86,21 +97,22 @@ curl -X POST http://localhost:3004/users \
 
 - `name`: string ห้ามว่าง (required)
 - `gender`: `male` | `female` (required — กำหนดโมเดล 3D)
-- `id` server รันให้เอง
+- `id`: number (optional) — **id ของระบบภายนอก** ลงที่ `external_id` ไม่ใช่ `id` ของเรา · ซ้ำกับคนที่มีอยู่ → **409**
+- `id` (uuid) ของเรา server สร้างเองเสมอ ส่งมาก็ไม่รับ
 
 ## แก้ไขลูกค้า (PATCH)
 
 ทุก field เป็น optional — เปลี่ยนชื่อ: การ์ด/รายชื่อ CUSTOMERS อัปเดตสด, เปลี่ยนเพศ: ตัวละครเกิดใหม่ตรงตำแหน่งเดิมด้วยโมเดลเพศใหม่
 
 ```bash
-curl -X PATCH http://localhost:3004/users/6 \
+curl -X PATCH http://localhost:3004/users/0d37d2ec-3b85-44f7-b2d0-3046121d26a3 \
   -H 'Content-Type: application/json' \
   -d '{"name":"ชื่อใหม่"}'
 ```
 
 ```bash
 # เปลี่ยนเพศ (respawn ร่างใหม่คาที่)
-curl -X PATCH http://localhost:3004/users/6 \
+curl -X PATCH http://localhost:3004/users/0d37d2ec-3b85-44f7-b2d0-3046121d26a3 \
   -H 'Content-Type: application/json' \
   -d '{"gender":"male"}'
 ```
@@ -110,10 +122,10 @@ curl -X PATCH http://localhost:3004/users/6 \
 ตัวคนจะค่อย ๆ fade หายไปตรงที่ยืนอยู่ (~1.2 วินาที) — id ที่ไม่มีตอบ 404
 
 ```bash
-curl -X DELETE http://localhost:3004/users/6
+curl -X DELETE http://localhost:3004/users/0d37d2ec-3b85-44f7-b2d0-3046121d26a3
 ```
 
-ตอบ `{ "data": { "id": 6 }, "error": null, "success": true }` — คืนแค่ `id` (ไม่มี `deleted: true` แล้ว: HTTP 200 + `success: true` บอกว่าสำเร็จอยู่แล้ว และลบไม่สำเร็จคือ 404 ไม่ใช่ `deleted: false`)
+ตอบ `{ "data": { "id": "0d37d2ec-…" }, "error": null, "success": true }` — คืนแค่ `id` (uuid) (ไม่มี `deleted: true` แล้ว: HTTP 200 + `success: true` บอกว่าสำเร็จอยู่แล้ว และลบไม่สำเร็จคือ 404 ไม่ใช่ `deleted: false`)
 
 ## ล้าง roster แล้วดึงใหม่จาก external (POST /users/roster/refresh)
 
@@ -127,19 +139,21 @@ curl -X POST http://localhost:3004/users/roster/refresh
 - SSE: ยิง **`roster` ตัวเดียว** ที่แบก roster ชุดใหม่ทั้ง array (ไม่ใช่ `removed`/`added` รายคน — ดูหัวข้อ SSE ท้ายไฟล์) dashboard จะ replace ตารางทั้งก้อน และฉาก 3D รื้อ body ของ user ทุกตัวทิ้งแล้วสร้างใหม่ตามสถานะในชุดใหม่ทันที **ไม่ต้อง reload `/v5`**
   - คนที่ `inside` ไปยืนบนพื้น, `waiting` ไปต่อคิวหน้าประตู, `outside`/`paying` ไม่มีตัวในฉาก (เหมือนตอน boot เป๊ะ)
   - ambient crowd (walk-in ที่ไม่อยู่ใน roster) ไม่โดนแตะ — คนละประชากรกัน
-  - คนที่ id ยังอยู่ใน roster ใหม่ก็โดนสร้าง body ใหม่เหมือนกัน (เสียตำแหน่งเดิม) — เป็น replace ทั้งก้อน ไม่ใช่ diff
+  - เป็น replace ทั้งก้อน ไม่ใช่ diff: **ทุกคนได้ uuid ใหม่หมด** แม้ `external_id` จะเป็นคนเดิม (uuid ที่จดไว้ก่อน refresh จะ 404 — ใช้ `external_id` อ้างอิงข้ามการ refresh แทน) และ body ในฉากถูกรื้อสร้างใหม่ทุกตัว (เสียตำแหน่งเดิม)
 - ปุ่ม `⤓ Reload from External` บนหน้า `/backdoor` ยิง endpoint นี้ (มี confirm ก่อน)
 
-## เปลี่ยน status (POST /users/:id/status)
+## เปลี่ยน status (POST /users/:externalId/status)
+
+> ⚠️ **route เดียวในไฟล์นี้ที่ใช้ `external_id` ไม่ใช่ uuid** — ตัวเลขใน path ข้างล่างคือ `external_id` ทั้งหมด ยิง uuid มาที่นี่จะได้ 422 (ไม่ใช่ตัวเลข)
 
 endpoint เดียวคุมทุก transition (9 action) — body เป็น discriminated union บน `action`
 - `enter` / `leave` / `walkAway` / `shelfClose` — ไม่มี payload
 - `verify` / `pay` — ต้องมี `payload: { result: "pass" | "fail" }`
 - `scanQR` — ต้องมี `payload: { result: "pass" | "fail", sku: string }` (sku ชี้ shelf เป้าหมาย 1:1)
-- `walkToShelf` — ต้องมี `payload: { shelfId: number }`
+- `walkToShelf` — ต้องมี `payload: { shelfId: string }` (device_id ของ shelf)
 - `inspectItem` — ต้องมี `payload: { result: "keep" | "return" }`
 
-ทุก action ตอบกลับ **user entity เต็ม** (ห่อใน `data`) เรียกผิดจังหวะ → 409, id ไม่มี → 404, action/payload ผิดคู่ (เช่น verify ไม่ส่ง result) → 422 ตั้งแต่ validation — error ทั้งหมดอยู่ในรูป `{ data: null, error: { message }, success: false }` พร้อม status code เดิม
+ทุก action ตอบกลับ **user entity เต็ม** (ห่อใน `data`) เรียกผิดจังหวะ → 409, `external_id` ไม่มี → 404, action/payload ผิดคู่ (เช่น verify ไม่ส่ง result) → 422 ตั้งแต่ validation — error ทั้งหมดอยู่ในรูป `{ data: null, error: { message }, success: false }` พร้อม status code เดิม
 
 ### enter — `outside` → `waiting`
 
@@ -280,11 +294,13 @@ event: hello
 data: {"connected":true}
 
 event: added
-data: {"id":6,"name":"อนันดา มีสุข","gender":"female"}
+data: {"id":"0d37d2ec-…","external_id":900,"name":"อนันดา มีสุข","gender":"female","status":"outside",…}
 
 event: removed
-data: {"id":6}
+data: {"id":"0d37d2ec-…"}
 ```
+
+ทุก `id` ใน SSE คือ **uuid** (`User.id`) — `external_id` ติดมาเฉพาะ event ที่แบก user เต็มใบ (`added`/`updated`/`enter`/`roster`) และไม่เคยถูกใช้เป็น key ของ event
 
 ## หมายเหตุ: ชื่อไทยบน Windows
 

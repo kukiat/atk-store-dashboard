@@ -794,10 +794,27 @@ canvas { display: block; }
   color: #081120; font-size: 12px; font-weight: 700;
 }
 .bd-avatar-img { object-fit: cover; background: #0e1830; }
-.bd-idcol { display: flex; flex-direction: column; gap: 2px; min-width: 150px; }
+.bd-idcol { display: flex; flex-direction: column; gap: 2px; min-width: 190px; }
+.bd-nameline { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .bd-name { color: #eaf6ff; font-size: 13px; font-weight: 600; letter-spacing: .02em; }
 .bd-sub { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.bd-uid { color: #5e76a8; font-size: 10px; font-variant-numeric: tabular-nums; }
+/* the two ids ride the name line, not the sub-line: both are used from this
+   page and pointing an action at the wrong one hits a different person, so
+   they need to be legible rather than tucked away next to the email. */
+.bd-extid, .bd-uid {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; line-height: 1; padding: 3px 6px; border-radius: 5px;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+/* external_id — the key every action button posts to */
+.bd-extid { background: rgba(122,208,255,.14); color: #7ad0ff; }
+/* our uuid, cut to the 6 chars the 3D head card prints; a button because
+   clicking copies the full value (see copyUserId) */
+.bd-uid {
+  background: rgba(111,134,184,.14); color: #93a8d4;
+  border: 0; cursor: pointer; font-weight: 500;
+}
+.bd-uid:hover { background: rgba(111,134,184,.26); color: #cfe0ff; }
 .bd-gmark { color: #7d93c4; font-size: 12px; }
 .bd-email { color: #6f86b8; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

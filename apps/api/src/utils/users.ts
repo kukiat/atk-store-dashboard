@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ExternalUser, User, UserStatus } from "../models";
 import { FEMALE_NAMES, MALE_NAMES } from "../constants";
 
@@ -21,7 +22,8 @@ export function mapVisitStatus(v: string | null): UserStatus | null {
 // The external feed carries no gender, but the 3D sim needs one to pick a body
 // model. Best-effort: match the first name token against a small dictionary
 // (see ../constants/users); when the name gives no signal, fall back to id
-// parity so it's stable per boot.
+// parity. `id` is the EXTERNAL id (a number) — our own uuid has no parity to
+// read, and external's is stable across refetches so the guess is too.
 export function guessGender(name: string, id: number): User["gender"] {
   const first = name.trim().toLowerCase().split(/\s+/)[0] ?? "";
   if (FEMALE_NAMES.has(first)) return "female";
@@ -42,12 +44,17 @@ export async function fetchBootRoster(): Promise<User[]> {
       `users boot roster fetch failed: ${res.status} ${res.statusText}`,
     );
   const rows = (await res.json()) as ExternalUser[];
-  console.log("fetchBootRoster rows", JSON.stringify(rows, null, 2));
+  const fetchedAt = new Date().toISOString();
   return rows.flatMap((u) => {
     const status = mapVisitStatus(u.visit_status);
     if (status === null) return []; // drop visit_status null / unrecognized
     const user: User = {
-      id: u.id,
+      // external's row id is THEIR key, so it lands on external_id; ours is a
+      // fresh uuid every fetch. refreshRoster wipes the store wholesale (see
+      // UsersService.refreshRoster), so nothing survives a reload that could
+      // notice the uuids changed — no cross-refresh id map is needed.
+      id: randomUUID(),
+      external_id: u.id,
       name: u.name,
       gender: guessGender(u.name, u.id),
       status,
@@ -55,6 +62,9 @@ export async function fetchBootRoster(): Promise<User[]> {
       // only a visit still in progress carries a start time; an `outside`
       // (or `exited`) row's entered_at belongs to a finished visit
       entered_at: status === "outside" ? null : u.entered_at,
+      // external sends no updated_at, so every boot row shares the fetch
+      // instant. Ties fall back to Map insertion order, which is stable.
+      updated_at: fetchedAt,
       email: u.email,
       avatar_url: u.avatar_url ?? "", // null → "" (UI falls back to initials)
       auth_method: "google", // external only ever shows Google logins

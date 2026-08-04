@@ -144,7 +144,9 @@ export function validateUsers(users) {
   const seen = new Set();
   for (const u of users) {
     const tag = `user ${u?.id ?? '?'}`;
-    if (!Number.isInteger(u?.id) || u.id < 1) { errors.push(`${tag}: id must be a positive integer`); continue; }
+    // the API mints a uuid per customer; the numeric one they used to carry is
+    // now `external_id`, which the scene never keys on
+    if (typeof u?.id !== 'string' || !u.id) { errors.push(`${tag}: id must be a non-empty string`); continue; }
     if (seen.has(u.id)) errors.push(`${tag}: duplicate id`);
     seen.add(u.id);
     if (typeof u.name !== 'string' || !u.name.trim()) errors.push(`${tag}: name must be a non-empty string`);
@@ -1564,11 +1566,16 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const LAST = ['Carter', 'Wilson', 'Brown', 'Davis', 'Miller', 'Taylor', 'Anderson', 'Thomas', 'Martin', 'Walker'];
 
   let rosterIdx = 0; // next unconsumed roster entry (from GET /users at boot)
-  // walk-in custNos live in their own 500+ range so they can never collide
-  // with ids the users API assigns to customers added later via POST
-  let identSeq = Math.max(500, users.reduce((m, u) => Math.max(m, u.id), 0));
+  // walk-in custNos count from 500. This used to be Math.max(500, highest API
+  // id) to keep the two number ranges apart — pointless now that API ids are
+  // uuids (and actively harmful: Math.max over a uuid is NaN, which would put
+  // "CUSTOMER NaN" over every walk-in's head).
+  let identSeq = 500;
   const identFromUser = (u) => ({
-    custNo: String(u.id).padStart(2, '0'), name: u.name,
+    // the head card prints "CUSTOMER {custNo}" — a full uuid would swamp it,
+    // so API customers are shown by their uuid's first 6 chars. The Backdoor
+    // roster prints the same 6 so a body in the scene can be matched to a row.
+    custNo: String(u.id).slice(0, 6), name: u.name,
     female: u.gender === 'female', apiId: u.id,
     // display-only profile fields carried through to the dashboard cards
     avatarUrl: u.avatar_url ?? '', email: u.email ?? '',
@@ -3012,14 +3019,16 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // spawns the entry the moment the old body despawns; a verify verdict that
   // lands while parked rides along (`verdict`) or cancels the entry (fail).
   const pendingReenters = new Map(); // apiId → { u, verdict? }
-  // POST /users → a brand-new customer (status `waiting`) appears at the
-  // storefront and HOLDS at the scanner for a verify verdict, exactly like
-  // enter — not a walk-straight-in. They queue behind any existing line and
-  // don't count toward MAX_PEOPLE until verify-pass admits them. Delegates to
-  // the enter spawn so both paths stay identical.
-  function apiAddUser(u) {
-    apiEnterUser(u);
-  }
+  // POST /users → a brand-new customer, registered but NOT admitted: they land
+  // `outside`, which everywhere else in this file means "no body at all" (the
+  // boot seed and reseedUsers both skip `outside`/`paying`). So this spawns
+  // nothing. The body appears when a verify arrives — that action rolls the
+  // enter step in and emits `enter`, which carries the full User, so nothing
+  // has to be remembered here in the meantime.
+  // Kept as a named no-op rather than unwired: `added` IS the moment the store
+  // learns about this customer, and the row that appears in the dashboard's
+  // Exited list comes from the roster mirror on the React side, not from here.
+  function apiAddUser(_u) {}
   // DELETE /users/:id → fade out in place (no walk-out); customers still in a
   // queue (gate or unconsumed roster) just never materialise
   function apiRemoveUser(id) {

@@ -672,7 +672,10 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     const gesture = (result) => (ev) => {
       let s;
       try { s = JSON.parse(ev.data); } catch { return; }
-      if (!s || typeof s.userId !== 'number' || !s.summary) return;
+      // userId is User.id — a uuid string since the id split (it used to be a
+      // number, and guarding on `typeof === 'number'` silently swallowed every
+      // pick and return)
+      if (!s || typeof s.userId !== 'string' || !s.userId || !s.summary) return;
       peopleRef.current?.inspectItemUser?.(s.userId, result);
       armPickReturn(s.userId, s);
     };
@@ -763,9 +766,16 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   useEffect(() => {
     const es = new EventSource(`${USERS_API_URL}/events`);
     const roster = new Map();
+    // Newest movement first. This list is where externally-registered customers
+    // pile up waiting to be verified, so a fresh arrival has to be visible
+    // without scrolling past everyone who ever left. `updated_at` and not the
+    // id: ids are uuids and carry no order, and it also puts someone who just
+    // paid and walked out at the top, which reading by id never could.
     const publish = () =>
       setOutsideUsers(
-        [...roster.values()].filter((u) => u.status === 'outside').sort((a, b) => a.id - b.id),
+        [...roster.values()]
+          .filter((u) => u.status === 'outside')
+          .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? ''))),
       );
     // wholesale replace from GET /users; a failed fetch keeps the last map
     const sync = () => {

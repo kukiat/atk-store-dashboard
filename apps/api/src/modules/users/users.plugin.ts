@@ -16,7 +16,8 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
   // skipped inside envelopeError. Successes are wrapped by ok() in each handler.
   .onError(envelopeError)
 
-  // Live feed for the 3D dashboard: added → walks in through the scan gate,
+  // Live feed for the 3D dashboard: added → a new roster row only (they are
+  // `outside`, so no body is spawned — the body appears on `enter`),
   // updated → card refresh / body respawn, removed → fades out in place,
   // roster → wipe every API body and rebuild the floor from the array it
   // carries (the only whole-store event; see /roster/refresh below).
@@ -61,8 +62,9 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
   // replace the store wholesale — every local lifecycle status is thrown away
   // for what external says, exactly as a restart would. The dashboard follows
   // along live off the single `roster` SSE this emits: no page reload needed.
-  // Also declared before
-  // /:id, whose t.Numeric param would 422 on "roster".
+  // Declared before /:id. That ordering is now the ONLY thing protecting this
+  // path: /:id used to be t.Numeric and would 422 on the word "roster" all by
+  // itself, but the id is a uuid string today and matches anything.
   .post(
     "/roster/refresh",
     async ({ usersService }) => {
@@ -125,8 +127,13 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
     },
   )
 
-  // single status-transition endpoint. The { action, payload? } body is a
-  // discriminated union (users.action); the service switches on `action`:
+  // single status-transition endpoint — and the ONE route keyed on the
+  // external id rather than our uuid, because the system driving it knows this
+  // customer only by its own row id. The lookup happens here so the service
+  // and everything below it (sessions, the MQTT loadcell handler) keep working
+  // in uuids alone. Unknown external id → the same 404 as an unknown uuid.
+  // The { action, payload? } body is a discriminated union (users.action);
+  // the service switches on `action`:
   //   enter       — outside  → waiting   (queue at the entrance for a verdict)
   //   verify      — waiting  → inside/outside  (payload.result pass/fail; optional
   //                 payload.imageURL rides the SSE event for the dash face-flash)
@@ -143,7 +150,7 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
   // action/payload combo 422s at validation before the switch runs. The browse
   // session has no auto-close timer — it holds open until shelfClose (or leave).
   .post(
-    "/:id/status",
+    "/:externalId/status",
     async ({ usersService, shelfsService, sessionsService, params, body }) => {
       // a shelf command must target a shelf with doors: exists (404), powered
       // (409), and not a checkout counter (409) — the shelfs service owns the
@@ -157,6 +164,8 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
         if (shelf.type === "checkout")
           throw status(409, `Shelf ${shelf.id} is a checkout counter — no doors`);
       };
+      // external id → the entity, before anything else can half-succeed
+      const target = usersService.findByExternalId(params.externalId);
       let skuShelfId: string | undefined;
       // scanQR resolves the shelf AND its raw device in one fetch — the device
       // (its device_id) is stashed on the shelf session opened below so the
@@ -169,13 +178,13 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
         assertHasDoors(resolved.shelf);
         skuShelfId = resolved.shelf.id;
       }
-      const user = usersService.applyAction(params.id, body, skuShelfId);
+      const user = usersService.applyAction(target.id, body, skuShelfId);
       // open the shelf session only on a scanQR *pass*, and only after
       // applyAction succeeds — a wrong-state 409 throws above and never leaves a
       // dangling row. open() replaces any stale row for this shopper.
       if (body.action === "scanQR" && body.payload.result === "pass" && resolved) {
         sessionsService.open({
-          userId: params.id,
+          userId: target.id, // the ledger keys on our uuid, not the external id
           sku: body.payload.sku,
           shelf: resolved.shelf,
           device: resolved.device,
@@ -184,7 +193,7 @@ export const usersPlugin = new Elysia({ prefix: "/users", tags: ["users"] })
       return ok(user);
     },
     {
-      params: "users.params",
+      params: "users.params.external",
       body: "users.action",
       response: "users.res.entity",
     },
