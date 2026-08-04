@@ -540,32 +540,59 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
 
   // stable identity — `?? []` inline would mint a new array every render and
   // cascade through the memos below into an effect loop while catalog is null
-  const shelvesDef = useMemo(() => catalog?.shelves ?? [], [catalog]);
+  const shelvesRaw = useMemo(() => catalog?.shelves ?? [], [catalog]);
+  // MQTT online authority, mirrored off the /shelfs/events `online` stream. The
+  // catalogue is fetched once, so without this overlay the shelf-status card
+  // would freeze at whatever the layout reported on boot. Keyed by device_id; a
+  // device the catalogue doesn't know is still recorded — a heartbeat can beat
+  // the fetch home — and simply never matches a row below.
+  const [onlineOv, setOnlineOv] = useState({});
+  // the live view: the fetched layout with the heartbeat laid over it. Only the
+  // memos that actually read `online` hang off this one; the rest stay on
+  // shelvesRaw so a heartbeat doesn't churn them.
+  const shelvesDef = useMemo(
+    () => shelvesRaw.map((s) => (s.id in onlineOv ? { ...s, online: onlineOv[s.id] } : s)),
+    [shelvesRaw, onlineOv]);
   // device_id → 1-based padded index (01, 02, …), matching the 3D badge order.
   // Assigned to the module-level shelfIndexMap so shelfIdStr() resolves ids to
   // indices everywhere — including child cards and ref-based scene callbacks —
   // without threading a prop. Idempotent, so a render-time assignment is safe.
   const shelfIndexById = useMemo(
-    () => Object.fromEntries(shelvesDef.map((s, i) => [s.id, String(i + 1).padStart(2, '0')])), [shelvesDef]);
+    () => Object.fromEntries(shelvesRaw.map((s, i) => [s.id, String(i + 1).padStart(2, '0')])), [shelvesRaw]);
   shelfIndexMap = shelfIndexById;
   const shelfName = useMemo(
-    () => Object.fromEntries(shelvesDef.map((s) => [s.id, s.name])), [shelvesDef]);
+    () => Object.fromEntries(shelvesRaw.map((s) => [s.id, s.name])), [shelvesRaw]);
   const offlineShelves = useMemo(
     () => new Set(shelvesDef.filter((s) => !s.online).map((s) => s.id)), [shelvesDef]);
+  // Seed for the lock mirror, deliberately off shelvesRaw and NOT shelvesDef:
+  // the effect below re-seeds shelfLockMap whenever this memo's identity changes,
+  // so hanging it off the live overlay would blow away the scene's real LOCKED /
+  // OPEN states on every heartbeat. Locks are the scene's to own once it reports
+  // them (see handleController); this is only the pre-scene fallback.
   const lockInit = useMemo(
-    () => Object.fromEntries(shelvesDef.map((s) => [s.id, s.online ? 'locked' : 'offline'])), [shelvesDef]);
+    () => Object.fromEntries(shelvesRaw.map((s) => [s.id, s.online ? 'locked' : 'offline'])), [shelvesRaw]);
   // refs so the stable callbacks below (scene contract — must not change
   // identity, or StoreStage tears the scene down) can read the loaded data
   const shelfNameRef = useRef({});
   shelfNameRef.current = shelfName;
+  // device_id → online, as the dash currently SHOWS it. The heartbeat handler
+  // (mounted once, so it reads this through a ref) diffs against it to tell a
+  // real transition from a heartbeat that merely restates what is already on
+  // screen — only the former earns an alert. A device missing here is one the
+  // catalogue hasn't landed yet: recorded, but not alerted on, since the seed
+  // pass below will speak for it.
+  const onlineNow = useMemo(
+    () => Object.fromEntries(shelvesDef.map((s) => [s.id, !!s.online])), [shelvesDef]);
+  const onlineNowRef = useRef({});
+  onlineNowRef.current = onlineNow;
   // sku → what the head card needs to say about the product: the scanQR event
   // carries only the sku, and item.id IS the sku (see toShelf on the API side).
   // One entry per sku rather than a map per field, so a card that later wants
   // another product detail doesn't need a third parallel lookup.
   const skuInfo = useMemo(
-    () => Object.fromEntries(shelvesDef.flatMap((s) =>
+    () => Object.fromEntries(shelvesRaw.flatMap((s) =>
       (s.items ?? []).map((it) => [it.id, { name: it.name, image: it.image }]))),
-    [shelvesDef]);
+    [shelvesRaw]);
   const skuInfoRef = useRef({});
   skuInfoRef.current = skuInfo;
   const lockInitRef = useRef(lockInit);
@@ -997,15 +1024,38 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
 
   // shelf state feed (/shelfs/events, both MQTT-driven):
   //   online — flip the shelf live in the 3D scene (amber LED + locked doors ⇄
-  //            scannable); deviceId is the shelf id (Shelf.id === device_id).
+  //            scannable) AND in the shelf-status card, via the onlineOv overlay
+  //            the catalogue is read through; a shelf that drops also drops one
+  //            alert. deviceId is the shelf id (Shelf.id === device_id).
   //   stock  — a real pick/return changed the on-shelf qty: update that item and,
   //            when the status worsens (ok→low→out), drop one alert into the feed.
+  // Mounted once ([] deps): everything it reads from render scope goes through a
+  // ref, and the state updates are all functional.
   useEffect(() => {
     const es = new EventSource(`${SHELFS_API_URL}/events`);
     es.addEventListener('online', (ev) => {
       let d;
       try { d = JSON.parse(ev.data); } catch { return; }
-      if (d && d.deviceId != null) sceneCtrlRef.current?.setShelfOnline?.(d.deviceId, !!d.online);
+      if (!d || d.deviceId == null) return;
+      const on = !!d.online;
+      sceneCtrlRef.current?.setShelfOnline?.(d.deviceId, on);
+      // record unconditionally — a heartbeat can arrive before the catalogue
+      // fetch lands, and dropping it then is what would leave the card stale.
+      // Same-value writes keep the old object so the memo chain stays put.
+      setOnlineOv((prev) => (prev[d.deviceId] === on ? prev : { ...prev, [d.deviceId]: on }));
+      // …but only alert on a drop the user can actually watch happen: a shelf we
+      // are currently showing as up. `=== true` also rules out the device the
+      // catalogue hasn't described yet, whose offline state the seed pass will
+      // announce — alerting here too would file the same shelf twice.
+      if (!on && onlineNowRef.current[d.deviceId] === true) {
+        setAlerts((a) => [{
+          id: `a${alertSeq++}`,
+          lvl: 'warn',
+          title: 'Shelf Offline',
+          sub: `${shelfNameRef.current[d.deviceId] ?? 'Shelf'} (${shelfIdStr(d.deviceId)})`,
+          time: fmtTime(new Date()),
+        }, ...a].slice(0, 6));
+      }
     });
     es.addEventListener('stock', (ev) => {
       let s;

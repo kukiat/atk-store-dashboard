@@ -103,7 +103,7 @@ class ShelfsService {
     return { shelf: toShelf(d), device: d };
   }
 
-  // MQTT loadcell/main/+/status heartbeat → online authority. Records the value
+  // MQTT loadcell/main/+/lwt heartbeat → online authority. Records the value
   // and, on a real change, emits an `online` event for the scene. Dedup is
   // against the overlay itself: a heartbeat that doesn't change the state is a
   // no-op — no emit — so the frequent same-state pings stay quiet.

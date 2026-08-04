@@ -4,18 +4,13 @@
 // and sessionSku, but they are duplicated in the body, so the parsed event is
 // self-contained.
 
-// Device heartbeat on loadcell/main/{deviceId}/status. We only act on
-// deviceId + online (drives Shelf/ExternalDevice online via ShelfsService
-// .setOnline); the rest is telemetry we currently ignore.
+// Device heartbeat on loadcell/main/{deviceId}/lwt. Drives Shelf/ExternalDevice
+// online via ShelfsService.setOnline. `branch` is only present on the online
+// frame — the offline frame carries just deviceId + online.
 export type LoadcellStatus = {
   deviceId: string;
-  branch: string;
-  seq: number;
+  branch?: string;
   online: boolean;
-  reason: string; // e.g. "heartbeat"
-  uptime: number;
-  freeHeap: number;
-  rssi: number;
 };
 
 // End-of-session summary the device publishes on

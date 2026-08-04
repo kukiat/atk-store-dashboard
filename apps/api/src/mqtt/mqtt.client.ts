@@ -20,13 +20,13 @@ import { shelfsServiceInstance } from "../modules/shelfs/shelfs.service";
 //       per-pick pick/return events off a shelf
 //   {deviceUuid}/loadcell/main/{sessionSku}/status → +/loadcell/main/+/status
 //       the shelf_closed end-of-session frame (closes the shopper's session)
-//   loadcell/main/{deviceId}/status                → loadcell/main/+/status
+//   loadcell/main/{deviceId}/lwt                   → loadcell/main/+/lwt
 //       device online/offline heartbeat (no leading uuid, no session level)
-// (`+` matches exactly one level, so the two …/status subscriptions never
-// overlap: the heartbeat is three levels, shelf_closed is four.)
+// The two subscriptions never overlap since they end in different suffixes
+// (…/lwt vs …/status), so routing in handleMessage is a plain suffix check.
 const EVENT_TOPIC = "+/loadcell/main/+/event";
 const SHELF_CLOSED_TOPIC = "+/loadcell/main/+/status";
-const STATUS_TOPIC = "loadcell/main/+/status";
+const LWT = "loadcell/main/+/lwt";
 
 let client: MqttClient | null = null;
 
@@ -51,11 +51,9 @@ function connectOptions() {
   };
 }
 
-// Parse and dispatch one raw message. Two different payload shapes arrive on a
-// …/status suffix, so the suffix alone can't route them — we go by topic depth,
-// which the broker guarantees (`+` matches exactly one level):
-//   5 segments ({uuid}/loadcell/main/{sku}/status) → shelf_closed session frame
-//   4 segments (loadcell/main/{deviceId}/status)   → device heartbeat
+// Parse and dispatch one raw message. Routed by topic suffix:
+//   …/lwt    → device heartbeat
+//   …/status → shelf_closed end-of-session frame
 // Anything else is an …/event. A bad payload is logged and dropped — one
 // malformed frame must not take the listener down.
 // Exported for the offline harness, which drives it directly instead of
@@ -68,13 +66,12 @@ export function handleMessage(topic: string, payload: Buffer) {
     console.error(`[mqtt] bad payload on ${topic}:`, err);
     return;
   }
-
-  if (topic.endsWith("/status")) {
-    if (topic.split("/").length === 5) {
-      onShelfClosed(msg as ShelfClosedStatus);
-    } else {
-      onLoadcellStatus(msg as LoadcellStatus);
-    }
+  console.log('topic', topic)
+  console.log('msg', msg)
+  if (topic.endsWith("/lwt")) {
+    onLoadcellStatus(msg as LoadcellStatus);
+  } else if (topic.endsWith("/status")) {
+    onShelfClosed(msg as ShelfClosedStatus);
   } else {
     onLoadcellEvent(msg as LoadcellEvent);
   }
@@ -84,7 +81,7 @@ export function handleMessage(topic: string, payload: Buffer) {
 // heartbeat is a no-op) and emits an `online` event only on a real transition.
 function onLoadcellStatus(s: LoadcellStatus) {
   if (!s.deviceId || typeof s.online !== "boolean") return;
-  console.log(`[mqtt] status ${s.deviceId} online=${s.online} (${s.reason})`);
+  console.log(`[mqtt] status ${s.deviceId} online=${s.online}`);
   shelfsServiceInstance.setOnline(s.deviceId, s.online);
 }
 
@@ -211,7 +208,7 @@ export function startMqtt(): MqttClient | null {
 
   client.on("connect", () => {
     console.log(`[mqtt] connected to ${url}`);
-    const topics = [EVENT_TOPIC, SHELF_CLOSED_TOPIC, STATUS_TOPIC];
+    const topics = [EVENT_TOPIC, SHELF_CLOSED_TOPIC, LWT];
     client!.subscribe(topics, (err) => {
       if (err) console.error(`[mqtt] subscribe failed:`, err);
       else console.log(`[mqtt] subscribed to ${topics.join(", ")}`);
