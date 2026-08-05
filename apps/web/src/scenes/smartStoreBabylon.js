@@ -1625,20 +1625,24 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   let selectedPersonId = null;
   let hoverPersonId = null;
   let cardEl = null; // React-owned card wrapper — the scene only writes its transform
-  // verify-pass image bubble: a second React-owned wrapper the scene floats
-  // above one API customer's head for a few seconds after a verify pass.
-  let flashApiId = null;    // API customer the revealed bubble tracks (null = none)
-  // armed-but-not-yet-revealed flash: { apiId, onReveal } — held from the SSE
+  // verify-pass image bubble: React-owned wrappers the scene floats above an API
+  // customer's head for a few seconds after a verify pass. ONE PER CUSTOMER,
+  // like the event cards below: several shoppers can be verified in the same
+  // breath while the gate still sweeps them through one at a time, so a single
+  // shared slot dropped every face but the last.
+  // armed-but-not-yet-revealed flashes: apiId -> onReveal — held from the SSE
   // pass until the in-scene scan beam sweeps that customer through (or their
   // body despawns first). onReveal(true) reveals it, onReveal(false) drops it.
-  let flashPending = null;
+  const flashArmed = new Map();
   // The bubble lands on the very same head-projection as the person card, so
   // while one is up for the *selected* shopper the card fades out of the way
   // (`.muted` — CSS owns the 150ms, this only flips the end state). A pay pass
   // keeps it muted after the bubble goes: they walk out seconds later, and a
   // card blinking back for that last stride reads as a glitch. Only an explicit
-  // re-select (or their despawn) brings it back.
-  let cardMuteE = null; // person entry whose card stays muted past its pay bubble
+  // re-select (or their despawn) brings it back. A set, not a slot, for the same
+  // reason the armed map above is one: two shoppers can pay seconds apart, and
+  // the second one must not un-mute the first.
+  const cardMuted = new Set(); // person entries whose card stays muted past their pay bubble
 
   // ---------- head-card registry ----------
   // Every React-owned node the scene flies over a head is registered here, and
@@ -1646,7 +1650,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // carry its own near-identical copy of that projection code; only its tracking
   // moved in here, its arm/reveal/timers/pay-mute are untouched.
   //   apiIdOf  resolved per frame, so a bubble whose customer despawns hides at
-  //            once and the flash's single slot can point at whoever it likes
+  //            once, without anything having to unbind it first
   //   clamp    true  = pinned to the stage edge when the person walks off-frame
   //                    (the person card and the face bubble: the user asked for
   //                    those, they must stay findable)
@@ -1758,7 +1762,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       if (e.h !== h) continue;
       persons.delete(id);
       if (hoverPersonId === id) hoverPersonId = null;
-      if (cardMuteE === e) cardMuteE = null;
+      cardMuted.delete(e);
       // the body we were following is gone (paid and walked out, or deleted mid
       // entry-flight): fly home, which doubles as the "the mode ended" signal
       if (followId === id) followPerson(null);
@@ -1770,7 +1774,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // React <-> scene sync (mirror of selectShelf, for people)
   function selectPerson(id) {
     if (id && !persons.has(id)) { onSelectPerson?.(null); return; } // despawned between click and sync
-    cardMuteE = null; // picking a row again is explicit: it beats the pay mute
+    // picking a row again is explicit: it beats that shopper's pay mute (only
+    // theirs — everyone else's card is not on screen for this to speak about)
+    if (id) cardMuted.delete(persons.get(id));
     selectedPersonId = id || null;
     if (hoverPersonId === selectedPersonId) hoverPersonId = null;
   }
@@ -1918,20 +1924,20 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     });
   }
 
-  // verify/pay-pass image bubble: React hands over its wrapper el (bindFlash)
-  // and arms a pending flash (armFlash) on the SSE pass. The bubble only
-  // reveals once the in-scene scan beam sweeps that customer through — see
-  // notifyScanPass, fired from the entry/exit gate sweep-complete. Shared by
-  // both verify and pay. Tracking is the registry's job; everything about when
-  // it appears and how long it stays is unchanged.
-  function bindFlash(el) {
-    if (!el) flashApiId = null; // React unmounted it → stop tracking
-    bindHeadCard('flash', {
+  // verify/pay-pass image bubble: React hands over one wrapper el per revealed
+  // customer (bindFlash) and arms a pending flash (armFlash) on the SSE pass.
+  // The bubble only reveals once the in-scene scan beam sweeps that customer
+  // through — see notifyScanPass, fired from the entry/exit gate sweep-complete.
+  // Shared by both verify and pay. Keyed by apiId exactly like the event cards,
+  // so concurrent verifies each keep their own bubble and their own head.
+  function bindFlash(apiId, el) {
+    if (apiId == null) return;
+    bindHeadCard('flash:' + apiId, el && {
       el,
       lift: 2.7,
       clamp: true,
       targetOf: () => {
-        const p = flashApiId != null ? shopperByApiId(flashApiId) : null;
+        const p = shopperByApiId(apiId);
         // kept through the fade-out too, so a pay pass (they walk out fast)
         // still gets its moment before the body is fully gone
         return p && p.h && !p.done ? p.h : null;
@@ -1975,8 +1981,9 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // arm on the SSE pass; hold until the scan beam clears this customer. No body
   // in the scene means no sweep will ever come, so drop it right away.
   function armFlash(apiId, onReveal) {
-    if (!shopperByApiId(apiId)) { onReveal?.(false); return; }
-    flashPending = { apiId, onReveal };
+    if (apiId == null || !shopperByApiId(apiId)) { onReveal?.(false); return; }
+    flashArmed.get(apiId)?.(false); // latest wins, per person (see armHeadCard)
+    flashArmed.set(apiId, onReveal);
   }
   // the gate sweep just cleared this shopper (green flash / ID or paid tag) — if
   // a flash was armed for them, reveal it now and start React's 3s clock.
@@ -1985,11 +1992,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // distinction the card mute needs costs nothing to plumb.
   function notifyScanPass(p, kind) {
     const id = p?.person?.apiId;
-    if (id == null || !flashPending || flashPending.apiId !== id) return;
-    flashApiId = id;
-    if (kind === 'pay') cardMuteE = p.person; // stays muted until despawn / re-select
-    const cb = flashPending.onReveal; flashPending = null;
-    cb?.(true);
+    if (id == null) return;
+    const cb = flashArmed.get(id);
+    if (!cb) return;
+    flashArmed.delete(id);
+    if (kind === 'pay') cardMuted.add(p.person); // muted until despawn / re-select
+    cb(true);
   }
 
   // selection / hover rings under the feet (RTS style). Shared meshes that
@@ -5178,9 +5186,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       } else {
         hoverRing.isVisible = false;
       }
-      // armed flash whose body vanished before the sweep → drop it (never shown)
-      if (flashPending && !shopperByApiId(flashPending.apiId)) {
-        const cb = flashPending.onReveal; flashPending = null; cb?.(false);
+      // armed flashes whose body vanished before the sweep → drop (never shown)
+      for (const apiId of [...flashArmed.keys()]) {
+        if (shopperByApiId(apiId)) continue;
+        const cb = flashArmed.get(apiId); flashArmed.delete(apiId); cb?.(false);
       }
       // same for armed event cards: no body left means no gesture is coming
       for (const apiId of [...headArmed.keys()])
@@ -5288,10 +5297,13 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       // className is a constant in the JSX, so React never rewrites the
       // attribute and the class survives its re-renders (the same assumption the
       // transform/visibility writes above already make).
+      // "their bubble is up" is read straight off the registry: the bubble is
+      // bound for exactly as long as React keeps it mounted, and every shopper
+      // now has their own, so there is no shared slot to consult.
       if (cardEl && selE) {
         cardEl.classList.toggle(
           'muted',
-          atShelf || (flashApiId != null && selE.apiId === flashApiId) || cardMuteE === selE,
+          atShelf || (selE.apiId != null && headCards.has('flash:' + selE.apiId)) || cardMuted.has(selE),
         );
       }
     }

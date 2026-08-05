@@ -281,6 +281,35 @@ function PersonDetailCard({ person, onClose, closeTitle, bindEl, shelfName }) {
   );
 }
 
+// One verify/pay-pass face bubble, floating over its own customer's head. Split
+// into a component purely so the bind callback can be memoised per apiId (the
+// same reason HeadCard is): a fresh ref function on every Dashboard re-render
+// would unbind and rebind the node in the scene, and a rebind resets it to
+// hidden-until-the-next-tracked-frame — a blink, on a bubble that only lives 2s.
+function VerifyFlash({ flash, peopleRef, onClose }) {
+  const bind = useCallback(
+    (el) => { peopleRef.current?.bindFlash?.(flash.apiId, el); },
+    [peopleRef, flash.apiId],
+  );
+  return (
+    <div className={`verify-flash-track${flash.closing ? ' closing' : ''}`} ref={bind}>
+      <div className="verify-flash-bubble">
+        <img
+          className="verify-flash-img"
+          src={flash.imageURL}
+          alt=""
+          referrerPolicy="no-referrer"
+          onError={() => onClose(flash.apiId)}
+        />
+        <div className="verify-flash-cap">
+          {flash.name && <b>{flash.name}</b>}
+          <span className="verify-flash-ok">{flash.label}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------- customers card (V5 only — everyone currently in the store) ---------- */
 // Rows group by status (at-shelf → walking → gates); within a group the id
 // order is stable so rows only move when someone actually changes status, and
@@ -752,43 +781,60 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
   // only shows (and the 2s clock only starts) once the in-scene scan beam sweeps
   // that customer through — the scene calls back via armFlash's onReveal. If no
   // sweep ever comes (no body / despawns first) it's dropped, never shown.
-  // One shared slot (latest revealed pass wins) — `label` is the only difference
-  // ("Verified ✓" vs "Paid ✓"). Timers live in a ref so the reveal, the
-  // auto-dismiss, and the broken-image close all share and cancel the same
-  // handles. The scene owns the per-frame follow transform.
-  const [verifyFlash, setVerifyFlash] = useState(null); // { imageURL, name, label } | null
-  const [verifyFlashClosing, setVerifyFlashClosing] = useState(false);
-  const verifyFlashTimers = useRef([]);
-  const clearVerifyFlashTimers = useCallback(() => {
-    verifyFlashTimers.current.forEach(clearTimeout);
-    verifyFlashTimers.current = [];
+  // ONE BUBBLE PER CUSTOMER, keyed by apiId, exactly like the event cards: a
+  // rush at the door verifies several people within the same second, and each of
+  // them is swept through the gate — and revealed — seconds apart, so a single
+  // shared slot showed the last face and silently ate the rest. `label` is the
+  // only difference between the two kinds ("Verified ✓" vs "Paid ✓"). Timers are
+  // per person in a ref, so the reveal, the auto-dismiss and the broken-image
+  // close share and cancel the same handles without touching anyone else's
+  // bubble. The scene owns the per-frame follow transform.
+  const [verifyFlashes, setVerifyFlashes] = useState([]); // [{ apiId, imageURL, name, label, closing }]
+  const verifyFlashTimers = useRef(new Map()); // apiId -> timeout handles
+  const clearVerifyFlashTimers = useCallback((apiId) => {
+    (verifyFlashTimers.current.get(apiId) ?? []).forEach(clearTimeout);
+    verifyFlashTimers.current.delete(apiId);
   }, []);
-  const closeVerifyFlash = useCallback(() => {
-    clearVerifyFlashTimers();
-    setVerifyFlash(null);
-    setVerifyFlashClosing(false);
+  const closeVerifyFlash = useCallback((apiId) => {
+    clearVerifyFlashTimers(apiId);
+    setVerifyFlashes((prev) => prev.filter((f) => f.apiId !== apiId));
   }, [clearVerifyFlashTimers]);
-  const showVerifyFlash = useCallback((imageURL, name, label) => {
-    clearVerifyFlashTimers();
-    setVerifyFlashClosing(false);
-    setVerifyFlash({ imageURL, name, label });
+  // every bubble at once — for the roster replace, where no body on the floor
+  // survives and nothing that points at one may either
+  const closeAllVerifyFlashes = useCallback(() => {
+    verifyFlashTimers.current.forEach((hs) => hs.forEach(clearTimeout));
+    verifyFlashTimers.current.clear();
+    setVerifyFlashes([]);
+  }, []);
+  const showVerifyFlash = useCallback((apiId, imageURL, name, label) => {
+    clearVerifyFlashTimers(apiId);
+    setVerifyFlashes((prev) => [
+      ...prev.filter((f) => f.apiId !== apiId),
+      { apiId, imageURL, name, label, closing: false },
+    ]);
     // hold 2s, then flip to the fade-out; unmount once the 400ms fade finishes
-    verifyFlashTimers.current.push(setTimeout(() => setVerifyFlashClosing(true), 2000));
-    verifyFlashTimers.current.push(setTimeout(() => {
-      setVerifyFlash(null);
-      setVerifyFlashClosing(false);
-    }, 2400));
+    verifyFlashTimers.current.set(apiId, [
+      setTimeout(() => setVerifyFlashes((prev) => prev.map(
+        (f) => (f.apiId === apiId ? { ...f, closing: true } : f),
+      )), 2000),
+      setTimeout(() => {
+        setVerifyFlashes((prev) => prev.filter((f) => f.apiId !== apiId));
+        verifyFlashTimers.current.delete(apiId);
+      }, 2400),
+    ]);
   }, [clearVerifyFlashTimers]);
   // arm on the SSE pass; the scene reveals it (→ showVerifyFlash) only when the
   // scan beam clears this customer, and drops it silently otherwise.
   const armVerifyFlash = useCallback((imageURL, name, label, apiId) => {
     peopleRef.current?.armFlash?.(apiId, (revealed) => {
-      if (revealed) showVerifyFlash(imageURL, name, label);
+      if (revealed) showVerifyFlash(apiId, imageURL, name, label);
     });
   }, [showVerifyFlash]);
-  useEffect(() => clearVerifyFlashTimers, [clearVerifyFlashTimers]); // drop timers on unmount
-  // hand the bubble wrapper to the scene, which writes its follow transform
-  const bindVerifyFlash = useCallback((el) => { peopleRef.current?.bindFlash?.(el); }, []);
+  // drop every timer on unmount
+  useEffect(() => () => {
+    verifyFlashTimers.current.forEach((hs) => hs.forEach(clearTimeout));
+    verifyFlashTimers.current.clear();
+  }, []);
 
   useEffect(() => {
     const es = new EventSource(`${USERS_API_URL}/events`);
@@ -844,11 +890,11 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
       publish();
       peopleRef.current?.reseedUsers?.(list);
       // every body on the floor is a new one, so nothing that pointed at a body
-      // survives: drop the follow, the selection and any armed face bubble
+      // survives: drop the follow, the selection and every armed face bubble
       setFollowedPerson(null);
       setSelectedPerson(null);
       setCardHidden(false);
-      closeVerifyFlash();
+      closeAllVerifyFlashes();
     });
     es.addEventListener('added', fwd((u) => peopleRef.current?.addUser?.(u)));
     es.addEventListener('updated', fwd((u) => peopleRef.current?.updateUser?.(u)));
@@ -888,7 +934,7 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
     es.addEventListener('walkAway', fwd((u) => peopleRef.current?.walkAwayUser?.(u.id)));
     es.addEventListener('shelfClose', fwd((u) => peopleRef.current?.shelfCloseUser?.(u.id)));
     return () => { clearTimeout(syncT); es.close(); };
-  }, [armScan, closeVerifyFlash]);
+  }, [armScan, closeAllVerifyFlashes]);
 
   // selected shelf (1–6) drives the stock filter; null = show all shelves.
   // Shelf and person focus are mutually exclusive: picking a shelf clears the
@@ -1205,25 +1251,12 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
               shelfName={shelfName}
             />
           )}
-          {/* verify-pass image bubble — floats above the shopper's head (scene
-              writes the follow transform onto the track); auto-fades after ~3s */}
-          {verifyFlash && (
-            <div className={`verify-flash-track${verifyFlashClosing ? ' closing' : ''}`} ref={bindVerifyFlash}>
-              <div className="verify-flash-bubble">
-                <img
-                  className="verify-flash-img"
-                  src={verifyFlash.imageURL}
-                  alt=""
-                  referrerPolicy="no-referrer"
-                  onError={closeVerifyFlash}
-                />
-                <div className="verify-flash-cap">
-                  {verifyFlash.name && <b>{verifyFlash.name}</b>}
-                  <span className="verify-flash-ok">{verifyFlash.label}</span>
-                </div>
-              </div>
-            </div>
-          )}
+          {/* verify-pass image bubbles — one per customer, each floating above
+              its own shopper's head (the scene writes the follow transform onto
+              each track); auto-fades after ~2s */}
+          {verifyFlashes.map((f) => (
+            <VerifyFlash key={f.apiId} flash={f} peopleRef={peopleRef} onClose={closeVerifyFlash} />
+          ))}
           {/* scan-verdict / pick / return cards — same head-projection track as
               the bubble above, one per API customer, scene-revealed */}
           <HeadCards cards={headCards} peopleRef={peopleRef} />
