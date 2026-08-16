@@ -1565,7 +1565,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   const FIRST_F = ['Emma', 'Olivia', 'Sophia', 'Ava', 'Isabella', 'Mia', 'Charlotte', 'Amelia'];
   const LAST = ['Carter', 'Wilson', 'Brown', 'Davis', 'Miller', 'Taylor', 'Anderson', 'Thomas', 'Martin', 'Walker'];
 
-  let rosterIdx = 0; // next unconsumed roster entry (from GET /users at boot)
   // walk-in custNos count from 500. This used to be Math.max(500, highest API
   // id) to keep the two number ranges apart — pointless now that API ids are
   // uuids (and actively harmful: Math.max over a uuid is NaN, which would put
@@ -1597,13 +1596,16 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     const last = LAST[(id * 7 + 3) % LAST.length]; // stride coprime with 10 → all 10 surnames cycle
     return { custNo: String(id).padStart(2, '0'), name: `${first} ${last}`, female };
   }
-  function nextIdentity() {
-    // only customers the API says are inside may be seeded onto the floor;
-    // outside/waiting ones arrive through enter, never as ambient fill
-    while (rosterIdx < users.length && users[rosterIdx].status && users[rosterIdx].status !== 'inside') rosterIdx++;
-    if (rosterIdx < users.length) return identFromUser(users[rosterIdx++]);
-    return genIdentity();
-  }
+  // who the roster puts on the floor with a body at boot (and at every reseed):
+  // anyone the API says is physically in the store. `waiting` arrives through
+  // enter instead, and `paying`/`outside` get no body at all.
+  // The seed loops iterate `users.filter(seedsOnFloor)` DIRECTLY — this used to
+  // be a count on one side and a cursor walking a slightly different predicate
+  // on the other, and the two drifted: every scanning/browsing user drained the
+  // cursor one entry early and the seed fell through to genIdentity(), minting
+  // an apiId-less phantom that reseedUsers then deliberately refuses to despawn.
+  const seedsOnFloor = (u) =>
+    !u.status || u.status === 'inside' || u.status === 'scanning' || u.status === 'browsing';
   // first + last word of the name (roster names are free text, may be one word)
   function initialsOf(name) {
     const w = name.trim().split(/\s+/);
@@ -2744,11 +2746,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
 
   // shared crowd target (random population size); Backdoor drives it via SSE.
   // Hard cap 5 — API users are uncapped and counted separately.
-  // Opening random crowd starts at 1 (independent of the API roster); the API
-  // is the source of truth and reconciles this via SSE, but boot to the same
-  // value so there's no 5→1 flash before the first crowd event lands.
+  // Opening random crowd is OFF (independent of the API roster); the API is the
+  // source of truth and reconciles this via SSE, but boot to the same value so
+  // there's no flash before the first crowd event lands — seeding 1 here and
+  // then hearing 0 would walk a stranger out the right door on every load.
   const CROWD_MAX = 5;
-  const CROWD_START = 1;
+  const CROWD_START = 0;
   let crowdTarget = CROWD_START;
   let booted = false; // true once the opening crowd is on the loop
 
@@ -2799,8 +2802,10 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     return { speed: 0.032 + Math.random() * 0.014, pauseMul: 1.0, pauseDurMul: 1.0, diceMul: 1.6 }; // browser
   }
 
-  function makeShopper(mode, identOverride, pc = frontPC) {
-    const ident = identOverride ?? nextIdentity();
+  // `ident` is always supplied by the caller: identFromUser for roster
+  // customers, genIdentity for the ambient randoms. There is no fallback —
+  // a missing identity used to silently become a phantom walk-in.
+  function makeShopper(mode, ident, pc = frontPC) {
     const persona = rollPersona();
     const h = makeHuman(nextCharFile(ident.female));
     // browse kit, disabled until a shelf visit: a hand-sized item (one of
@@ -2940,7 +2945,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   }
   // initial shoppers only: they were "already in the store" when the dashboard
   // opened, so they start scattered on the floor instead of walking in
-  function spawnOnFloor(identOverride, pc = frontPC) {
+  function spawnOnFloor(ident, pc = frontPC) {
     let spot = null;
     for (let tries = 0; tries < 30 && !spot; tries++) {
       const x = (Math.random() * 2 - 1) * ROAM_BOUND;
@@ -2949,7 +2954,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       if (shoppers.some((q) => Math.hypot(q.h.position.x - x, q.h.position.z - z) < 2)) continue;
       spot = { x, z };
     }
-    const p = makeShopper('roam', identOverride, pc);
+    const p = makeShopper('roam', ident, pc);
     if (spot) p.h.position.set(spot.x, 0, spot.z);
     p.h.rotation.y = Math.random() * Math.PI * 2;
     enterRoam(p);
@@ -3020,6 +3025,17 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     for (const p of shoppers) if (p.person?.apiId === apiId) return p;
     return null;
   }
+  // Index of a customer's roster row while they still have no body — or -1.
+  // Only meaningful inside the async boot window: `users` is fetched but the
+  // seed loop waits on charsReady, so SSE can land before a single body exists,
+  // and patching the roster there is what stops the seed from building someone
+  // the API has already removed or admitted. Once `booted`, every row that was
+  // going to get a body has one and the handlers MUST fall through to
+  // shopperByApiId to act on the body instead.
+  // (This was a `rosterIdx` cursor. It has to stay guarded either way: an
+  // unguarded scan makes apiRemoveUser return on the roster row and never fade
+  // the body, i.e. every seeded customer becomes undeletable.)
+  const unbornRosterIdx = (id) => (booted ? -1 : users.findIndex((u) => u.id === id));
   // enter that arrived while the same customer's old body was still animating
   // out (walk-out after pay, retreat after verify fail) parks here instead of
   // being dropped — dropping it wedged the user invisible: the API said
@@ -3043,9 +3059,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     pendingReenters.delete(id); // parked entry never materialises (old body, if any, fades below)
     const qi = pendingApiEntries.findIndex((i) => i.apiId === id);
     if (qi >= 0) { pendingApiEntries.splice(qi, 1); return; }
-    for (let i = rosterIdx; i < users.length; i++) {
-      if (users[i].id === id) { users.splice(i, 1); return; }
-    }
+    const ri = unbornRosterIdx(id);
+    if (ri >= 0) { users.splice(ri, 1); return; }
     const p = shopperByApiId(id);
     if (!p || p.fadeStart != null) return;
     p.fadeStart = elapsed;
@@ -3060,9 +3075,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     if (pend) pend.u = u; // parked entry spawns with the fresh identity; the old body below still refreshes too
     const q = pendingApiEntries.find((i) => i.apiId === u.id);
     if (q) { Object.assign(q, identFromUser(u)); return; }
-    for (let i = rosterIdx; i < users.length; i++) {
-      if (users[i].id === u.id) { users[i] = u; return; }
-    }
+    const ri = unbornRosterIdx(u.id);
+    if (ri >= 0) { users[ri] = u; return; }
     const p = shopperByApiId(u.id);
     if (!p || p.fadeStart != null) return;
     const e = p.person;
@@ -3095,9 +3109,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   function apiLeaveUser(id) {
     const qi = pendingApiEntries.findIndex((i) => i.apiId === id);
     if (qi >= 0) { pendingApiEntries.splice(qi, 1); return; } // never arrived
-    for (let i = rosterIdx; i < users.length; i++) {
-      if (users[i].id === id) { users.splice(i, 1); return; }
-    }
+    const ri = unbornRosterIdx(id);
+    if (ri >= 0) { users.splice(ri, 1); return; }
     const p = shopperByApiId(id);
     if (!p || p.fadeStart != null || p.done) return;
     snapToRoam(p);
@@ -3130,9 +3143,8 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // out the door: each spawn starts behind the current tail.
   function apiEnterUser(u) {
     if (shopperByApiId(u.id)) { pendingReenters.set(u.id, { u }); return; } // old body still leaving — respawn on despawn
-    for (let i = rosterIdx; i < users.length; i++) {
-      if (users[i].id === u.id) { users.splice(i, 1); break; } // no double life
-    }
+    const ri = unbornRosterIdx(u.id);
+    if (ri >= 0) users.splice(ri, 1); // no double life
     const queueLen = shoppers.filter((q) => q.mode === 'enter' && q.wp === 0).length;
     const p = makeShopper('enter', identFromUser(u));
     p.gateHold = true;
@@ -3186,7 +3198,6 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
   // crowdTarget — it is deliberately left walking.
   function reseedUsers(next) {
     users = next;
-    rosterIdx = 0;
     if (!booted) return; // nothing spawned yet; boot's seed block reads the fresh pool
     pendingApiEntries.length = 0; // queued arrivals belong to the old roster
     pendingReenters.clear();
@@ -3204,9 +3215,7 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
     // mid shelf-session seeds as a plain walker — the session's visuals can't be
     // reconstructed), `waiting` resumes the queue at the gate, and `paying` /
     // `outside` get no body at all, same as a restart.
-    const seedCount = users.filter((u) =>
-      !u.status || u.status === 'inside' || u.status === 'scanning' || u.status === 'browsing').length;
-    for (let i = 0; i < seedCount; i++) spawnOnFloor();
+    users.filter(seedsOnFloor).forEach((u) => spawnOnFloor(identFromUser(u)));
     users.filter((u) => u.status === 'waiting').forEach((u) => apiEnterUser(u));
   }
   // ---------- users API shelf sub-machine ----------
@@ -4671,11 +4680,12 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       charsReady.then(() => {
         // roster 'inside' users seed onto the loop as API customers… A user
         // caught mid shelf-session (scanning/browsing) seeds as a plain walker:
-        // the session's visuals can't be reconstructed, and the API's own timer
-        // still closes it (the shelfClose event then no-ops here harmlessly).
-        const seedCount = users.filter((u) =>
-          !u.status || u.status === 'inside' || u.status === 'scanning' || u.status === 'browsing').length;
-        for (let i = 0; i < seedCount; i++) spawnOnFloor();
+        // the session's visuals can't be reconstructed. They keep their real
+        // apiId, so shelfClose/walkAway/scanQR/inspectItem now reach them — all
+        // four guard on `p.shelfHold`, which a plain-walker seed leaves false,
+        // so those still no-op. walkToShelf has no such guard and shouldn't:
+        // a fresh command must be able to send them to a shelf.
+        users.filter(seedsOnFloor).forEach((u) => spawnOnFloor(identFromUser(u)));
         // …then the opening random crowd (auto, right-door population)
         for (let i = 0; i < crowdTarget; i++) spawnOnFloor(genIdentity(), rightPC);
         booted = true; // future target changes now reconcile through the doors
@@ -5471,10 +5481,22 @@ export function createSmartStoreBabylonScene(container, { onSelectShelf, onSelec
       // total = the random (ambient) head-count only — API users are commanded,
       // not part of the crowd meter. api = how many roster customers are on the
       // floor. walking/browsing span everyone physically in the store.
+      // randomRows is deliberately NOT total: randomLive() drops anyone already
+      // flagged exit/retreat/fading (they no longer count against the target)
+      // while they are still very much on screen and still listed as customers.
+      // The dashboard hides its RANDOM chip on this one so the chip and the
+      // per-row AUTO badge disappear together, instead of the chip going first
+      // and leaving an unlabelled body walking to the door for ~15s.
       counts: () => {
         const browsing = shoppers.filter((s) => s.mode === 'browse').length;
         const api = shoppers.filter((s) => s.person?.apiId != null).length;
-        return { total: randomLive(), api, browsing, walking: shoppers.length - browsing };
+        return {
+          total: randomLive(),
+          randomRows: shoppers.filter(isRandom).length,
+          api,
+          browsing,
+          walking: shoppers.length - browsing,
+        };
       },
       // person selection: React pushes the id in, polls live card data out,
       // and hands over the card element for the per-frame follow transform.

@@ -427,6 +427,13 @@ function CustomersCard({ peopleRef, crowd, outsideUsers, selectedPerson, onSelec
   // for the same person never shows alongside it.
   const liveApiIds = new Set(list.map((p) => p.apiId).filter((v) => v != null));
   const shownOutside = outside.filter((u) => !liveApiIds.has(u.id));
+  // The API/AUTO badge only earns its space when both populations are on the
+  // floor. Randoms are off by default (CROWD_START = 0), so normally every row
+  // is an API customer and the badge says the same thing on every line; it
+  // comes back the moment someone summons randoms from the Backdoor stepper.
+  // Read off the rendered rows so it flips in step with the RANDOM chip, which
+  // watches the matching `randomRows` count.
+  const showTypeTag = list.some((p) => !p.api);
 
   return (
     <section className="card">
@@ -456,7 +463,9 @@ function CustomersCard({ peopleRef, crowd, outsideUsers, selectedPerson, onSelec
                       {p.name}
                     </span>
                     {followedPerson === p.id && <span className="cust-follow" title="Camera is following">🎥</span>}
-                    <span className={`cust-tag ${p.api ? 'api' : 'random'}`}>{p.api ? 'API' : 'AUTO'}</span>
+                    {showTypeTag && (
+                      <span className={`cust-tag ${p.api ? 'api' : 'random'}`}>{p.api ? 'API' : 'AUTO'}</span>
+                    )}
                     <span className={`cust-pill ${p.status}`}>{PERSON_STATUS[p.status]}</span>
                   </div>
                   <div className="cust-sub">
@@ -477,7 +486,7 @@ function CustomersCard({ peopleRef, crowd, outsideUsers, selectedPerson, onSelec
                 <div className="cust-main">
                   <div className="cust-top">
                     <span className="cust-name">{u.name}</span>
-                    <span className="cust-tag api">API</span>
+                    {showTypeTag && <span className="cust-tag api">API</span>}
                     <span className="cust-pill exited">Exited</span>
                   </div>
                   <div className="cust-sub">{u.email}</div>
@@ -1322,9 +1331,16 @@ export default function Dashboard({ sceneFactory = createSmartStoreBabylonScene,
             {crowd && (
               <>
                 {/* read-only meters — random crowd is driven from the Backdoor,
-                    API customers from the users API */}
+                    API customers from the users API. The random crowd is off by
+                    default (CROWD_START = 0), so its chip only appears once
+                    someone actually summons randoms from the Backdoor stepper.
+                    Gated on randomRows, not total: total stops counting a
+                    random the moment they're flagged for the door, and the chip
+                    must outlive that so it disappears with the AUTO badges. */}
                 <div className="crowd-meter">
-                  <span className="cm-chip random">RANDOM {crowd.total}<em>/{crowd.maxTotal}</em></span>
+                  {crowd.randomRows > 0 && (
+                    <span className="cm-chip random">RANDOM {crowd.total}<em>/{crowd.maxTotal}</em></span>
+                  )}
                   <span className="cm-chip api">API {crowd.api ?? 0}</span>
                 </div>
                 <span className="fc-label crowd-label">
